@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
-
 JOINT_NAMES: list[str] = [
     "base_yaw",
     "base_pitch",

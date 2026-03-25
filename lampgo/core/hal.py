@@ -7,13 +7,12 @@ GPL-3.0. Low-level Feetech transport is provided by lerobot.
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
 import structlog
 
-from lampgo.core.config import DeviceConfig, MotorConfig
+from lampgo.core.config import DeviceConfig
 from lampgo.core.types import DeviceHealth, JointState
 
 logger = structlog.get_logger(__name__)
@@ -201,7 +200,6 @@ class HardwareAbstraction:
                 self._bus.write("D_Coefficient", motor, 32)
 
     def _calibration_path(self) -> Any:
-        from pathlib import Path
 
         return self._config.calibration_dir / f"{self._config.lamp_id}.json"
 

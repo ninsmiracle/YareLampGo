@@ -5,6 +5,7 @@ dist/
 build/
 .venv/
 .env
+lampgo.toml
 *.log
 .ruff_cache/
 .pytest_cache/

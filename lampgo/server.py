@@ -1,24 +1,40 @@
-"""Main entry point — creates all components and runs the asyncio loop."""
+"""Main entry point — creates all components and runs the asyncio loop.
+
+The server owns:
+  - Hardware (HAL, LED, Motion, Safety)
+  - Skill system (Registry, Executor, FSM)
+  - IPC server (Unix socket for CLI / OpenClaw / scripts)
+  - IntentRouter (keyword + optional fast LLM)
+"""
 
 from __future__ import annotations
 
 import asyncio
 import signal
 from pathlib import Path
+from typing import Any
 
 import structlog
 
+from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.core.config import LampgoConfig
 from lampgo.core.events import EventBus
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
-from lampgo.core.types import JointState
-from lampgo.bridge.openclaw import OpenClawAdapter
+from lampgo.ipc import IPCServer
+from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.expression_skills import SetExpressionSkill
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
+from lampgo.skills.builtin.parametric_skills import (
+    DanceSkill,
+    HeadShakeSkill,
+    IdleSwaySkill,
+    LookAtSkill,
+    NodSkill,
+)
 from lampgo.skills.builtin.playback_skills import PlayRecordingSkill
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.fsm import StateMachine
@@ -41,6 +57,9 @@ class LampgoServer:
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
         self.openclaw = OpenClawAdapter(self.registry, self.executor)
+        self.router = IntentRouter()
+        self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
+        self._voice_task: asyncio.Task | None = None
 
     def _register_builtin_skills(self) -> None:
         recordings_dir = Path(self.config.recordings_dir)
@@ -49,6 +68,11 @@ class LampgoServer:
         self.registry.register(EStopSkill())
         self.registry.register(PlayRecordingSkill(recordings_dir))
         self.registry.register(SetExpressionSkill())
+        self.registry.register(NodSkill())
+        self.registry.register(HeadShakeSkill())
+        self.registry.register(LookAtSkill())
+        self.registry.register(IdleSwaySkill())
+        self.registry.register(DanceSkill())
 
     def make_context(self) -> SkillContext:
         return SkillContext(
@@ -58,20 +82,158 @@ class LampgoServer:
             state=self.motion.current_state,
         )
 
+    async def handle_request(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Route an IPC request to the appropriate handler."""
+        cmd = data.get("cmd", "")
+
+        if cmd == "ping":
+            return {"ok": True, "result": "pong"}
+
+        if cmd == "invoke":
+            return await self._handle_invoke(data)
+
+        if cmd == "text":
+            return await self._handle_text(data)
+
+        if cmd == "status":
+            return self._handle_status()
+
+        if cmd == "skills":
+            return self._handle_skills()
+
+        if cmd == "cancel":
+            await self.executor.cancel_current()
+            return {"ok": True, "result": {"status": "cancelled"}}
+
+        if cmd == "estop":
+            self.safety.estop("IPC estop command")
+            self.motion.stop_immediate()
+            return {"ok": True, "result": {"status": "estopped"}}
+
+        return {"ok": False, "error": f"unknown command: {cmd}"}
+
+    async def _handle_invoke(self, data: dict) -> dict:
+        skill_id = data.get("skill_id", "")
+        params = data.get("params", {})
+        ctx = self.make_context()
+        result = await self.executor.invoke(skill_id, ctx, **params)
+        return {
+            "ok": result.status in ("ok", "cancelled"),
+            "result": {
+                "invocation_id": result.invocation_id,
+                "status": result.status,
+                "data": result.result,
+                "error": result.error_detail,
+            },
+        }
+
+    async def _handle_text(self, data: dict) -> dict:
+        """Route free text through the IntentRouter, then invoke or reply."""
+        text = data.get("input", "").strip()
+        if not text:
+            return {"ok": False, "error": "empty input"}
+
+        intent = await self.router.aroute(text)
+
+        if intent.intent_type == IntentType.CHAT:
+            return {"ok": True, "result": {"type": "chat", "response": intent.chat_response}}
+
+        if intent.intent_type == IntentType.SKILL and intent.skill_id:
+            ctx = self.make_context()
+            params = intent.params or {}
+            result = await self.executor.invoke(intent.skill_id, ctx, **params)
+            return {
+                "ok": result.status in ("ok", "cancelled"),
+                "result": {
+                    "type": "skill",
+                    "skill_id": intent.skill_id,
+                    "invocation_id": result.invocation_id,
+                    "status": result.status,
+                    "data": result.result,
+                    "chat_response": intent.chat_response,
+                },
+            }
+
+        return {
+            "ok": True,
+            "result": {
+                "type": "complex",
+                "response": "This request is too complex for the fast path. Please use OpenClaw.",
+                "original_text": text,
+            },
+        }
+
+    def _handle_status(self) -> dict:
+        positions = self.motion.current_state.positions
+        return {
+            "ok": True,
+            "result": {
+                "running_skill": self.executor.current_skill_id,
+                "is_busy": self.executor.is_busy,
+                "joint_positions": positions,
+                "device_health": self.hal.read_health().value,
+                "estopped": self.safety.is_estopped,
+                "estop_reason": self.safety.last_estop_reason,
+            },
+        }
+
+    def _handle_skills(self) -> dict:
+        skills = []
+        for skill in self.registry.list_skills():
+            skills.append({
+                "skill_id": skill.skill_id,
+                "description": skill.description,
+                "parameters": {
+                    name: {
+                        "type": spec.type,
+                        "description": spec.description,
+                        "required": spec.required,
+                        "default": spec.default,
+                    }
+                    for name, spec in skill.parameters.items()
+                },
+            })
+        return {"ok": True, "result": {"skills": skills}}
+
     async def start(self) -> None:
         logger.info("server.starting")
         self.hal.connect()
         self.led.connect()
         self.motion.start()
         self._register_builtin_skills()
+        await self._ipc.start()
+        self._setup_llm_router()
         logger.info(
             "server.ready",
             skills=self.registry.list_ids(),
             motor_port=self.config.device.motor_port,
+            socket=self.config.socket_path,
         )
+
+    def _setup_llm_router(self) -> None:
+        """Wire the LLM client into the IntentRouter if an API key is configured."""
+        if not self.config.llm.api_key:
+            logger.info("server.llm_router_disabled (no API key)")
+            return
+        try:
+            from lampgo.perception.llm_client import LLMClient
+
+            skill_specs = self._handle_skills()["result"]["skills"]
+            client = LLMClient(self.config.llm, skill_specs)
+            self.router.set_llm_client(client)
+            logger.info("server.llm_router_enabled", model=self.config.llm.fast_model)
+        except Exception:
+            logger.exception("server.llm_router_setup_failed")
 
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
+        if self._voice_task is not None:
+            self._voice_task.cancel()
+            try:
+                await self._voice_task
+            except asyncio.CancelledError:
+                pass
+        await self._ipc.stop()
         self.motion.stop()
         self.led.off()
         self.led.disconnect()
@@ -80,6 +242,8 @@ class LampgoServer:
 
     async def run_forever(self) -> None:
         await self.start()
+        if self.config.voice_enabled:
+            self._start_voice_loop()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -87,6 +251,16 @@ class LampgoServer:
         logger.info("server.running (Ctrl+C to stop)")
         await stop.wait()
         await self.shutdown()
+
+    def _start_voice_loop(self) -> None:
+        try:
+            from lampgo.voice.loop import VoiceLoop
+
+            self._voice = VoiceLoop(self)
+            self._voice_task = asyncio.create_task(self._voice.run())
+            logger.info("server.voice_loop_started")
+        except Exception:
+            logger.exception("server.voice_loop_failed")
 
 
 async def run_server(config: LampgoConfig) -> None:
