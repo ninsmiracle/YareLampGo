@@ -1,12 +1,11 @@
 """Tests for skill registry and executor."""
 
-import asyncio
 
 import pytest
 
 from lampgo.core.config import MotionConfig, SafetyConfig
 from lampgo.core.events import EventBus
-from lampgo.core.led import LEDController, LEDConfig
+from lampgo.core.led import LEDConfig, LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.types import SkillResult

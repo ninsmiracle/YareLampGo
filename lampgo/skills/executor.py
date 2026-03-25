@@ -57,7 +57,7 @@ class SkillExecutor:
                 skill.execute(ctx, **params),
                 timeout=300.0,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result = SkillResult(status="error", message="timeout")
         except asyncio.CancelledError:
             result = SkillResult(status="cancelled", message="pre-empted")

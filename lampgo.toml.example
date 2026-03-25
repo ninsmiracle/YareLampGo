@@ -1,0 +1,38 @@
+# lampgo 配置文件
+# 复制为 lampgo.toml 并修改为你的实际设备参数
+# 配置优先级: CLI参数 > 环境变量 > .env文件 > lampgo.toml > 内置默认值
+
+[device]
+motor_port = "/dev/ttyUSB0"    # Feetech 电机总线串口 (必填，你的设备可能不同)
+led_port = "/dev/ttyUSB1"      # ESP32 LED 控制器串口 (留空 = 禁用)
+lamp_id = "AL01"               # 设备标识，用于校准文件查找
+use_degrees = true             # true = 角度模式, false = 归一化 -100~100
+
+[motion]
+tick_rate_hz = 50.0            # 控制循环频率 (Hz)
+default_max_velocity = 120.0   # 默认最大速度 (度/秒)
+default_max_acceleration = 600.0  # 默认最大加速度 (度/秒²)
+
+[safety]
+max_velocity = 180.0           # 安全速度硬上限 (度/秒)
+max_acceleration = 900.0       # 安全加速度硬上限 (度/秒²)
+
+[led]
+port = ""                      # 与 device.led_port 相同，留空禁用
+baud_rate = 9600
+
+[llm]
+provider = "openai"            # LLM 提供商: openai, anthropic, gemini, local
+model = "gpt-4o-mini"          # 复杂推理任务模型
+fast_model = "gpt-4o-mini"     # 快速意图分类模型
+# api_key 不要写在这里！请用 .env 文件或环境变量 LAMPGO_LLM_API_KEY
+api_base = ""                  # 自定义 API 地址 (本地/代理模型)
+temperature = 0.3
+max_tokens = 512
+
+[voice]
+stt_provider = ""              # 语音转文字: whisper, azure, local (留空 = 禁用)
+tts_provider = ""              # 文字转语音: edge-tts, azure, local (留空 = 禁用)
+tts_voice = "zh-CN-XiaoxiaoNeural"
+wake_word = ""                 # 唤醒词 (留空 = 禁用)
+vad_enabled = false            # 语音活动检测

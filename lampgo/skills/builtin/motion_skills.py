@@ -25,7 +25,7 @@ class MoveToSkill(Skill):
         "base_pitch": ParameterSpec(name="base_pitch", type="float", required=False, description="Target pitch"),
         "elbow_pitch": ParameterSpec(name="elbow_pitch", type="float", required=False, description="Target elbow"),
         "wrist_roll": ParameterSpec(name="wrist_roll", type="float", required=False, description="Target wrist roll"),
-        "wrist_pitch": ParameterSpec(name="wrist_pitch", type="float", required=False, description="Target wrist pitch"),
+        "wrist_pitch": ParameterSpec(name="wrist_pitch", type="float", required=False, description="Wrist pitch"),
         "velocity": ParameterSpec(name="velocity", type="float", required=False, description="Max velocity deg/s"),
     }
 
