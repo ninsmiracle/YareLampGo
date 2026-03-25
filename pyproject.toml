@@ -1,0 +1,54 @@
+[project]
+name = "lampgo"
+version = "0.1.0"
+description = "Desktop embodied intelligent lamp robot runtime — clean, safe, OpenClaw-ready."
+readme = "README.md"
+authors = [
+    { name = "guoningshen", email = "guoningshen@mimo.com" },
+]
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "pydantic>=2.0",
+    "structlog>=24.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+perception = [
+    "opencv-python>=4.8",
+]
+bridge = [
+    "pyautogui>=0.9",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+lampgo = "lampgo.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
