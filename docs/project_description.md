@@ -25,7 +25,7 @@
 | 内置运动技能 | **可用** | move_to, return_safe, estop, nod, headshake, look_at, idle_sway, dance |
 | CSV 动作回放 | **可用** | 37 个预录动作文件 |
 | LED 表情技能 | **可用** | set_expression (30 种) |
-| CLI | **可用** | run, move, play, skills, invoke, text, status, detect, estop, calibrate, record |
+| CLI | **可用** | run, move, play, skills, invoke, text, status, detect, estop, calibrate, record, clear, help |
 | 配置系统 | **可用** | lampgo.toml + .env + 环境变量 + CLI 参数优先级链 |
 | 示教录制 | **可用** | record 子命令，轨迹平滑和压缩 |
 | **IPC 守护进程** | **可用** | Unix Socket JSON 协议，<100ms 延迟 |
@@ -75,6 +75,8 @@ uv run pytest -xvs
 uv run lampgo detect
 ```
 
+`lampgo calibrate` 在未传 `--port` 且未配置 `LAMPGO_MOTOR_PORT` 时，会自动复用上述探测逻辑选择电机端口；仅在自动探测也失败时才报错。
+
 预期输出:
 ```json
 {
@@ -118,6 +120,9 @@ uv run lampgo text "跳个舞"
 
 # 急停
 uv run lampgo estop
+
+# 一键清理（停止相关进程 + 释放扭矩）
+uv run lampgo clear
 ```
 
 ### 验证 5: 技能列表

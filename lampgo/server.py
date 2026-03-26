@@ -115,17 +115,31 @@ class LampgoServer:
     async def _handle_invoke(self, data: dict) -> dict:
         skill_id = data.get("skill_id", "")
         params = data.get("params", {})
+
+        skill = self.registry.get(skill_id)
+        if skill is None:
+            return {"ok": False, "error": f"Skill '{skill_id}' not registered"}
+
+        wait = data.get("wait", False)
         ctx = self.make_context()
-        result = await self.executor.invoke(skill_id, ctx, **params)
-        return {
-            "ok": result.status in ("ok", "cancelled"),
-            "result": {
-                "invocation_id": result.invocation_id,
-                "status": result.status,
-                "data": result.result,
-                "error": result.error_detail,
-            },
-        }
+
+        if wait:
+            result = await self.executor.invoke(skill_id, ctx, **params)
+            return {
+                "ok": result.status in ("ok", "cancelled"),
+                "result": {
+                    "invocation_id": result.invocation_id,
+                    "status": result.status,
+                    "data": result.result,
+                    "error": result.error_detail,
+                },
+            }
+
+        async def _bg():
+            await self.executor.invoke(skill_id, ctx, **params)
+
+        asyncio.ensure_future(_bg())
+        return {"ok": True, "result": {"status": "accepted", "skill_id": skill_id}}
 
     async def _handle_text(self, data: dict) -> dict:
         """Route free text through the IntentRouter, then invoke or reply."""
@@ -165,14 +179,17 @@ class LampgoServer:
 
     def _handle_status(self) -> dict:
         positions = self.motion.current_state.positions
+        health = "ok" if not self.safety.is_estopped() else "degraded"
+        if not self.hal.is_connected:
+            health = "disconnected"
         return {
             "ok": True,
             "result": {
                 "running_skill": self.executor.current_skill_id,
                 "is_busy": self.executor.is_busy,
                 "joint_positions": positions,
-                "device_health": self.hal.read_health().value,
-                "estopped": self.safety.is_estopped,
+                "device_health": health,
+                "estopped": self.safety.is_estopped(),
                 "estop_reason": self.safety.last_estop_reason,
             },
         }
@@ -200,7 +217,15 @@ class LampgoServer:
         self.hal.connect()
         self.led.connect()
         self.motion.start()
+
+        home = self.hal.get_calibration_home()
+        if home is not None:
+            from lampgo.skills.builtin.motion_skills import set_calibration_home
+            set_calibration_home(home)
+
         self._register_builtin_skills()
+        if self.config.home_on_start:
+            await self._home_on_start()
         await self._ipc.start()
         self._setup_llm_router()
         logger.info(
@@ -209,6 +234,26 @@ class LampgoServer:
             motor_port=self.config.device.motor_port,
             socket=self.config.socket_path,
         )
+
+    async def _home_on_start(self) -> None:
+        """Slowly return to calibration midpoint on startup."""
+        from lampgo.skills.builtin.motion_skills import STARTUP_HOME_VELOCITY
+
+        home = self.hal.get_calibration_home()
+        if home is None:
+            logger.warning("server.homing_skipped (no calibration)")
+            return
+
+        logger.info("server.homing", velocity=STARTUP_HOME_VELOCITY, target=home)
+        try:
+            ctx = self.make_context()
+            result = await self.executor.invoke("move_to", ctx, velocity=STARTUP_HOME_VELOCITY, **home)
+            if result.status == "ok":
+                logger.info("server.homed")
+            else:
+                logger.warning("server.homing_failed", status=result.status, error=result.error_detail)
+        except Exception:
+            logger.exception("server.homing_error")
 
     def _setup_llm_router(self) -> None:
         """Wire the LLM client into the IntentRouter if an API key is configured."""
@@ -225,6 +270,15 @@ class LampgoServer:
         except Exception:
             logger.exception("server.llm_router_setup_failed")
 
+    async def _run_blocking_shutdown_step(self, name: str, fn, timeout_s: float = 2.0) -> None:
+        """Run a potentially blocking shutdown step with timeout guard."""
+        try:
+            await asyncio.wait_for(asyncio.to_thread(fn), timeout=timeout_s)
+        except TimeoutError:
+            logger.error("server.shutdown_step_timeout", step=name, timeout_s=timeout_s)
+        except Exception:
+            logger.exception("server.shutdown_step_failed", step=name)
+
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
         if self._voice_task is not None:
@@ -235,9 +289,9 @@ class LampgoServer:
                 pass
         await self._ipc.stop()
         self.motion.stop()
-        self.led.off()
-        self.led.disconnect()
-        self.hal.disconnect()
+        await self._run_blocking_shutdown_step("led.off", self.led.off)
+        await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)
+        await self._run_blocking_shutdown_step("hal.disconnect", self.hal.disconnect, timeout_s=3.0)
         logger.info("server.stopped")
 
     async def run_forever(self) -> None:

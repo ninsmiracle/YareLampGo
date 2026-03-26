@@ -126,6 +126,7 @@ class LampgoConfig(BaseModel):
     recordings_dir: Path = Field(default=Path("assets/recordings"))
     socket_path: str = Field(default="/tmp/lampgo.sock", description="Unix socket path for IPC")
     voice_enabled: bool = Field(default=False, description="Enable voice loop on startup")
+    home_on_start: bool = Field(default=True, description="Slowly return to safe position on startup")
 
 
 def _find_project_root() -> Path:

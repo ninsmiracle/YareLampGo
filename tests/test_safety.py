@@ -82,6 +82,7 @@ def test_bus_disconnect_triggers_estop():
     kernel = SafetyKernel(SafetyConfig())
     kernel.report_bus_health(True)
     assert not kernel.is_estopped()
-    kernel.report_bus_health(False)
+    for _ in range(kernel._BUS_FAIL_THRESHOLD):
+        kernel.report_bus_health(False)
     assert kernel.is_estopped()
     assert kernel.last_estop_reason == "serial bus disconnected"

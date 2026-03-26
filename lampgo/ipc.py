@@ -19,6 +19,7 @@ Response format:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -31,10 +32,31 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 DEFAULT_SOCKET_PATH = "/tmp/lampgo.sock"
+DARWIN_SUN_PATH_MAX = 103
+LINUX_SUN_PATH_MAX = 107
 
 
 def _get_socket_path() -> str:
     return os.environ.get("LAMPGO_SOCKET", DEFAULT_SOCKET_PATH)
+
+
+def _max_unix_socket_path_len() -> int:
+    """Return a conservative AF_UNIX path length per platform."""
+    if os.name != "posix":
+        return LINUX_SUN_PATH_MAX
+    if hasattr(os, "uname") and os.uname().sysname == "Darwin":
+        return DARWIN_SUN_PATH_MAX
+    return LINUX_SUN_PATH_MAX
+
+
+def _normalize_socket_path(path: str) -> str:
+    """Map long Unix socket paths to a deterministic short /tmp path."""
+    if len(path.encode()) <= _max_unix_socket_path_len():
+        return path
+    digest = hashlib.sha1(path.encode()).hexdigest()[:16]
+    fallback = f"/tmp/lampgo-{digest}.sock"
+    logger.warning("ipc.socket_path_too_long", original=path, fallback=fallback)
+    return fallback
 
 
 class IPCServer:
@@ -46,8 +68,14 @@ class IPCServer:
         socket_path: str | None = None,
     ) -> None:
         self._handler = handler
-        self._socket_path = socket_path or _get_socket_path()
+        raw_socket_path = socket_path or _get_socket_path()
+        self._socket_path = _normalize_socket_path(raw_socket_path)
         self._server: asyncio.AbstractServer | None = None
+
+    @property
+    def socket_path(self) -> str:
+        """Actual socket path after normalization."""
+        return self._socket_path
 
     async def start(self) -> None:
         path = Path(self._socket_path)
@@ -67,6 +95,16 @@ class IPCServer:
             path.unlink()
         logger.info("ipc.stopped")
 
+    async def _write_json(self, writer: asyncio.StreamWriter, payload: dict[str, Any]) -> bool:
+        """Write one JSON line; ignore disconnects from short-lived clients."""
+        try:
+            writer.write(json.dumps(payload).encode() + b"\n")
+            await writer.drain()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug("ipc.client_disconnected")
+            return False
+
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
@@ -74,19 +112,17 @@ class IPCServer:
                 return
             request = json.loads(raw.decode())
             response = await self._handler(request)
-            writer.write(json.dumps(response).encode() + b"\n")
-            await writer.drain()
+            await self._write_json(writer, response)
         except TimeoutError:
-            writer.write(json.dumps({"ok": False, "error": "timeout"}).encode() + b"\n")
-            await writer.drain()
+            await self._write_json(writer, {"ok": False, "error": "timeout"})
         except json.JSONDecodeError as e:
-            writer.write(json.dumps({"ok": False, "error": f"invalid json: {e}"}).encode() + b"\n")
-            await writer.drain()
+            await self._write_json(writer, {"ok": False, "error": f"invalid json: {e}"})
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug("ipc.client_disconnected")
         except Exception:
             logger.exception("ipc.handler_error")
             try:
-                writer.write(json.dumps({"ok": False, "error": "internal error"}).encode() + b"\n")
-                await writer.drain()
+                await self._write_json(writer, {"ok": False, "error": "internal error"})
             except Exception:
                 pass
         finally:
@@ -102,7 +138,8 @@ def ipc_send(request: dict[str, Any], socket_path: str | None = None, timeout: f
 
     Raises ConnectionRefusedError if daemon is not running.
     """
-    path = socket_path or _get_socket_path()
+    raw_path = socket_path or _get_socket_path()
+    path = _normalize_socket_path(raw_path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
@@ -123,7 +160,8 @@ def ipc_send(request: dict[str, Any], socket_path: str | None = None, timeout: f
 
 def is_daemon_running(socket_path: str | None = None) -> bool:
     """Check if a daemon is listening on the socket."""
-    path = socket_path or _get_socket_path()
+    raw_path = socket_path or _get_socket_path()
+    path = _normalize_socket_path(raw_path)
     if not Path(path).exists():
         return False
     try:
