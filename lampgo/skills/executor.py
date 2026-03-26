@@ -58,8 +58,11 @@ class SkillExecutor:
                 timeout=300.0,
             )
         except TimeoutError:
+            logger.error("executor.timeout", skill_id=skill_id)
             result = SkillResult(status="error", message="timeout")
         except asyncio.CancelledError:
+            import traceback
+            logger.error("executor.cancelled", skill_id=skill_id, tb=traceback.format_exc())
             result = SkillResult(status="cancelled", message="pre-empted")
         except Exception as e:
             logger.exception("executor.skill_error", skill_id=skill_id)

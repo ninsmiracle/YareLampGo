@@ -18,12 +18,15 @@ logger = structlog.get_logger(__name__)
 
 
 class SafetyKernel:
+    _BUS_FAIL_THRESHOLD = 5
+
     def __init__(self, config: SafetyConfig) -> None:
         self._config = config
         self._estopped = False
         self._estop_reason: str | None = None
         self._estop_time: float | None = None
         self._bus_healthy = True
+        self._consecutive_bus_failures = 0
 
     # ------------------------------------------------------------------
     # Target-level validation (before motion planning)
@@ -123,6 +126,19 @@ class SafetyKernel:
     # ------------------------------------------------------------------
 
     def report_bus_health(self, connected: bool) -> None:
-        if self._bus_healthy and not connected:
-            self.estop(reason="serial bus disconnected")
+        if connected:
+            if self._consecutive_bus_failures > 0:
+                logger.debug("safety.bus_recovered", after_failures=self._consecutive_bus_failures)
+            self._consecutive_bus_failures = 0
+            if self._estopped and self._estop_reason == "serial bus disconnected":
+                self.reset_estop()
+                logger.info("safety.auto_reset_estop", reason="bus recovered")
+        else:
+            self._consecutive_bus_failures += 1
+            if self._consecutive_bus_failures >= self._BUS_FAIL_THRESHOLD and not self._estopped:
+                self.estop(reason="serial bus disconnected")
+                logger.error(
+                    "safety.bus_estop",
+                    consecutive_failures=self._consecutive_bus_failures,
+                )
         self._bus_healthy = connected

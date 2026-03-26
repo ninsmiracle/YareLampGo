@@ -67,6 +67,7 @@ class MotionRuntime:
 
         # Per-joint velocity state for trapezoidal profile
         self._joint_velocities: dict[str, float] = {}
+        self._planned_positions: dict[str, float] = {}
 
         self._running = False
         self._thread: threading.Thread | None = None
@@ -154,6 +155,7 @@ class MotionRuntime:
         _stream_idx = 0
         _stream_fps = 30
         _stream_accumulator = 0.0
+        _diag_counter = 0
 
         while self._running:
             t0 = time.monotonic()
@@ -175,6 +177,7 @@ class MotionRuntime:
                 elif cmd.type == _CommandType.STOP_IMMEDIATE:
                     self._current_target = None
                     self._joint_velocities.clear()
+                    self._planned_positions.clear()
                     _stream_frames = []
                     if _active_done:
                         _active_done.set()
@@ -189,13 +192,15 @@ class MotionRuntime:
                     validated = self._safety.validate_target(self._current_state, cmd.target)
                     if isinstance(validated, MotionTarget):
                         self._current_target = validated
+                        self._planned_positions = dict(self._current_state.positions)
                         _stream_frames = []
                         if _active_done:
                             _active_done.set()
                         _active_done = cmd.done_event
                         self._status = MotionStatus(target=validated, progress=0.0, is_done=False)
+                        logger.info("motion.move_accepted", target=validated.joints, vel=validated.max_velocity)
                     else:
-                        logger.warning("motion.target_rejected", reason=validated.reason)
+                        logger.warning("motion.target_rejected", reason=getattr(validated, 'reason', ''))
                         if cmd.done_event:
                             cmd.done_event.set()
 
@@ -255,7 +260,9 @@ class MotionRuntime:
                 if all_done:
                     self._current_target = None
                     self._joint_velocities.clear()
+                    self._planned_positions.clear()
                     self._status = MotionStatus(progress=1.0, is_done=True)
+                    logger.info("motion.move_done")
                     if _active_done:
                         _active_done.set()
                         _active_done = None
@@ -282,6 +289,17 @@ class MotionRuntime:
                     self._safety.report_bus_health(False)
                     logger.exception("motion.write_failed")
 
+            _diag_counter += 1
+            if _diag_counter % 250 == 0 and self._current_target is not None:
+                logger.info(
+                    "motion.diag",
+                    pos={k: round(v, 1) for k, v in self._current_state.positions.items()},
+                    target={k: round(v, 1) for k, v in self._current_target.joints.items()},
+                    wrote=({k: round(v, 1) for k, v in safe_frame.items()} if next_frame else None),
+                    progress=round(self._status.progress, 3),
+                    estopped=self._safety.is_estopped(),
+                )
+
             self._tick_sleep(t0)
 
         logger.info("motion.control_loop.exit")
@@ -291,38 +309,43 @@ class MotionRuntime:
     # ------------------------------------------------------------------
 
     def _trapezoidal_step(self, target: MotionTarget, dt: float) -> dict[str, float]:
-        """Compute the next frame for each joint using trapezoidal velocity."""
+        """Compute the next frame for each joint using trapezoidal velocity.
+
+        Uses planned positions (not hardware feedback) so the trajectory
+        advances every tick regardless of servo response latency.
+        Hardware feedback is still used by SafetyKernel.validate_frame().
+        """
         max_vel = target.max_velocity or self._config.default_max_velocity
         max_acc = target.max_acceleration or self._config.default_max_acceleration
         result: dict[str, float] = {}
 
         for joint, target_pos in target.joints.items():
-            current_pos = self._current_state.get(joint, target_pos)
+            current_pos = self._planned_positions.get(
+                joint, self._current_state.get(joint, target_pos)
+            )
             current_vel = self._joint_velocities.get(joint, 0.0)
 
             error = target_pos - current_pos
             distance = abs(error)
             direction = 1.0 if error > 0 else (-1.0 if error < 0 else 0.0)
 
-            # Stopping distance at current velocity: v^2 / (2 * a)
             stopping_dist = (current_vel ** 2) / (2.0 * max_acc) if max_acc > 0 else 0.0
 
             if distance < 0.1:
-                # Close enough — snap and zero velocity
                 result[joint] = target_pos
                 self._joint_velocities[joint] = 0.0
+                self._planned_positions[joint] = target_pos
                 continue
 
             if stopping_dist >= distance:
-                # Deceleration phase
                 desired_vel = max(0.0, abs(current_vel) - max_acc * dt)
             else:
-                # Acceleration / cruise phase
                 desired_vel = min(max_vel, abs(current_vel) + max_acc * dt)
 
             desired_vel = min(desired_vel, max_vel)
             new_pos = current_pos + direction * desired_vel * dt
             self._joint_velocities[joint] = desired_vel
+            self._planned_positions[joint] = new_pos
 
             result[joint] = new_pos
 

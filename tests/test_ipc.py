@@ -69,7 +69,7 @@ async def test_ipc_server_handles_invalid_json(tmp_path):
         def _send_bad():
             sock = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
             sock.settimeout(5)
-            sock.connect(sock_path)
+            sock.connect(server.socket_path)
             sock.sendall(b"not json\n")
             buf = b""
             while True:
@@ -86,5 +86,24 @@ async def test_ipc_server_handles_invalid_json(tmp_path):
         result = await loop.run_in_executor(None, _send_bad)
         assert result["ok"] is False
         assert "invalid json" in result["error"]
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_ipc_roundtrip_with_long_unix_path(tmp_path):
+    """Long Unix socket paths should be normalized to a short path."""
+    long_dir = tmp_path / ("a" * 120)
+    long_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = str(long_dir / "test.sock")
+    server = IPCServer(echo_handler, socket_path=sock_path)
+    await server.start()
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, lambda: ipc_send({"cmd": "ping", "data": 7}, socket_path=sock_path)
+        )
+        assert result["ok"] is True
+        assert result["result"]["data"] == 7
     finally:
         await server.stop()
