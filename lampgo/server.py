@@ -20,6 +20,7 @@ from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.core.config import LampgoConfig
 from lampgo.core.events import EventBus
 from lampgo.core.hal import HardwareAbstraction
+from lampgo.core.config import LEDConfig
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
@@ -52,7 +53,10 @@ class LampgoServer:
         self.hal = HardwareAbstraction(config.device)
         self.safety = SafetyKernel(config.safety)
         self.motion = MotionRuntime(self.hal, self.safety, config.motion)
-        self.led = LEDController(config.led)
+        # Backward-compatible LED port resolution:
+        # prefer explicit [led].port, then fallback to [device].led_port
+        led_port = config.led.port or config.device.led_port
+        self.led = LEDController(LEDConfig(port=led_port, baud_rate=config.led.baud_rate))
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)

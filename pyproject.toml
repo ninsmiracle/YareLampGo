@@ -15,6 +15,9 @@ dependencies = [
     "pyserial>=3.5",
     "python-dotenv>=1.2.2",
     "lerobot[feetech]>=0.5.0",
+    "sounddevice>=0.5.5",
+    "edge-tts>=7.2.8",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]

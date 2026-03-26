@@ -39,6 +39,7 @@ class VoiceLoop:
         self._stt = WhisperSTT(
             api_key=cfg.llm.api_key,
             api_base=cfg.llm.api_base,
+            fallback_chat_model=cfg.llm.fast_model,
         )
         self._tts = EdgeTTS(voice=cfg.voice.tts_voice)
         self._vad = EnergyVAD()

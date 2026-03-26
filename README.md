@@ -46,14 +46,35 @@ ls /dev/ttyUSB* /dev/ttyACM*
 ### 3. 使用
 
 ```bash
+# 查看帮助
+uv run lampgo help
+
 # 查看可用技能
 uv run lampgo skills
 
 # 启动服务器 (配置好后不需要额外参数)
 uv run lampgo run
 
+# 启动语音交互
+uv run lampgo run --voice
+
+# 查询运行状态
+uv run lampgo status
+
 # 移动关节
 uv run lampgo move base_yaw=30 base_pitch=-20
+
+# 回到安全位
+uv run lampgo invoke return_safe
+
+# 跳舞
+uv run lampgo invoke dance
+
+# 设置表情（LED）
+uv run lampgo invoke set_expression expression=heart
+
+# 文本指令（走 IntentRouter）
+uv run lampgo text "做个害羞的表情"
 
 # 播放预录动作
 uv run lampgo play nod
@@ -67,6 +88,12 @@ uv run lampgo calibrate
 
 # 紧急停止
 uv run lampgo estop
+
+# 清理占用进程并尝试释放力矩（串口被占用时常用）
+uv run lampgo clear
+
+# 自动探测串口
+uv run lampgo detect
 ```
 
 ### 配置优先级

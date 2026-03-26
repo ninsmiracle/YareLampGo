@@ -24,7 +24,8 @@ class SetExpressionSkill(Skill):
     }
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        expression = params.get("expression", "")
+        # Accept both "expression" and legacy "mode" for compatibility
+        expression = params.get("expression") or params.get("mode") or ""
         if not expression:
             return SkillResult(status="error", message="Expression name required")
 
