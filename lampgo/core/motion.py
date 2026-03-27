@@ -230,12 +230,14 @@ class MotionRuntime:
 
             # --- Compute next frame ---
             next_frame: dict[str, float] | None = None
+            playback_frame_due = False
 
             if _stream_frames:
                 _stream_accumulator += dt
                 frame_interval = 1.0 / _stream_fps
                 if _stream_accumulator >= frame_interval and _stream_idx < len(_stream_frames):
                     next_frame = _stream_frames[_stream_idx]
+                    playback_frame_due = True
                     _stream_idx += 1
                     _stream_accumulator -= frame_interval
                     progress = _stream_idx / len(_stream_frames)
@@ -282,7 +284,10 @@ class MotionRuntime:
 
             # --- Validate and write ---
             if next_frame is not None:
-                safe_frame = self._safety.validate_frame(self._current_state, next_frame, dt)
+                if playback_frame_due:
+                    safe_frame = self._safety.clamp_positions(self._current_state, next_frame)
+                else:
+                    safe_frame = self._safety.validate_frame(self._current_state, next_frame, dt)
                 try:
                     self._hal.write_positions(safe_frame)
                 except Exception:

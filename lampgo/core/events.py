@@ -54,6 +54,39 @@ class EStopReset(Event):
     pass
 
 
+@dataclass
+class IntentRouting(Event):
+    """Intent classification has started."""
+    text: str
+    request_id: str = ""
+
+
+@dataclass
+class IntentResolved(Event):
+    """Intent classification completed."""
+    intent_type: str
+    skill_id: str | None = None
+    chat_response: str | None = None
+    request_id: str = ""
+
+
+@dataclass
+class SkillProgress(Event):
+    """Skill execution progress update."""
+    skill_id: str
+    invocation_id: str
+    progress: float
+    message: str = ""
+
+
+@dataclass
+class ChatMessage(Event):
+    """A message to display to the user."""
+    role: str
+    content: str
+    request_id: str = ""
+
+
 class EventBus:
     """Simple in-process typed pub/sub.  Handlers are async callables."""
 

@@ -24,6 +24,7 @@ from lampgo.core.config import LEDConfig
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
+from lampgo.core.config import WebConfig
 from lampgo.ipc import IPCServer
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.skills.base import SkillContext
@@ -64,6 +65,7 @@ class LampgoServer:
         self.router = IntentRouter()
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
+        self._web_gateway = None
 
     def _register_builtin_skills(self) -> None:
         recordings_dir = Path(self.config.recordings_dir)
@@ -201,19 +203,21 @@ class LampgoServer:
     def _handle_skills(self) -> dict:
         skills = []
         for skill in self.registry.list_skills():
-            skills.append({
-                "skill_id": skill.skill_id,
-                "description": skill.description,
-                "parameters": {
-                    name: {
-                        "type": spec.type,
-                        "description": spec.description,
-                        "required": spec.required,
-                        "default": spec.default,
-                    }
-                    for name, spec in skill.parameters.items()
-                },
-            })
+            skills.append(
+                {
+                    "skill_id": skill.skill_id,
+                    "description": skill.description,
+                    "parameters": {
+                        name: {
+                            "type": spec.type,
+                            "description": spec.description,
+                            "required": spec.required,
+                            "default": spec.default,
+                        }
+                        for name, spec in skill.parameters.items()
+                    },
+                }
+            )
         return {"ok": True, "result": {"skills": skills}}
 
     async def start(self) -> None:
@@ -221,11 +225,6 @@ class LampgoServer:
         self.hal.connect()
         self.led.connect()
         self.motion.start()
-
-        home = self.hal.get_calibration_home()
-        if home is not None:
-            from lampgo.skills.builtin.motion_skills import set_calibration_home
-            set_calibration_home(home)
 
         self._register_builtin_skills()
         if self.config.home_on_start:
@@ -240,13 +239,10 @@ class LampgoServer:
         )
 
     async def _home_on_start(self) -> None:
-        """Slowly return to calibration midpoint on startup."""
-        from lampgo.skills.builtin.motion_skills import STARTUP_HOME_VELOCITY
+        """Slowly return to the fixed safe position on startup."""
+        from lampgo.skills.builtin.motion_skills import STARTUP_HOME_VELOCITY, get_safe_position
 
-        home = self.hal.get_calibration_home()
-        if home is None:
-            logger.warning("server.homing_skipped (no calibration)")
-            return
+        home = get_safe_position()
 
         logger.info("server.homing", velocity=STARTUP_HOME_VELOCITY, target=home)
         try:
@@ -302,6 +298,8 @@ class LampgoServer:
         await self.start()
         if self.config.voice_enabled:
             self._start_voice_loop()
+        if self.config.web_enabled:
+            await self._start_web_gateway()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -309,6 +307,32 @@ class LampgoServer:
         logger.info("server.running (Ctrl+C to stop)")
         await stop.wait()
         await self.shutdown()
+
+    async def _start_web_gateway(self) -> None:
+        try:
+            import uvicorn
+
+            from lampgo.web.gateway import WebGateway
+
+            gw = WebGateway(self, self.config.web)
+            self._web_gateway = gw
+
+            uvi_config = uvicorn.Config(
+                gw.app,
+                host=self.config.web.host,
+                port=self.config.web.port,
+                log_level="warning",
+            )
+            uvi_server = uvicorn.Server(uvi_config)
+            self._web_serve_task = asyncio.create_task(uvi_server.serve())
+            logger.info(
+                "server.web_started",
+                url=f"http://localhost:{self.config.web.port}",
+            )
+        except ImportError:
+            logger.error("server.web_missing_deps (pip install starlette uvicorn websockets)")
+        except Exception:
+            logger.exception("server.web_start_failed")
 
     def _start_voice_loop(self) -> None:
         try:

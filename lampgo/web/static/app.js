@@ -1,0 +1,604 @@
+/* lampgo Web UI — WebSocket chat client */
+
+(function () {
+  "use strict";
+
+  const chatMessages = document.getElementById("chat-messages");
+  const chatForm = document.getElementById("chat-form");
+  const chatInput = document.getElementById("chat-input");
+  const appShell = document.querySelector(".app-shell");
+  const paneResizer = document.getElementById("pane-resizer");
+  const connDot = document.getElementById("conn-dot");
+  const connText = document.getElementById("conn-text");
+  const btnEstop = document.getElementById("btn-estop");
+  const btnOpenEvents = document.getElementById("btn-open-events");
+  const btnCloseDrawer = document.getElementById("btn-close-drawer");
+  const eventDrawer = document.getElementById("event-drawer");
+  const emptyState = document.getElementById("empty-state");
+  const skillGrid = document.getElementById("skill-grid");
+  const recordingGrid = document.getElementById("recording-grid");
+  const expressionGrid = document.getElementById("expression-grid");
+  const stHealth = document.getElementById("st-health");
+  const stBusy = document.getElementById("st-busy");
+  const stSkill = document.getElementById("st-skill");
+  const stEstop = document.getElementById("st-estop");
+  const jointPanel = document.getElementById("joint-panel");
+  const eventLog = document.getElementById("event-log");
+  const groupToggles = document.querySelectorAll("[data-toggle-group]");
+
+  const RECORDING_EXPRESSIONS = Object.freeze({
+    angry_jerk: "angry",
+    awkward_pause: "helpless",
+    celebrate: "star",
+    confused: "question",
+    curious: "question",
+    dance: "music",
+    deep_think: "thinking",
+    dislike: "cross",
+    dizzy_spin: "rainbow",
+    doze_off: "sleep",
+    dramatic_faint: "helpless",
+    excited: "star",
+    flirty_wink: "heart",
+    groove_bounce: "music",
+    happy_wiggle: "smiley",
+    headshake: "cross",
+    heartbreak: "heartbreak",
+    idle: "white",
+    lookout: "right",
+    mischief_peek: "blush",
+    movebackward: "down",
+    moveforward: "up",
+    nod: "check",
+    nod_small: "check",
+    peep: "left",
+    push: "exclaim",
+    sad: "crying",
+    sayhitoboss: "smiley",
+    scanning: "question",
+    shock: "surprised",
+    shy: "blush",
+    sneeze: "exclaim",
+    startle_recover: "surprised",
+    stretch_yawn: "sleep",
+    tippy_taps: "music",
+    wake_up: "surprised",
+    working: "thinking",
+  });
+
+  let ws = null;
+  let reqCounter = 0;
+  const pendingMessages = new Map();
+  let isResizing = false;
+
+  const SIDEBAR_WIDTH_KEY = "lampgo.sidebarWidth";
+  const SIDEBAR_MIN = 220;
+  const SIDEBAR_DEFAULT = 284;
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+    ws.onopen = () => {
+      setConnected(true);
+      ws.send(JSON.stringify({ type: "skills" }));
+      ws.send(JSON.stringify({ type: "recordings" }));
+      ws.send(JSON.stringify({ type: "expressions" }));
+      ws.send(JSON.stringify({ type: "status" }));
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (evt) => {
+      try {
+        handleMessage(JSON.parse(evt.data));
+      } catch (err) {
+        console.error("parse error", err);
+      }
+    };
+  }
+
+  function setConnected(ok) {
+    connDot.className = `connection-dot ${ok ? "is-online" : "is-offline"}`;
+    connText.textContent = ok ? "已连接" : "未连接";
+  }
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
+
+  function handleMessage(msg) {
+    if (msg.type === "status") {
+      updateStatus(msg.data);
+      return;
+    }
+
+    if (msg.type === "event") {
+      handleEvent(msg);
+      logEvent(msg);
+      return;
+    }
+
+    if (msg.ok && msg.result && msg.result.skills) {
+      renderSkills(msg.result.skills);
+      return;
+    }
+
+    if (msg.ok && msg.result && msg.result.recordings) {
+      renderRecordings(msg.result.recordings);
+      return;
+    }
+
+    if (msg.ok && msg.result && msg.result.expressions) {
+      renderExpressions(msg.result.expressions);
+      return;
+    }
+
+    if (msg.request_id && pendingMessages.has(msg.request_id)) {
+      finishPending(msg);
+    }
+  }
+
+  function handleEvent(msg) {
+    const evt = msg.event;
+    const data = msg.data || {};
+    const requestId = data.request_id || "";
+    const bubble = requestId ? pendingMessages.get(requestId) : null;
+
+    if (!bubble) {
+      return;
+    }
+
+    const stepsEl = bubble.querySelector(".steps");
+    if (!stepsEl) {
+      return;
+    }
+
+    switch (evt) {
+      case "IntentRouting":
+        addStep(stepsEl, "正在理解意图...", "active");
+        break;
+      case "IntentResolved":
+        markLastDone(stepsEl);
+        if (data.intent_type === "skill" && data.skill_id) {
+          addStep(stepsEl, `识别为技能：${data.skill_id}`, "done");
+        } else if (data.intent_type === "chat") {
+          addStep(stepsEl, "识别为聊天回复", "done");
+        } else {
+          addStep(stepsEl, `类型：${data.intent_type}`, "done");
+        }
+        break;
+      case "SkillStarted":
+        addStep(stepsEl, `执行技能：${data.skill_id}`, "active");
+        break;
+      case "SkillProgress":
+        updateActiveStep(stepsEl, `执行中 ${Math.round(data.progress * 100)}% ${data.message || ""}`.trim());
+        break;
+      case "SkillFinished":
+        markLastDone(stepsEl);
+        addStep(stepsEl, data.status === "ok" ? "执行完成" : `结束：${data.status}`, data.status === "ok" ? "done" : "error");
+        break;
+      case "SkillCancelled":
+        markLastDone(stepsEl);
+        addStep(stepsEl, "已取消", "error");
+        break;
+      case "ChatMessage":
+        if (data.content) {
+          appendTextToBubble(bubble, data.content);
+        }
+        break;
+    }
+  }
+
+  function logEvent(msg) {
+    const item = document.createElement("div");
+    let cls = "";
+    if (msg.event.startsWith("Skill")) cls = "evt-skill";
+    else if (msg.event.startsWith("Safety") || msg.event.startsWith("EStop")) cls = "evt-safety";
+    else if (msg.event.startsWith("Intent")) cls = "evt-intent";
+    else if (msg.event === "ChatMessage") cls = "evt-chat";
+
+    item.className = `event-item ${cls}`;
+    const t = new Date(msg.ts * 1000).toLocaleTimeString();
+    item.textContent = `[${t}] ${msg.event}: ${JSON.stringify(msg.data)}`;
+    eventLog.appendChild(item);
+    eventLog.scrollTop = eventLog.scrollHeight;
+  }
+
+  function updateStatus(data) {
+    if (!data) {
+      return;
+    }
+
+    setStatusValue(stHealth, data.device_health || "--", data.device_health === "ok");
+    setStatusValue(stBusy, data.is_busy ? "是" : "否", !data.is_busy);
+    setStatusValue(stSkill, data.running_skill || "无", true, true);
+    setStatusValue(stEstop, data.estopped ? `是 (${data.estop_reason || ""})` : "否", !data.estopped);
+
+    const joints = data.joint_positions || {};
+    jointPanel.innerHTML = Object.entries(joints)
+      .map(([k, v]) => {
+        const value = typeof v === "number" ? `${v.toFixed(1)}°` : `${v}`;
+        return `<div class="joint-row"><span>${esc(k)}</span><span class="joint-value">${esc(value)}</span></div>`;
+      })
+      .join("");
+  }
+
+  function setStatusValue(el, text, good, alwaysNeutral) {
+    el.textContent = text;
+    el.className = "status-value";
+    if (alwaysNeutral) {
+      el.classList.add("status-neutral");
+    } else {
+      el.classList.add(good ? "status-good" : "status-bad");
+    }
+  }
+
+  function renderSkills(skills) {
+    skillGrid.innerHTML = "";
+    skills
+      .filter((skill) => !["estop", "play_recording"].includes(skill.skill_id))
+      .forEach((skill) => {
+        const btn = document.createElement("button");
+        btn.className = "skill-btn";
+        btn.type = "button";
+        btn.textContent = skill.skill_id;
+        btn.title = skill.description;
+        btn.addEventListener("click", () => invokeSkill(skill.skill_id));
+        skillGrid.appendChild(btn);
+      });
+  }
+
+  function renderRecordings(recordings) {
+    recordingGrid.innerHTML = "";
+    recordings.forEach((name) => {
+      const expression = getRecordingExpression(name);
+      const btn = document.createElement("button");
+      btn.className = "skill-btn";
+      btn.type = "button";
+      btn.textContent = name;
+      btn.title = `播放录制动作：${name} · 推荐表情：${expression}`;
+      btn.addEventListener("click", () => invokeRecording(name));
+      recordingGrid.appendChild(btn);
+    });
+  }
+
+  function renderExpressions(expressions) {
+    expressionGrid.innerHTML = "";
+    expressions.forEach((name) => {
+      const btn = document.createElement("button");
+      btn.className = "skill-btn";
+      btn.type = "button";
+      btn.textContent = name;
+      btn.title = `切换灯光表情：${name}`;
+      btn.addEventListener("click", () => invokeExpression(name));
+      expressionGrid.appendChild(btn);
+    });
+  }
+
+  function invokeSkill(skillId) {
+    clearEmptyState();
+    const requestId = nextId();
+    const bubble = addAssistantBubble(requestId);
+    addStep(bubble.querySelector(".steps"), `调用 ${skillId}`, "active");
+    send({ type: "invoke", skill_id: skillId, params: {}, wait: true, request_id: requestId });
+  }
+
+  function invokeRecording(name) {
+    clearEmptyState();
+    const requestId = nextId();
+    const bubble = addAssistantBubble(requestId);
+    const expression = getRecordingExpression(name);
+    addStep(bubble.querySelector(".steps"), `播放录制动作 ${name} · 表情 ${expression}`, "active");
+    send({
+      type: "invoke",
+      skill_id: "play_recording",
+      params: { name, expression },
+      wait: true,
+      request_id: requestId,
+    });
+  }
+
+  function invokeExpression(name) {
+    clearEmptyState();
+    const requestId = nextId();
+    const bubble = addAssistantBubble(requestId);
+    addStep(bubble.querySelector(".steps"), `切换灯光表情 ${name}`, "active");
+    send({
+      type: "invoke",
+      skill_id: "set_expression",
+      params: { expression: name },
+      wait: true,
+      request_id: requestId,
+    });
+  }
+
+  chatForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = chatInput.value.trim();
+    if (!text) {
+      return;
+    }
+
+    clearEmptyState();
+    chatInput.value = "";
+    addUserBubble(text);
+
+    const requestId = nextId();
+    addAssistantBubble(requestId);
+    send({ type: "text", input: text, request_id: requestId });
+  });
+
+  function addUserBubble(text) {
+    const row = document.createElement("div");
+    row.className = "flex justify-end mb-4";
+    row.innerHTML = `<div class="msg-user">${esc(text)}</div>`;
+    chatMessages.appendChild(row);
+    scrollChat();
+  }
+
+  function addAssistantBubble(requestId) {
+    const row = document.createElement("div");
+    row.className = "flex justify-start mb-4";
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg-assistant";
+    bubble.innerHTML = '<div class="steps"></div><div class="response-text"></div>';
+
+    row.appendChild(bubble);
+    chatMessages.appendChild(row);
+    pendingMessages.set(requestId, bubble);
+    scrollChat();
+    return bubble;
+  }
+
+  function finishPending(msg) {
+    const bubble = pendingMessages.get(msg.request_id);
+    if (!bubble) {
+      return;
+    }
+
+    const stepsEl = bubble.querySelector(".steps");
+    markLastDone(stepsEl);
+
+    const result = msg.result || {};
+    const text = result.response || result.chat_response;
+    if (text && !bubble.querySelector(".response-text").textContent) {
+      appendTextToBubble(bubble, text);
+    }
+
+    if (!msg.ok && msg.error) {
+      addStep(stepsEl, `错误：${msg.error}`, "error");
+    }
+
+    pendingMessages.delete(msg.request_id);
+    scrollChat();
+  }
+
+  function appendTextToBubble(bubble, text) {
+    const el = bubble.querySelector(".response-text");
+    if (el) {
+      el.innerHTML = formatAssistantText(text);
+    }
+  }
+
+  function addStep(container, text, state) {
+    const row = document.createElement("div");
+    row.className = `step-row ${state}`;
+    let icon = "";
+    if (state === "done") icon = "✓";
+    else if (state === "active") icon = '<div class="spinner"></div>';
+    else if (state === "error") icon = "✕";
+    row.innerHTML = `<span class="step-icon">${icon}</span><span>${esc(text)}</span>`;
+    container.appendChild(row);
+    scrollChat();
+  }
+
+  function markLastDone(container) {
+    const active = container.querySelector(".step-row.active:last-child");
+    if (!active) {
+      return;
+    }
+    active.classList.remove("active");
+    active.classList.add("done");
+    const icon = active.querySelector(".step-icon");
+    if (icon) {
+      icon.textContent = "✓";
+    }
+  }
+
+  function updateActiveStep(container, text) {
+    const active = container.querySelector(".step-row.active:last-child");
+    if (!active) {
+      return;
+    }
+    const spans = active.querySelectorAll("span");
+    if (spans[1]) {
+      spans[1].textContent = text;
+    }
+  }
+
+  btnEstop.addEventListener("click", () => {
+    if (confirm("确认发送急停命令？")) {
+      send({ type: "estop" });
+      addSystemMessage("已发送 E-STOP 命令");
+    }
+  });
+
+  [btnOpenEvents].forEach((btn) => {
+    if (!btn) {
+      return;
+    }
+    btn.addEventListener("click", () => {
+      eventDrawer.classList.remove("hidden");
+    });
+  });
+
+  if (btnCloseDrawer) {
+    btnCloseDrawer.addEventListener("click", () => {
+      eventDrawer.classList.add("hidden");
+    });
+  }
+
+  if (paneResizer && appShell) {
+    const savedWidth = Number.parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY) || "", 10);
+    setSidebarWidth(Number.isFinite(savedWidth) ? savedWidth : SIDEBAR_DEFAULT);
+
+    paneResizer.addEventListener("pointerdown", (event) => {
+      if (window.innerWidth <= 1100) {
+        return;
+      }
+      isResizing = true;
+      appShell.classList.add("is-resizing");
+      paneResizer.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+
+    paneResizer.addEventListener("pointermove", (event) => {
+      if (!isResizing) {
+        return;
+      }
+      setSidebarWidth(event.clientX - appShell.getBoundingClientRect().left);
+    });
+
+    paneResizer.addEventListener("pointerup", (event) => {
+      if (!isResizing) {
+        return;
+      }
+      isResizing = false;
+      appShell.classList.remove("is-resizing");
+      paneResizer.releasePointerCapture(event.pointerId);
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, getSidebarWidth());
+    });
+
+    paneResizer.addEventListener("pointercancel", () => {
+      isResizing = false;
+      appShell.classList.remove("is-resizing");
+    });
+  }
+
+  groupToggles.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const group = btn.dataset.toggleGroup;
+      const body = document.querySelector(`[data-group-body="${group}"]`);
+      if (!body) {
+        return;
+      }
+      const collapsed = body.classList.toggle("group-collapsed");
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    });
+  });
+
+  function addSystemMessage(text) {
+    clearEmptyState();
+    const note = document.createElement("div");
+    note.className = "system-note";
+    note.textContent = text;
+    chatMessages.appendChild(note);
+    scrollChat();
+  }
+
+  function clearEmptyState() {
+    if (emptyState && emptyState.parentNode) {
+      emptyState.parentNode.removeChild(emptyState);
+    }
+  }
+
+  function nextId() {
+    reqCounter += 1;
+    return `r${reqCounter}_${Date.now().toString(36)}`;
+  }
+
+  function setSidebarWidth(width) {
+    if (!appShell) {
+      return;
+    }
+    const maxWidth = Math.max(SIDEBAR_MIN, Math.min(560, Math.floor(window.innerWidth * 0.55)));
+    const clamped = Math.max(SIDEBAR_MIN, Math.min(maxWidth, Math.round(width)));
+    appShell.style.setProperty("--left-rail-width", `${clamped}px`);
+  }
+
+  function getSidebarWidth() {
+    if (!appShell) {
+      return `${SIDEBAR_DEFAULT}`;
+    }
+    const value = appShell.style.getPropertyValue("--left-rail-width").trim();
+    return value.replace("px", "") || `${SIDEBAR_DEFAULT}`;
+  }
+
+  function getRecordingExpression(name) {
+    return RECORDING_EXPRESSIONS[name] || "smiley";
+  }
+
+  function esc(s) {
+    const div = document.createElement("div");
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  function formatAssistantText(text) {
+    const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    const blocks = [];
+    let paragraph = [];
+    let listItems = [];
+
+    function flushParagraph() {
+      if (!paragraph.length) {
+        return;
+      }
+      blocks.push(`<p>${formatInlineMarkdown(paragraph.join("<br>"))}</p>`);
+      paragraph = [];
+    }
+
+    function flushList() {
+      if (!listItems.length) {
+        return;
+      }
+      blocks.push(`<ul>${listItems.map((item) => `<li>${formatInlineMarkdown(item)}</li>`).join("")}</ul>`);
+      listItems = [];
+    }
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushParagraph();
+        flushList();
+        return;
+      }
+
+      const bullet = trimmed.match(/^[-*]\s+(.*)$/);
+      if (bullet) {
+        flushParagraph();
+        listItems.push(esc(bullet[1]));
+        return;
+      }
+
+      flushList();
+      paragraph.push(esc(trimmed));
+    });
+
+    flushParagraph();
+    flushList();
+
+    return blocks.join("") || `<p>${formatInlineMarkdown(esc(String(text || "")))}</p>`;
+  }
+
+  function formatInlineMarkdown(text) {
+    return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  }
+
+  function scrollChat() {
+    requestAnimationFrame(() => {
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+  }
+
+  connect();
+})();

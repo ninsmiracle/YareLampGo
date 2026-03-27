@@ -22,7 +22,13 @@ Fast Path (sub-1s, lampgo local)         Complex Path (5-30s, OpenClaw)
       |         |                                 |
       +----+----+                                 |
            |                                      |
-           +------------- IPC (Unix Socket) ------+
+      Web UI (Browser)                            |
+        |  WebSocket + REST                       |
+        |                                         |
+     WebGateway (Starlette, same process)         |
+        |  direct method call                     |
+        |                                         |
+        +--- IPC (Unix Socket) --+----------------+
                                |
                           SkillExecutor + FSM
                                |
@@ -47,8 +53,9 @@ Fast Path (sub-1s, lampgo local)         Complex Path (5-30s, OpenClaw)
   All motion goes through skills -> MotionRuntime -> SafetyKernel -> HAL.
 - **Simple FSM, not BT**: Idle/Executing/SafeStop/Recovering states. Behavior
   trees deferred until complexity demands it.
-- **IPC-first**: All external communication uses Unix socket IPC (JSON protocol)
-  for <100ms latency. CLI, OpenClaw, voice loop all share this path.
+- **IPC-first**: CLI and OpenClaw use Unix socket IPC (JSON protocol) for <100ms latency.
+- **Web gateway (same process)**: Starlette app serves REST + WebSocket, subscribes
+  to EventBus for real-time step-by-step status push to the browser chat UI.
 - **Dual-path intent routing**: Fast path (keyword + fast LLM) for sub-1s response,
   complex path (OpenClaw + Claude Opus) for multi-step reasoning.
 
@@ -80,6 +87,9 @@ Fast Path (sub-1s, lampgo local)         Complex Path (5-30s, OpenClaw)
 | `voice/audio.py` | Microphone capture via sounddevice |
 | `bridge/openclaw.py` | OpenClaw adapter |
 | `bridge/desktop.py` | PC Bridge (mouse, keyboard, apps) |
+| `web/gateway.py` | Starlette web gateway (REST + WebSocket + static UI) |
+| `web/ws_bridge.py` | EventBus → WebSocket broadcast bridge |
+| `web/static/` | Browser chat UI (HTML + JS + CSS, zero-build) |
 | `server.py` | Main daemon entry point |
 | `cli.py` | CLI interface (IPC-first) |
 | `openclaw-skills/` | 4 OpenClaw skill packages |

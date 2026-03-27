@@ -60,6 +60,8 @@ def main() -> None:
     run_p.add_argument("--lamp-id", default=None, help="Lamp identity for calibration")
     run_p.add_argument("--recordings-dir", default=None, help="Path to recording CSVs")
     run_p.add_argument("--voice", action="store_true", help="Enable voice loop (STT/TTS)")
+    run_p.add_argument("--web", action="store_true", help="Enable web UI (chat interface)")
+    run_p.add_argument("--web-port", type=int, default=None, help="Web UI port (default: 8420)")
     run_p.add_argument("--no-home", action="store_true", help="Skip automatic homing on startup")
 
     # --- invoke (IPC) ---
@@ -508,6 +510,11 @@ def _cmd_run(args: argparse.Namespace) -> None:
     config = _load_config_from_args(args)
     if getattr(args, "voice", False):
         config.voice_enabled = True
+    if getattr(args, "web", False):
+        config.web_enabled = True
+    web_port = getattr(args, "web_port", None)
+    if web_port is not None:
+        config.web.port = web_port
     if getattr(args, "no_home", False):
         config.home_on_start = False
     asyncio.run(run_server(config))

@@ -13,25 +13,27 @@ from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
 logger = structlog.get_logger(__name__)
 
-FALLBACK_SAFE_POSITION: dict[str, float] = {
-    "base_yaw": 0.0,
-    "base_pitch": 0.0,
-    "elbow_pitch": 0.0,
-    "wrist_roll": 0.0,
-    "wrist_pitch": 0.0,
+SAFE_POSITION: dict[str, float] = {
+    # Hard-coded from assets/recordings/idle.csv first frame.
+    "base_yaw": 29.057337220602534,
+    "base_pitch": -44.68431771894094,
+    "elbow_pitch": 82.83261802575109,
+    "wrist_roll": 5.431619786614931,
+    "wrist_pitch": 3.0620467365028077,
 }
 
-_cached_home: dict[str, float] | None = None
-
-
 def set_calibration_home(home: dict[str, float]) -> None:
-    """Called by server on startup to inject the calibration-derived home position."""
-    global _cached_home
-    _cached_home = home
+    """Backward-compatible no-op.
+
+    Safe position is intentionally fixed to the first idle frame so that
+    playback, return_safe, and startup homing all use the same pose.
+    """
+    logger.info("motion.safe_position_fixed", ignored_home=home)
 
 
 def get_safe_position() -> dict[str, float]:
-    return _cached_home if _cached_home is not None else FALLBACK_SAFE_POSITION
+    return dict(SAFE_POSITION)
+
 
 MOVE_TIMEOUT_S = 15.0
 
@@ -82,11 +84,14 @@ STARTUP_HOME_VELOCITY = 30.0
 
 class ReturnSafeSkill(Skill):
     skill_id = "return_safe"
-    description = "Smoothly return to safe home position (calibration midpoint = all joints 0 degrees)."
+    description = "Smoothly return to the fixed idle pose safe position."
     priority = 90
     parameters = {
         "velocity": ParameterSpec(
-            name="velocity", type="float", required=False, default=60.0,
+            name="velocity",
+            type="float",
+            required=False,
+            default=60.0,
             description="Max velocity deg/s (use lower values for gentler homing)",
         ),
     }
