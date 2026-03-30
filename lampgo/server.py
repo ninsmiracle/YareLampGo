@@ -18,7 +18,7 @@ import structlog
 
 from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.core.config import LampgoConfig
-from lampgo.core.events import EventBus
+from lampgo.core.events import AgentFinished, EventBus, IntentProgress, ToolCallFinished, ToolCallPlanned
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.config import LEDConfig
 from lampgo.core.led import LEDController
@@ -61,7 +61,7 @@ class LampgoServer:
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
-        self.openclaw = OpenClawAdapter(self.registry, self.executor)
+        self.openclaw = OpenClawAdapter(self.registry, self.executor, self.events)
         self.router = IntentRouter()
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
@@ -153,10 +153,107 @@ class LampgoServer:
         if not text:
             return {"ok": False, "error": "empty input"}
 
-        intent = await self.router.aroute(text)
+        request_id = data.get("request_id", "")
+
+        async def _publish_intent_progress(stage: str, message: str, source: str) -> None:
+            await self.events.publish(
+                IntentProgress(
+                    stage=stage,
+                    message=message,
+                    source=source,
+                    request_id=request_id,
+                )
+            )
+
+        intent = self.router.route(text)
+        if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
+            logger.info("server.text_escalate_to_llm_agent", text=text, request_id=request_id, detail=intent.detail)
+            await _publish_intent_progress("llm_fallback", "关键词未命中，转交 LLM Agent...", "llm")
+            agent_result = await self.router.run_agent_loop(
+                text,
+                execute_tool=lambda tool_name, params, turn_index, tool_index: self._execute_agent_tool(
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    params=params,
+                    turn_index=turn_index,
+                    tool_index=tool_index,
+                ),
+                on_progress=_publish_intent_progress,
+                joint_state=self.motion.current_state.positions,
+            )
+            if agent_result.intent_type == "complex":
+                await self.events.publish(
+                    AgentFinished(
+                        request_id=request_id,
+                        stop_reason=agent_result.stop_reason,
+                        tool_call_count=len(agent_result.tool_calls),
+                        response=agent_result.response,
+                        detail=agent_result.detail,
+                    )
+                )
+                logger.info(
+                    "server.text_agent_handoff_to_openclaw",
+                    text=text,
+                    request_id=request_id,
+                    stop_reason=agent_result.stop_reason,
+                    detail=agent_result.detail,
+                )
+                await _publish_intent_progress("openclaw_handoff", "超出当前 tool 能力，转交 OpenClaw...", "openclaw")
+                return await self._handoff_to_openclaw(
+                    request_id=request_id,
+                    text=text,
+                    reason=agent_result.detail or "LLM 判定需要 OpenClaw 慢路径",
+                    recent_tool_calls=self._serialize_agent_tool_calls(agent_result.tool_calls),
+                )
+            await self.events.publish(
+                AgentFinished(
+                    request_id=request_id,
+                    stop_reason=agent_result.stop_reason,
+                    tool_call_count=len(agent_result.tool_calls),
+                    response=agent_result.response,
+                    detail=agent_result.detail,
+                )
+            )
+            logger.info(
+                "server.text_agent_finished",
+                text=text,
+                request_id=request_id,
+                intent_type=agent_result.intent_type,
+                stop_reason=agent_result.stop_reason,
+                tool_call_count=len(agent_result.tool_calls),
+            )
+            return self._format_agent_result(agent_result, text)
+
+        if intent.intent_type == IntentType.COMPLEX:
+            await _publish_intent_progress("openclaw_handoff", "关键词未命中且未能本地完成，转交 OpenClaw...", "openclaw")
+            return await self._handoff_to_openclaw(
+                request_id=request_id,
+                text=text,
+                reason=intent.detail or "需要 OpenClaw 慢路径处理",
+                recent_tool_calls=[],
+            )
+
+        logger.info(
+            "server.text_intent_resolved",
+            text=text,
+            request_id=request_id,
+            intent_type=intent.intent_type.value,
+            skill_id=intent.skill_id,
+            source=intent.source,
+            detail=intent.detail,
+        )
 
         if intent.intent_type == IntentType.CHAT:
-            return {"ok": True, "result": {"type": "chat", "response": intent.chat_response}}
+            return {
+                "ok": True,
+                "result": {
+                    "type": "chat",
+                    "response": intent.chat_response,
+                    "source": intent.source,
+                    "detail": intent.detail,
+                    "matched_keyword": intent.matched_keyword,
+                },
+            }
 
         if intent.intent_type == IntentType.SKILL and intent.skill_id:
             ctx = self.make_context()
@@ -171,6 +268,9 @@ class LampgoServer:
                     "status": result.status,
                     "data": result.result,
                     "chat_response": intent.chat_response,
+                    "source": intent.source,
+                    "detail": intent.detail,
+                    "matched_keyword": intent.matched_keyword,
                 },
             }
 
@@ -180,8 +280,146 @@ class LampgoServer:
                 "type": "complex",
                 "response": "This request is too complex for the fast path. Please use OpenClaw.",
                 "original_text": text,
+                "source": intent.source,
+                "detail": intent.detail,
+                "matched_keyword": intent.matched_keyword,
             },
         }
+
+    async def _execute_agent_tool(
+        self,
+        request_id: str,
+        tool_name: str,
+        params: dict[str, Any],
+        turn_index: int,
+        tool_index: int,
+    ) -> dict[str, Any]:
+        await self.events.publish(
+            ToolCallPlanned(
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+                arguments=params,
+            )
+        )
+        logger.info(
+            "server.agent_tool_planned",
+            request_id=request_id,
+            turn_index=turn_index,
+            tool_index=tool_index,
+            tool_name=tool_name,
+            params=params,
+        )
+        result = await self.executor.invoke(tool_name, self.make_context(), **params)
+        tool_payload = {
+            "ok": result.status in ("ok", "cancelled"),
+            "status": result.status,
+            "result": result.result,
+            "error": result.error_detail,
+            "invocation_id": result.invocation_id,
+        }
+        summary = f"{tool_name} -> {result.status}"
+        if result.error_detail:
+            summary = f"{summary}: {result.error_detail}"
+        await self.events.publish(
+            ToolCallFinished(
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+                status=result.status,
+                invocation_id=result.invocation_id,
+                summary=summary,
+                error=result.error_detail,
+            )
+        )
+        logger.info(
+            "server.agent_tool_finished",
+            request_id=request_id,
+            turn_index=turn_index,
+            tool_index=tool_index,
+            tool_name=tool_name,
+            status=result.status,
+            invocation_id=result.invocation_id,
+        )
+        return tool_payload
+
+    async def _handoff_to_openclaw(
+        self,
+        request_id: str,
+        text: str,
+        reason: str,
+        recent_tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        logger.info("server.openclaw_handoff", request_id=request_id, text=text, reason=reason)
+        task = await self.openclaw.submit_complex_task(
+            {
+                "request_id": request_id,
+                "user_text": text,
+                "reason": reason,
+                "available_capabilities": self.openclaw.list_capabilities_dict(),
+                "recent_tool_calls": recent_tool_calls,
+                "current_state": self._handle_status().get("result", {}),
+            }
+        )
+        return {
+            "ok": True,
+            "result": {
+                "type": "openclaw",
+                "response": "已转交 OpenClaw 处理。你可以在任务区查看状态，并在需要时确认 promoted 方案。",
+                "source": "openclaw",
+                "detail": reason,
+                "matched_keyword": None,
+                "stop_reason": "openclaw_handoff",
+                "openclaw_task": task,
+            },
+        }
+
+    @staticmethod
+    def _format_agent_result(agent_result, text: str) -> dict[str, Any]:
+        tool_calls = [
+            {
+                "turn_index": call.turn_index,
+                "tool_index": call.tool_index,
+                "tool_name": call.tool_name,
+                "arguments": call.arguments,
+                "status": call.status,
+                "result": call.result,
+                "error": call.error,
+                "invocation_id": call.invocation_id,
+            }
+            for call in agent_result.tool_calls
+        ]
+        result_type = agent_result.intent_type
+        payload = {
+            "type": result_type,
+            "response": agent_result.response,
+            "source": agent_result.source,
+            "detail": agent_result.detail,
+            "matched_keyword": None,
+            "stop_reason": agent_result.stop_reason,
+            "tool_calls": tool_calls,
+        }
+        if result_type == "complex":
+            payload["original_text"] = text
+        return {"ok": True, "result": payload}
+
+    @staticmethod
+    def _serialize_agent_tool_calls(tool_calls) -> list[dict[str, Any]]:
+        return [
+            {
+                "turn_index": call.turn_index,
+                "tool_index": call.tool_index,
+                "tool_name": call.tool_name,
+                "arguments": call.arguments,
+                "status": call.status,
+                "result": call.result,
+                "error": call.error,
+                "invocation_id": call.invocation_id,
+            }
+            for call in tool_calls
+        ]
 
     def _handle_status(self) -> dict:
         positions = self.motion.current_state.positions
@@ -264,9 +502,13 @@ class LampgoServer:
             from lampgo.perception.llm_client import LLMClient
 
             skill_specs = self._handle_skills()["result"]["skills"]
-            client = LLMClient(self.config.llm, skill_specs)
+            client = LLMClient(self.config.llm, skill_specs, camera_config=self.config.camera)
             self.router.set_llm_client(client)
-            logger.info("server.llm_router_enabled", model=self.config.llm.fast_model)
+            logger.info(
+                "server.llm_router_enabled",
+                model=self.config.llm.fast_model,
+                camera_port=self.config.camera.port or None,
+            )
         except Exception:
             logger.exception("server.llm_router_setup_failed")
 

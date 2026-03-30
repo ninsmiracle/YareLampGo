@@ -81,9 +81,9 @@ async def test_play_recording_returns_to_safe_position(tmp_path):
         motion.stop()
 
 
-def test_safe_position_matches_idle_first_frame_constant():
+def test_safe_position_constant():
     assert get_safe_position() == {
-        "base_yaw": 29.057337220602534,
+        "base_yaw": 0.0,
         "base_pitch": -44.68431771894094,
         "elbow_pitch": 82.83261802575109,
         "wrist_roll": 5.431619786614931,

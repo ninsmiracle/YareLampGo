@@ -14,8 +14,7 @@ from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 logger = structlog.get_logger(__name__)
 
 SAFE_POSITION: dict[str, float] = {
-    # Hard-coded from assets/recordings/idle.csv first frame.
-    "base_yaw": 29.057337220602534,
+    "base_yaw": 0.0,
     "base_pitch": -44.68431771894094,
     "elbow_pitch": 82.83261802575109,
     "wrist_roll": 5.431619786614931,

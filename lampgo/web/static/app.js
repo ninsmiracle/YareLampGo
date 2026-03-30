@@ -23,6 +23,7 @@
   const stSkill = document.getElementById("st-skill");
   const stEstop = document.getElementById("st-estop");
   const jointPanel = document.getElementById("joint-panel");
+  const openclawTaskList = document.getElementById("openclaw-task-list");
   const eventLog = document.getElementById("event-log");
   const groupToggles = document.querySelectorAll("[data-toggle-group]");
 
@@ -69,6 +70,7 @@
   let ws = null;
   let reqCounter = 0;
   const pendingMessages = new Map();
+  const openclawTasks = new Map();
   let isResizing = false;
 
   const SIDEBAR_WIDTH_KEY = "lampgo.sidebarWidth";
@@ -84,6 +86,7 @@
       ws.send(JSON.stringify({ type: "skills" }));
       ws.send(JSON.stringify({ type: "recordings" }));
       ws.send(JSON.stringify({ type: "expressions" }));
+      ws.send(JSON.stringify({ type: "openclaw_tasks" }));
       ws.send(JSON.stringify({ type: "status" }));
     };
 
@@ -141,6 +144,15 @@
       return;
     }
 
+    if (msg.ok && msg.result && msg.result.openclaw_tasks) {
+      renderOpenClawTasks(msg.result.openclaw_tasks);
+      return;
+    }
+
+    if (msg.ok && msg.result && msg.result.openclaw_task) {
+      upsertOpenClawTask(msg.result.openclaw_task);
+    }
+
     if (msg.request_id && pendingMessages.has(msg.request_id)) {
       finishPending(msg);
     }
@@ -149,6 +161,15 @@
   function handleEvent(msg) {
     const evt = msg.event;
     const data = msg.data || {};
+
+    if (evt === "OpenClawTaskUpdated" && data.task) {
+      upsertOpenClawTask(data.task);
+    } else if (evt === "OpenClawPromotionRequested" && data.task) {
+      upsertOpenClawTask(data.task);
+    } else if (evt === "OpenClawPromotionDecision" && data.task) {
+      upsertOpenClawTask(data.task);
+    }
+
     const requestId = data.request_id || "";
     const bubble = requestId ? pendingMessages.get(requestId) : null;
 
@@ -165,14 +186,57 @@
       case "IntentRouting":
         addStep(stepsEl, "正在理解意图...", "active");
         break;
+      case "IntentProgress":
+        if (data.message) {
+          if (stepsEl.querySelector(".step-row.active:last-child")) {
+            updateActiveStep(stepsEl, data.message);
+          } else {
+            addStep(stepsEl, data.message, "active");
+          }
+        }
+        break;
       case "IntentResolved":
         markLastDone(stepsEl);
-        if (data.intent_type === "skill" && data.skill_id) {
-          addStep(stepsEl, `识别为技能：${data.skill_id}`, "done");
-        } else if (data.intent_type === "chat") {
-          addStep(stepsEl, "识别为聊天回复", "done");
+        addStep(stepsEl, formatIntentResolved(data), "done");
+        break;
+      case "OpenClawTaskUpdated":
+        markLastDone(stepsEl);
+        addStep(stepsEl, `OpenClaw 状态：${formatOpenClawStatus(data.task && data.task.status)}`, "done");
+        break;
+      case "OpenClawPromotionRequested":
+        markLastDone(stepsEl);
+        addStep(stepsEl, "OpenClaw 生成了 promoted 待确认方案", "active");
+        break;
+      case "OpenClawPromotionDecision":
+        markLastDone(stepsEl);
+        addStep(
+          stepsEl,
+          data.decision === "approve" ? "已确认 promoted" : "已拒绝 promoted",
+          data.decision === "approve" ? "done" : "error"
+        );
+        break;
+      case "ToolCallPlanned":
+        markLastDone(stepsEl);
+        addStep(
+          stepsEl,
+          `LLM 第 ${data.turn_index} 轮：调用 ${data.tool_name}${formatToolArguments(data.arguments)}`,
+          "active"
+        );
+        break;
+      case "ToolCallFinished":
+        markLastDone(stepsEl);
+        addStep(
+          stepsEl,
+          data.summary || `工具完成：${data.tool_name} -> ${data.status}`,
+          data.status === "ok" ? "done" : "error"
+        );
+        break;
+      case "AgentFinished":
+        markLastDone(stepsEl);
+        if (data.stop_reason === "finish_response") {
+          addStep(stepsEl, "任务完成", "done");
         } else {
-          addStep(stepsEl, `类型：${data.intent_type}`, "done");
+          addStep(stepsEl, `流程结束：${data.stop_reason || "unknown"}`, "error");
         }
         break;
       case "SkillStarted":
@@ -203,6 +267,8 @@
     if (msg.event.startsWith("Skill")) cls = "evt-skill";
     else if (msg.event.startsWith("Safety") || msg.event.startsWith("EStop")) cls = "evt-safety";
     else if (msg.event.startsWith("Intent")) cls = "evt-intent";
+    else if (msg.event.startsWith("ToolCall") || msg.event === "AgentFinished") cls = "evt-intent";
+    else if (msg.event.startsWith("OpenClaw")) cls = "evt-intent";
     else if (msg.event === "ChatMessage") cls = "evt-chat";
 
     item.className = `event-item ${cls}`;
@@ -229,6 +295,50 @@
         return `<div class="joint-row"><span>${esc(k)}</span><span class="joint-value">${esc(value)}</span></div>`;
       })
       .join("");
+  }
+
+  function formatIntentResolved(data) {
+    const source = formatIntentSource(data.source);
+    if (data.intent_type === "openclaw") {
+      return `${source}已接管复杂任务`;
+    }
+    if (data.intent_type === "agent") {
+      return `${source}完成多步工具编排`;
+    }
+    if (data.intent_type === "skill" && data.skill_id) {
+      if (data.source === "keyword" && data.matched_keyword) {
+        return `${source}命中“${data.matched_keyword}” -> 技能：${data.skill_id}`;
+      }
+      return `${source}识别为技能：${data.skill_id}`;
+    }
+    if (data.intent_type === "chat") {
+      return `${source}识别为聊天回复`;
+    }
+    return `${source}判定为复杂请求`;
+  }
+
+  function formatIntentSource(source) {
+    if (source === "keyword") {
+      return "关键词";
+    }
+    if (source === "llm") {
+      return "LLM";
+    }
+    if (source === "llm_web_search") {
+      return "LLM 网页搜索";
+    }
+    if (source === "openclaw") {
+      return "OpenClaw";
+    }
+    return "意图路由";
+  }
+
+  function formatToolArguments(args) {
+    const entries = Object.entries(args || {});
+    if (!entries.length) {
+      return "()";
+    }
+    return `(${entries.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ")})`;
   }
 
   function setStatusValue(el, text, good, alwaysNeutral) {
@@ -281,6 +391,121 @@
       btn.addEventListener("click", () => invokeExpression(name));
       expressionGrid.appendChild(btn);
     });
+  }
+
+  function renderOpenClawTasks(tasks) {
+    openclawTasks.clear();
+    (tasks || []).forEach((task) => {
+      if (task && task.task_id) {
+        openclawTasks.set(task.task_id, task);
+      }
+    });
+    paintOpenClawTasks();
+  }
+
+  function upsertOpenClawTask(task) {
+    if (!task || !task.task_id) {
+      return;
+    }
+    openclawTasks.set(task.task_id, task);
+    paintOpenClawTasks();
+  }
+
+  function paintOpenClawTasks() {
+    if (!openclawTaskList) {
+      return;
+    }
+    const tasks = Array.from(openclawTasks.values()).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    if (!tasks.length) {
+      openclawTaskList.innerHTML = '<div class="openclaw-empty">暂无复杂任务</div>';
+      return;
+    }
+    openclawTaskList.innerHTML = tasks.map(renderOpenClawTaskCard).join("");
+    openclawTaskList.querySelectorAll("[data-confirm-task]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        confirmPromotion(btn.dataset.confirmTask, btn.dataset.proposalId, btn.dataset.decision);
+      });
+    });
+  }
+
+  function renderOpenClawTaskCard(task) {
+    const proposals = Array.isArray(task.proposals) ? task.proposals : [];
+    return `
+      <div class="openclaw-task-card">
+        <div class="openclaw-task-head">
+          <div class="openclaw-task-title">${esc(task.user_text || task.task_id)}</div>
+          <div class="openclaw-task-status">${esc(formatOpenClawStatus(task.status))}</div>
+        </div>
+        <div class="openclaw-task-detail">${esc(task.detail || task.reason || "等待 OpenClaw 处理")}</div>
+        ${proposals.map((proposal) => renderProposalCard(task, proposal)).join("")}
+      </div>
+    `;
+  }
+
+  function renderProposalCard(task, proposal) {
+    const files = (proposal.files || []).map((file) => esc(file)).join("<br>");
+    const risks = (proposal.risks || []).map((risk) => esc(risk)).join("<br>");
+    const pending = proposal.status === "pending" && task.status === "awaiting_promotion_confirmation";
+    return `
+      <div class="proposal-card">
+        <div class="proposal-title">${esc(proposal.title || proposal.proposal_type)}</div>
+        <div class="proposal-meta">${esc(proposal.proposal_type || "proposal")} · ${esc(formatProposalStatus(proposal.status))}</div>
+        <div class="proposal-summary">${esc(proposal.summary || "")}</div>
+        ${files ? `<div class="proposal-files"><strong>涉及文件</strong><br>${files}</div>` : ""}
+        ${risks ? `<div class="proposal-risks"><strong>风险提示</strong><br>${risks}</div>` : ""}
+        ${
+          pending
+            ? `<div class="proposal-actions">
+                <button class="proposal-btn approve" type="button" data-confirm-task="${esc(task.task_id)}" data-proposal-id="${esc(proposal.proposal_id)}" data-decision="approve">确认沉淀</button>
+                <button class="proposal-btn reject" type="button" data-confirm-task="${esc(task.task_id)}" data-proposal-id="${esc(proposal.proposal_id)}" data-decision="reject">暂不沉淀</button>
+              </div>`
+            : ""
+        }
+      </div>
+    `;
+  }
+
+  function confirmPromotion(taskId, proposalId, decision) {
+    send({
+      type: "confirm_promotion",
+      task_id: taskId,
+      proposal_id: proposalId,
+      decision,
+      request_id: nextId(),
+    });
+  }
+
+  function formatOpenClawStatus(status) {
+    switch (status) {
+      case "queued":
+        return "排队中";
+      case "planning":
+        return "规划中";
+      case "executing_with_existing_tools":
+        return "复用现有工具";
+      case "generating_temporary_asset":
+        return "生成 temporary";
+      case "awaiting_promotion_confirmation":
+        return "等待确认";
+      case "promoted":
+        return "已 promoted";
+      case "rejected":
+        return "已拒绝";
+      case "failed":
+        return "失败";
+      default:
+        return status || "--";
+    }
+  }
+
+  function formatProposalStatus(status) {
+    if (status === "approved") {
+      return "已确认";
+    }
+    if (status === "rejected") {
+      return "已拒绝";
+    }
+    return "待确认";
   }
 
   function invokeSkill(skillId) {
@@ -402,7 +627,8 @@
   }
 
   function markLastDone(container) {
-    const active = container.querySelector(".step-row.active:last-child");
+    const actives = container.querySelectorAll(".step-row.active");
+    const active = actives.length ? actives[actives.length - 1] : null;
     if (!active) {
       return;
     }
@@ -415,7 +641,8 @@
   }
 
   function updateActiveStep(container, text) {
-    const active = container.querySelector(".step-row.active:last-child");
+    const actives = container.querySelectorAll(".step-row.active");
+    const active = actives.length ? actives[actives.length - 1] : null;
     if (!active) {
       return;
     }

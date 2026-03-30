@@ -50,6 +50,8 @@ class WebGateway:
             Route("/api/skills", self.api_skills),
             Route("/api/recordings", self.api_recordings),
             Route("/api/expressions", self.api_expressions),
+            Route("/api/openclaw/tasks", self.api_openclaw_tasks),
+            Route("/api/openclaw/tasks/{task_id:str}/confirm", self.api_openclaw_confirm, methods=["POST"]),
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
             Route("/api/estop", self.api_estop, methods=["POST"]),
             WebSocketRoute("/ws", self.ws_endpoint),
@@ -100,7 +102,7 @@ class WebGateway:
         request_id = body.get("request_id", uuid.uuid4().hex[:12])
         await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
 
-        result = await self.server.handle_request({"cmd": "text", "input": text})
+        result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id})
 
         intent_type = result.get("result", {}).get("type", "unknown")
         skill_id = result.get("result", {}).get("skill_id")
@@ -110,25 +112,28 @@ class WebGateway:
                 intent_type=intent_type,
                 skill_id=skill_id,
                 chat_response=chat_response,
+                source=result.get("result", {}).get("source", ""),
+                detail=result.get("result", {}).get("detail"),
+                matched_keyword=result.get("result", {}).get("matched_keyword"),
                 request_id=request_id,
             )
         )
         if chat_response:
-            await self.server.events.publish(
-                ChatMessage(role="assistant", content=chat_response, request_id=request_id)
-            )
+            await self.server.events.publish(ChatMessage(role="assistant", content=chat_response, request_id=request_id))
 
         result["request_id"] = request_id
         return JSONResponse(result)
 
     async def api_invoke(self, request: Request) -> JSONResponse:
         body = await request.json()
-        result = await self.server.handle_request({
-            "cmd": "invoke",
-            "skill_id": body.get("skill_id", ""),
-            "params": body.get("params", {}),
-            "wait": body.get("wait", True),
-        })
+        result = await self.server.handle_request(
+            {
+                "cmd": "invoke",
+                "skill_id": body.get("skill_id", ""),
+                "params": body.get("params", {}),
+                "wait": body.get("wait", True),
+            }
+        )
         return JSONResponse(result)
 
     async def api_status(self, request: Request) -> JSONResponse:
@@ -144,6 +149,22 @@ class WebGateway:
 
     async def api_expressions(self, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "result": {"expressions": self._list_expressions()}})
+
+    async def api_openclaw_tasks(self, request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "result": {"openclaw_tasks": self.server.openclaw.list_tasks()}})
+
+    async def api_openclaw_confirm(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        task_id = request.path_params["task_id"]
+        proposal_id = str(body.get("proposal_id", "")).strip()
+        decision = str(body.get("decision", "")).strip()
+        if not proposal_id or decision not in {"approve", "reject"}:
+            return JSONResponse({"ok": False, "error": "proposal_id and decision are required"}, status_code=400)
+        try:
+            task = await self.server.openclaw.confirm_promotion(task_id, proposal_id, decision)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": "task or proposal not found"}, status_code=404)
+        return JSONResponse({"ok": True, "result": {"openclaw_task": task}})
 
     async def api_cancel(self, request: Request) -> JSONResponse:
         await self.server.executor.cancel_current()
@@ -185,7 +206,7 @@ class WebGateway:
                 return
 
             await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
-            result = await self.server.handle_request({"cmd": "text", "input": text})
+            result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id})
 
             intent_type = result.get("result", {}).get("type", "unknown")
             skill_id = result.get("result", {}).get("skill_id")
@@ -195,24 +216,27 @@ class WebGateway:
                     intent_type=intent_type,
                     skill_id=skill_id,
                     chat_response=chat_resp,
+                    source=result.get("result", {}).get("source", ""),
+                    detail=result.get("result", {}).get("detail"),
+                    matched_keyword=result.get("result", {}).get("matched_keyword"),
                     request_id=request_id,
                 )
             )
             if chat_resp:
-                await self.server.events.publish(
-                    ChatMessage(role="assistant", content=chat_resp, request_id=request_id)
-                )
+                await self.server.events.publish(ChatMessage(role="assistant", content=chat_resp, request_id=request_id))
 
             result["request_id"] = request_id
             await ws.send_json(result)
 
         elif msg_type == "invoke":
-            result = await self.server.handle_request({
-                "cmd": "invoke",
-                "skill_id": msg.get("skill_id", ""),
-                "params": msg.get("params", {}),
-                "wait": msg.get("wait", True),
-            })
+            result = await self.server.handle_request(
+                {
+                    "cmd": "invoke",
+                    "skill_id": msg.get("skill_id", ""),
+                    "params": msg.get("params", {}),
+                    "wait": msg.get("wait", True),
+                }
+            )
             result["request_id"] = request_id
             await ws.send_json(result)
 
@@ -243,6 +267,29 @@ class WebGateway:
                     "request_id": request_id,
                 }
             )
+
+        elif msg_type == "openclaw_tasks":
+            await ws.send_json(
+                {
+                    "ok": True,
+                    "result": {"openclaw_tasks": self.server.openclaw.list_tasks()},
+                    "request_id": request_id,
+                }
+            )
+
+        elif msg_type == "confirm_promotion":
+            proposal_id = str(msg.get("proposal_id", "")).strip()
+            decision = str(msg.get("decision", "")).strip()
+            task_id = str(msg.get("task_id", "")).strip()
+            if not task_id or not proposal_id or decision not in {"approve", "reject"}:
+                await ws.send_json({"ok": False, "error": "task_id, proposal_id and decision are required", "request_id": request_id})
+                return
+            try:
+                task = await self.server.openclaw.confirm_promotion(task_id, proposal_id, decision)
+            except KeyError:
+                await ws.send_json({"ok": False, "error": "task or proposal not found", "request_id": request_id})
+                return
+            await ws.send_json({"ok": True, "result": {"openclaw_task": task}, "request_id": request_id})
 
         elif msg_type == "cancel":
             await self.server.executor.cancel_current()

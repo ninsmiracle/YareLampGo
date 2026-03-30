@@ -195,7 +195,8 @@ button {
 }
 
 .status-list,
-.joint-panel {
+.joint-panel,
+.openclaw-task-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -289,6 +290,110 @@ button {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--skill-button-min)), 1fr));
   gap: 10px;
   align-content: start;
+}
+
+.openclaw-empty {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: #fffaf7;
+  border: 1px dashed var(--border);
+  color: var(--text-faint);
+}
+
+.openclaw-task-card {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #fffdfa 0%, #fbf4ef 100%);
+  border-radius: 16px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.openclaw-task-head,
+.openclaw-task-row,
+.proposal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.openclaw-task-title {
+  font-weight: 700;
+  color: #5a504b;
+}
+
+.openclaw-task-status {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #9b6b61;
+  background: #f8e9e3;
+  border: 1px solid #f0d0c7;
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+.openclaw-task-detail,
+.proposal-summary,
+.proposal-files,
+.proposal-risks {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+
+.proposal-card {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.proposal-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b615d;
+}
+
+.proposal-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.proposal-actions {
+  margin-top: 4px;
+}
+
+.proposal-btn {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  transition: 0.18s ease;
+}
+
+.proposal-btn.approve {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: rgba(94, 155, 129, 0.28);
+}
+
+.proposal-btn.reject {
+  background: var(--danger-soft);
+  color: #b05955;
+  border-color: rgba(221, 124, 120, 0.24);
+}
+
+.proposal-btn:hover {
+  transform: translateY(-1px);
 }
 
 .skill-btn {

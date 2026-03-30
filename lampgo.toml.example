@@ -39,6 +39,9 @@ web_search_country = ""
 web_search_region = ""
 web_search_city = ""
 
+[camera]
+port = ""                      # USB 摄像头索引（0 / 1）；留空 = 不附带图像给 LLM
+
 [voice]
 stt_provider = ""              # 语音转文字: whisper, azure, local (留空 = 禁用)
 tts_provider = ""              # 文字转语音: edge-tts, azure, local (留空 = 禁用)

@@ -72,16 +72,30 @@ class HeadShakeSkill(Skill):
 
 class LookAtSkill(Skill):
     skill_id = "look_at"
-    description = "Look in a direction by setting yaw and pitch."
+    description = "Look in a direction by setting absolute yaw and pitch angles. Positive pitch = tilt forward/look down; negative pitch = tilt backward/look up. Positive yaw = turn right; negative yaw = turn left."
     parameters = {
-        "yaw": ParameterSpec(name="yaw", type="float", required=False, default=0.0, description="Yaw degrees"),
-        "pitch": ParameterSpec(name="pitch", type="float", required=False, default=0.0, description="Pitch degrees"),
+        "yaw": ParameterSpec(
+            name="yaw",
+            type="float",
+            required=False,
+            default=None,
+            description="Absolute yaw in degrees (-150~150). Positive=right, negative=left. Omit to keep current yaw.",
+        ),
+        "pitch": ParameterSpec(
+            name="pitch",
+            type="float",
+            required=False,
+            default=None,
+            description="Absolute pitch in degrees (-100~65). Positive=forward/look down, negative=backward/look up. E.g. -60 to look up, 30 to look down. Omit to keep current pitch.",
+        ),
         "velocity": ParameterSpec(name="velocity", type="float", required=False, description="Max deg/s"),
     }
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        yaw = float(params.get("yaw", 0.0))
-        pitch = float(params.get("pitch", 0.0))
+        yaw_value = params.get("yaw")
+        pitch_value = params.get("pitch")
+        yaw = float(yaw_value) if yaw_value is not None else ctx.state.get("base_yaw", 0.0)
+        pitch = float(pitch_value) if pitch_value is not None else ctx.state.get("base_pitch", 0.0)
         velocity = params.get("velocity")
         target = MotionTarget(
             joints={"base_yaw": yaw, "base_pitch": pitch},

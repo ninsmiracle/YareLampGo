@@ -11,18 +11,25 @@ import structlog
 from starlette.websockets import WebSocket, WebSocketState
 
 from lampgo.core.events import (
+    AgentFinished,
     ChatMessage,
     EStopActivated,
     EStopReset,
     Event,
     EventBus,
+    IntentProgress,
     IntentResolved,
     IntentRouting,
+    OpenClawPromotionDecision,
+    OpenClawPromotionRequested,
+    OpenClawTaskUpdated,
     SafetyTriggered,
     SkillCancelled,
     SkillFinished,
     SkillProgress,
     SkillStarted,
+    ToolCallFinished,
+    ToolCallPlanned,
 )
 
 if TYPE_CHECKING:
@@ -38,7 +45,14 @@ ALL_EVENT_TYPES: list[type[Event]] = [
     EStopActivated,
     EStopReset,
     IntentRouting,
+    IntentProgress,
     IntentResolved,
+    OpenClawTaskUpdated,
+    OpenClawPromotionRequested,
+    OpenClawPromotionDecision,
+    ToolCallPlanned,
+    ToolCallFinished,
+    AgentFinished,
     SkillProgress,
     ChatMessage,
 ]

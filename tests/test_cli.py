@@ -12,6 +12,9 @@ from lampgo import cli
 def test_build_help_text_contains_common_commands():
     text = cli._build_help_text()
     assert "uv run lampgo run" in text
+    assert "uv run lampgo run --web" in text
+    assert "http://localhost:8420" in text
+    assert "uv run lampgo detect" in text
     assert "uv run lampgo clear" in text
     assert "uv run lampgo calibrate" in text
 

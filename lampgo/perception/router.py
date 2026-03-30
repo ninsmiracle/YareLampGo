@@ -9,6 +9,7 @@ Routing strategy:
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -30,21 +31,46 @@ class RoutedIntent:
     skill_id: str | None = None
     params: dict[str, Any] | None = None
     chat_response: str | None = None
+    source: str = ""
+    detail: str | None = None
+    matched_keyword: str | None = None
 
 
-GREETING_PATTERNS = re.compile(
-    r"^(你好|hi|hello|hey|嗨|早|晚上好|下午好|早上好|morning|afternoon|evening)\b",
-    re.IGNORECASE,
+NORMALIZE_TABLE = str.maketrans(
+    {
+        "，": ",",
+        "。": ".",
+        "；": ";",
+        "：": ":",
+        "！": "!",
+        "？": "?",
+        "（": "(",
+        "）": ")",
+    }
 )
-
+TRAILING_PUNCTUATION = " ,.?!;:()[]{}\"'`"
+COMPOSITE_MARKERS = ("然后", "再", "并且", "接着", "随后", "同时", "之后", ",", ";", "、")
+GREETING_PHRASES = {
+    "你好",
+    "hi",
+    "hello",
+    "hey",
+    "嗨",
+    "早",
+    "早上好",
+    "下午好",
+    "晚上好",
+    "morning",
+    "afternoon",
+    "evening",
+}
 SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "点头": ("nod", None),
     "摇头": ("headshake", None),
     "跳舞": ("dance", None),
-    "舞": ("dance", None),
-    "看": ("look_at", None),
     "打招呼": ("nod", None),
     "停": ("estop", None),
+    "停止": ("estop", None),
     "stop": ("estop", None),
     "回去": ("return_safe", None),
     "回家": ("return_safe", None),
@@ -52,7 +78,6 @@ SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "nod": ("nod", None),
     "dance": ("dance", None),
     "shake": ("headshake", None),
-    "wave": ("dance", None),
     "idle": ("idle_sway", None),
     "sway": ("idle_sway", None),
     "害羞": ("set_expression", {"expression": "blush"}),
@@ -81,51 +106,79 @@ class IntentRouter:
         """Inject an LLMClient for fallback classification."""
         self._llm_client = client
 
+    @property
+    def has_llm_client(self) -> bool:
+        return self._llm_client is not None
+
     def route(self, text: str) -> RoutedIntent:
         """Synchronous keyword-only routing."""
         return self._keyword_route(text)
 
-    async def aroute(self, text: str) -> RoutedIntent:
-        """Async routing: keyword first, then LLM fallback if available."""
+    async def aroute(
+        self,
+        text: str,
+        on_progress: Callable[[str, str, str], Awaitable[None]] | None = None,
+    ) -> RoutedIntent:
+        """Async routing: keyword first, then agent loop fallback if available."""
         result = self._keyword_route(text)
         if result.intent_type != IntentType.COMPLEX:
             return result
 
-        if self._llm_client is not None:
-            try:
-                return await self._llm_route(text)
-            except Exception:
-                logger.exception("router.llm_fallback_error")
-
+        logger.info("router.no_route_match", text=text)
         return result
 
     def _keyword_route(self, text: str) -> RoutedIntent:
-        text = text.strip()
+        normalized = _normalize_text(text)
+        if _looks_composite(normalized):
+            logger.info("router.keyword_skipped_composite", text=text, normalized=normalized)
+            return RoutedIntent(
+                intent_type=IntentType.COMPLEX,
+                source="keyword",
+                detail="包含复合结构，跳过关键词快路径",
+            )
 
-        if GREETING_PATTERNS.match(text):
+        if normalized in GREETING_PHRASES:
+            logger.info("router.keyword_greeting_hit", text=text, normalized=normalized)
             return RoutedIntent(
                 intent_type=IntentType.CHAT,
                 chat_response=self._greeting_response(text),
+                source="keyword",
+                detail="问候语整句命中",
+                matched_keyword=normalized,
             )
 
-        text_lower = text.lower()
-        for keyword, (skill_id, params) in SKILL_KEYWORDS.items():
-            if keyword in text_lower:
-                return RoutedIntent(
-                    intent_type=IntentType.SKILL,
-                    skill_id=skill_id,
-                    params=params,
-                    chat_response=f"好的，执行 {skill_id}",
-                )
+        if normalized in SKILL_KEYWORDS:
+            skill_id, params = SKILL_KEYWORDS[normalized]
+            logger.info("router.keyword_skill_hit", text=text, normalized=normalized, keyword=normalized, skill_id=skill_id)
+            return RoutedIntent(
+                intent_type=IntentType.SKILL,
+                skill_id=skill_id,
+                params=params,
+                chat_response=f"好的，执行 {skill_id}",
+                source="keyword",
+                detail=f"关键词整句命中: {normalized}",
+                matched_keyword=normalized,
+            )
 
-        return RoutedIntent(intent_type=IntentType.COMPLEX)
+        logger.info("router.keyword_no_match", text=text, normalized=normalized)
+        return RoutedIntent(
+            intent_type=IntentType.COMPLEX,
+            source="keyword",
+            detail="未命中任何关键词",
+        )
 
-    async def _llm_route(self, text: str) -> RoutedIntent:
-        """Use fast LLM to classify intent. Injected client must have classify_intent()."""
-        result = await self._llm_client.classify_intent(text)
-        if result is None:
-            return RoutedIntent(intent_type=IntentType.COMPLEX)
-        return result
+    async def run_agent_loop(
+        self,
+        text: str,
+        execute_tool: Callable[[str, dict[str, Any], int, int], Awaitable[dict[str, Any]]],
+        on_progress: Callable[[str, str, str], Awaitable[None]] | None = None,
+        joint_state: dict[str, float] | None = None,
+    ):
+        if self._llm_client is None:
+            raise RuntimeError("LLM client not configured")
+        return await self._llm_client.run_agent_loop(
+            text, execute_tool=execute_tool, on_progress=on_progress, joint_state=joint_state,
+        )
 
     def _greeting_response(self, text: str) -> str:
         if any(w in text for w in ("早", "morning")):
@@ -133,3 +186,14 @@ class IntentRouter:
         if any(w in text for w in ("晚", "evening")):
             return "晚上好！"
         return "你好！"
+
+
+def _normalize_text(text: str) -> str:
+    normalized = text.strip().lower().translate(NORMALIZE_TABLE)
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = normalized.rstrip(TRAILING_PUNCTUATION)
+    return normalized
+
+
+def _looks_composite(normalized: str) -> bool:
+    return any(marker in normalized for marker in COMPOSITE_MARKERS)

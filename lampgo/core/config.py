@@ -107,6 +107,14 @@ class LLMConfig(BaseModel):
     web_search_country: str = Field(default="", description="Approximate country for MiMo web search")
     web_search_region: str = Field(default="", description="Approximate region for MiMo web search")
     web_search_city: str = Field(default="", description="Approximate city for MiMo web search")
+    max_agent_turns: int = Field(default=20, ge=1, le=50, description="Max LLM agent loop turns")
+    max_agent_tool_calls: int = Field(default=50, ge=1, le=100, description="Max total tool calls per agent loop")
+
+
+class CameraConfig(BaseModel):
+    """Camera capture settings used for LLM vision input."""
+
+    port: str = Field(default="", description="Camera device index or path (empty = disabled)")
 
 
 class VoiceConfig(BaseModel):
@@ -138,6 +146,7 @@ class LampgoConfig(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     led: LEDConfig = Field(default_factory=LEDConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    camera: CameraConfig = Field(default_factory=CameraConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
@@ -216,6 +225,9 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
         "LAMPGO_LLM_WEB_SEARCH_COUNTRY": ("llm", "web_search_country"),
         "LAMPGO_LLM_WEB_SEARCH_REGION": ("llm", "web_search_region"),
         "LAMPGO_LLM_WEB_SEARCH_CITY": ("llm", "web_search_city"),
+        "LAMPGO_LLM_MAX_AGENT_TURNS": ("llm", "max_agent_turns"),
+        "LAMPGO_LLM_MAX_AGENT_TOOL_CALLS": ("llm", "max_agent_tool_calls"),
+        "LAMPGO_CAMERA_PORT": ("camera", "port"),
         "LAMPGO_VOICE_STT_PROVIDER": ("voice", "stt_provider"),
         "LAMPGO_VOICE_TTS_PROVIDER": ("voice", "tts_provider"),
         "LAMPGO_VOICE_TTS_VOICE": ("voice", "tts_voice"),
