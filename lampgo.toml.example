@@ -29,6 +29,18 @@ fast_model = "gpt-4o-mini"     # 快速意图分类模型
 api_base = ""                  # 自定义 API 地址 (本地/代理模型)
 temperature = 0.3
 max_tokens = 512
+timeout_s = 15.0
+web_search_enabled = true      # MiMo 支持时启用内置联网搜索
+web_search_force = false       # false = 模型自行判断是否联网
+web_search_limit = 3
+web_search_max_keyword = 3
+# 可选：给 MiMo 联网搜索一个近似位置，便于天气/本地信息查询
+web_search_country = ""
+web_search_region = ""
+web_search_city = ""
+
+[camera]
+port = ""                      # USB 摄像头索引（0 / 1）；留空 = 不附带图像给 LLM
 
 [voice]
 stt_provider = ""              # 语音转文字: whisper, azure, local (留空 = 禁用)

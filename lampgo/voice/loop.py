@@ -89,7 +89,7 @@ class VoiceLoop:
             chat = result.get("chat_response", "")
             if chat:
                 await self._tts.speak(chat)
-        elif rtype == "complex":
+        elif rtype in {"complex", "openclaw"}:
             await self._tts.speak("这个请求需要通过 OpenClaw 来处理")
 
     async def _collect_speech(self) -> bytes | None:

@@ -47,6 +47,7 @@ class MotionStatus:
     target: MotionTarget | None = None
     progress: float = 0.0
     is_done: bool = True
+    stalled: bool = False
 
 
 class DeviceHealth(Enum):
