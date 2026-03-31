@@ -59,6 +59,35 @@ class SafetyKernel:
             max_acceleration=target.max_acceleration,
         )
 
+    def clamp_positions(self, current: JointState, positions: dict[str, float]) -> dict[str, float]:
+        """Clamp raw joint positions without applying per-tick velocity limits.
+
+        This is used for prerecorded playback, where each CSV frame is already a
+        discrete target sampled at its own FPS. Re-applying control-tick velocity
+        limits here distorts the original motion.
+        """
+        if self._estopped:
+            return dict(current.positions)
+
+        safe: dict[str, float] = {}
+        for joint, value in positions.items():
+            limits = self._config.joint_limits.get(joint)
+            if limits is None:
+                safe[joint] = current.get(joint)
+                continue
+
+            clamped = max(limits.min, min(limits.max, value))
+            if clamped != value:
+                logger.warning(
+                    "safety.playback_clamped",
+                    joint=joint,
+                    requested=value,
+                    clamped=clamped,
+                )
+            safe[joint] = clamped
+
+        return safe
+
     # ------------------------------------------------------------------
     # Frame-level validation (every control tick)
     # ------------------------------------------------------------------

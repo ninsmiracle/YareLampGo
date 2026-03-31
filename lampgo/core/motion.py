@@ -156,6 +156,9 @@ class MotionRuntime:
         _stream_fps = 30
         _stream_accumulator = 0.0
         _diag_counter = 0
+        _initial_distance = 0.0
+        _stall_ticks = 0
+        _prev_hw_remaining = -1.0
 
         while self._running:
             t0 = time.monotonic()
@@ -197,10 +200,16 @@ class MotionRuntime:
                         if _active_done:
                             _active_done.set()
                         _active_done = cmd.done_event
+                        _initial_distance = sum(
+                            abs(v - self._current_state.get(k, v))
+                            for k, v in validated.joints.items()
+                        )
+                        _stall_ticks = 0
+                        _prev_hw_remaining = -1.0
                         self._status = MotionStatus(target=validated, progress=0.0, is_done=False)
                         logger.info("motion.move_accepted", target=validated.joints, vel=validated.max_velocity)
                     else:
-                        logger.warning("motion.target_rejected", reason=getattr(validated, 'reason', ''))
+                        logger.warning("motion.target_rejected", reason=getattr(validated, "reason", ""))
                         if cmd.done_event:
                             cmd.done_event.set()
 
@@ -230,12 +239,14 @@ class MotionRuntime:
 
             # --- Compute next frame ---
             next_frame: dict[str, float] | None = None
+            playback_frame_due = False
 
             if _stream_frames:
                 _stream_accumulator += dt
                 frame_interval = 1.0 / _stream_fps
                 if _stream_accumulator >= frame_interval and _stream_idx < len(_stream_frames):
                     next_frame = _stream_frames[_stream_idx]
+                    playback_frame_due = True
                     _stream_idx += 1
                     _stream_accumulator -= frame_interval
                     progress = _stream_idx / len(_stream_frames)
@@ -251,43 +262,64 @@ class MotionRuntime:
             elif self._current_target is not None:
                 next_frame = self._trapezoidal_step(self._current_target, dt)
 
-                all_done = True
-                for joint, target_val in self._current_target.joints.items():
-                    if next_frame and abs(next_frame.get(joint, target_val) - target_val) > 0.5:
-                        all_done = False
-                        break
-
-                if all_done:
-                    self._current_target = None
-                    self._joint_velocities.clear()
-                    self._planned_positions.clear()
-                    self._status = MotionStatus(progress=1.0, is_done=True)
-                    logger.info("motion.move_done")
-                    if _active_done:
-                        _active_done.set()
-                        _active_done = None
-                else:
-                    total_dist = 0.0
-                    remaining_dist = 0.0
-                    for joint, target_val in self._current_target.joints.items():
-                        cur = self._current_state.get(joint, target_val)
-                        d = abs(target_val - cur)
-                        total_dist += d
-                        if next_frame:
-                            remaining_dist += abs(target_val - next_frame.get(joint, target_val))
-                    progress = 1.0 - (remaining_dist / total_dist) if total_dist > 0 else 1.0
-                    self._status = MotionStatus(
-                        target=self._current_target, progress=max(0.0, min(1.0, progress)), is_done=False
-                    )
-
             # --- Validate and write ---
+            safe_frame = None
             if next_frame is not None:
-                safe_frame = self._safety.validate_frame(self._current_state, next_frame, dt)
+                if playback_frame_due:
+                    safe_frame = self._safety.clamp_positions(self._current_state, next_frame)
+                else:
+                    safe_frame = self._safety.validate_frame(self._current_state, next_frame, dt)
                 try:
                     self._hal.write_positions(safe_frame)
                 except Exception:
                     self._safety.report_bus_health(False)
                     logger.exception("motion.write_failed")
+
+            # --- Check move completion (after write) ---
+            if self._current_target is not None and not _stream_frames:
+                check_pos = safe_frame if safe_frame else self._current_state.positions
+                hw_remaining = sum(
+                    abs(tv - check_pos.get(j, self._current_state.get(j, tv)))
+                    for j, tv in self._current_target.joints.items()
+                )
+
+                _was_stalled = False
+                all_done = all(
+                    abs(check_pos.get(j, self._current_state.get(j, tv)) - tv) < 1.0
+                    for j, tv in self._current_target.joints.items()
+                )
+
+                if not all_done:
+                    actual_remaining = sum(
+                        abs(tv - self._current_state.get(j, tv))
+                        for j, tv in self._current_target.joints.items()
+                    )
+                    if _prev_hw_remaining >= 0 and abs(actual_remaining - _prev_hw_remaining) < 0.3:
+                        _stall_ticks += 1
+                    else:
+                        _stall_ticks = 0
+                    _prev_hw_remaining = actual_remaining
+
+                    if _stall_ticks > 250:
+                        logger.warning("motion.move_stalled", remaining={
+                            j: round(self._current_state.get(j, tv) - tv, 1)
+                            for j, tv in self._current_target.joints.items()
+                        })
+                        all_done = True
+                        _was_stalled = True
+
+                if all_done:
+                    self._current_target = None
+                    self._joint_velocities.clear()
+                    self._planned_positions.clear()
+                    self._status = MotionStatus(progress=1.0, is_done=True, stalled=_was_stalled)
+                    logger.info("motion.move_done")
+                    if _active_done:
+                        _active_done.set()
+                        _active_done = None
+                else:
+                    progress = 1.0 - (hw_remaining / _initial_distance) if _initial_distance > 1.0 else 1.0
+                    self._status = MotionStatus(target=self._current_target, progress=max(0.0, min(1.0, progress)), is_done=False)
 
             _diag_counter += 1
             if _diag_counter % 250 == 0 and self._current_target is not None:
@@ -295,7 +327,7 @@ class MotionRuntime:
                     "motion.diag",
                     pos={k: round(v, 1) for k, v in self._current_state.positions.items()},
                     target={k: round(v, 1) for k, v in self._current_target.joints.items()},
-                    wrote=({k: round(v, 1) for k, v in safe_frame.items()} if next_frame else None),
+                    wrote=({k: round(v, 1) for k, v in safe_frame.items()} if safe_frame else None),
                     progress=round(self._status.progress, 3),
                     estopped=self._safety.is_estopped(),
                 )
@@ -320,16 +352,14 @@ class MotionRuntime:
         result: dict[str, float] = {}
 
         for joint, target_pos in target.joints.items():
-            current_pos = self._planned_positions.get(
-                joint, self._current_state.get(joint, target_pos)
-            )
+            current_pos = self._planned_positions.get(joint, self._current_state.get(joint, target_pos))
             current_vel = self._joint_velocities.get(joint, 0.0)
 
             error = target_pos - current_pos
             distance = abs(error)
             direction = 1.0 if error > 0 else (-1.0 if error < 0 else 0.0)
 
-            stopping_dist = (current_vel ** 2) / (2.0 * max_acc) if max_acc > 0 else 0.0
+            stopping_dist = (current_vel**2) / (2.0 * max_acc) if max_acc > 0 else 0.0
 
             if distance < 0.1:
                 result[joint] = target_pos

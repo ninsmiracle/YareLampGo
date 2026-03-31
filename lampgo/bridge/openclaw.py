@@ -1,18 +1,89 @@
-"""OpenClaw adapter — exposes lampgo skills as OpenClaw-callable capabilities."""
+"""OpenClaw adapter — exposes lampgo skills and manages complex-task handoff."""
 
 from __future__ import annotations
 
+import asyncio
+import re
+import time
+import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
+from lampgo.core.events import (
+    EventBus,
+    OpenClawPromotionDecision,
+    OpenClawPromotionRequested,
+    OpenClawTaskUpdated,
+)
 from lampgo.core.types import InvokeResult
 from lampgo.skills.base import Skill, SkillContext
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.registry import SkillRegistry
 
 logger = structlog.get_logger(__name__)
+INNOVATION_MARKERS = ("创新", "新动作", "表演", "编一个", "设计一个", "原创", "即兴", "新舞", "动作")
+LOGIC_MARKERS = ("技能", "逻辑", "自动", "模式", "工作流", "代码")
+
+
+@dataclass
+class PromotionProposal:
+    proposal_id: str
+    proposal_type: str
+    title: str
+    summary: str
+    files: list[str]
+    risks: list[str]
+    worker: str = "claude_code"
+    promotion_target: str = ""
+    status: str = "pending"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "proposal_id": self.proposal_id,
+            "proposal_type": self.proposal_type,
+            "title": self.title,
+            "summary": self.summary,
+            "files": list(self.files),
+            "risks": list(self.risks),
+            "worker": self.worker,
+            "promotion_target": self.promotion_target,
+            "status": self.status,
+        }
+
+
+@dataclass
+class OpenClawTask:
+    task_id: str
+    request_id: str
+    user_text: str
+    reason: str
+    source: str = "openclaw"
+    status: str = "queued"
+    detail: str = ""
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    available_capability_count: int = 0
+    recent_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    proposals: list[PromotionProposal] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "request_id": self.request_id,
+            "user_text": self.user_text,
+            "reason": self.reason,
+            "source": self.source,
+            "status": self.status,
+            "detail": self.detail,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "available_capability_count": self.available_capability_count,
+            "recent_tool_calls": list(self.recent_tool_calls),
+            "proposals": [proposal.to_dict() for proposal in self.proposals],
+        }
 
 
 class CapabilitySpec:
@@ -42,10 +113,13 @@ class CapabilitySpec:
 class OpenClawAdapter:
     """Bridge between OpenClaw protocol and lampgo's skill system."""
 
-    def __init__(self, registry: SkillRegistry, executor: SkillExecutor) -> None:
+    def __init__(self, registry: SkillRegistry, executor: SkillExecutor, events: EventBus) -> None:
         self._registry = registry
         self._executor = executor
+        self._events = events
         self._event_subscribers: list[Callable[..., Awaitable[None]]] = []
+        self._tasks: dict[str, OpenClawTask] = {}
+        self._lock = asyncio.Lock()
 
     def get_capabilities(self) -> list[CapabilitySpec]:
         return [CapabilitySpec(skill) for skill in self._registry.list_skills()]
@@ -63,3 +137,184 @@ class OpenClawAdapter:
 
     def list_capabilities_dict(self) -> list[dict[str, Any]]:
         return [cap.to_dict() for cap in self.get_capabilities()]
+
+    def list_tasks(self) -> list[dict[str, Any]]:
+        return [task.to_dict() for task in sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)]
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        task = self._tasks.get(task_id)
+        return task.to_dict() if task is not None else None
+
+    async def submit_complex_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(payload.get("request_id", ""))
+        user_text = str(payload.get("user_text", "")).strip()
+        reason = str(payload.get("reason") or payload.get("detail") or "需要 OpenClaw 慢路径处理").strip()
+        task = OpenClawTask(
+            task_id=f"oc_{uuid.uuid4().hex[:10]}",
+            request_id=request_id,
+            user_text=user_text,
+            reason=reason,
+            detail="已提交到 OpenClaw，准备规划复杂任务。",
+            available_capability_count=len(payload.get("available_capabilities", [])),
+            recent_tool_calls=list(payload.get("recent_tool_calls", [])),
+        )
+        async with self._lock:
+            self._tasks[task.task_id] = task
+        logger.info("openclaw.submit_complex_task", task_id=task.task_id, request_id=request_id, reason=reason)
+        await self._publish_task_update(task)
+        asyncio.create_task(self._plan_task(task.task_id, payload))
+        return task.to_dict()
+
+    async def confirm_promotion(self, task_id: str, proposal_id: str, decision: str) -> dict[str, Any]:
+        normalized = "approve" if decision in {"approve", "approved", "confirm"} else "reject"
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            proposal = next((item for item in task.proposals if item.proposal_id == proposal_id), None)
+            if proposal is None:
+                raise KeyError(proposal_id)
+            proposal.status = "approved" if normalized == "approve" else "rejected"
+            task.status = "promoted" if normalized == "approve" else "rejected"
+            task.detail = (
+                "已确认沉淀，等待 OpenClaw 后续落地。"
+                if normalized == "approve"
+                else "已拒绝沉淀，保留 temporary 方案，不进入长期能力。"
+            )
+            task.updated_at = time.time()
+            task_snapshot = task.to_dict()
+        logger.info(
+            "openclaw.confirm_promotion",
+            task_id=task_id,
+            proposal_id=proposal_id,
+            decision=normalized,
+        )
+        await self._events.publish(
+            OpenClawPromotionDecision(
+                request_id=task.request_id,
+                task_id=task_id,
+                proposal_id=proposal_id,
+                decision=normalized,
+                task=task_snapshot,
+            )
+        )
+        await self._publish_task_update(task)
+        return task_snapshot
+
+    async def _plan_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        await asyncio.sleep(0)
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "planning"
+            task.detail = "OpenClaw 正在分析任务，并评估是否能复用现有能力。"
+            task.updated_at = time.time()
+        await self._publish_task_update(task)
+
+        task_snapshot: dict[str, Any] | None = None
+        proposal_snapshot: dict[str, Any] | None = None
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            proposal = self._build_proposal(task, payload)
+            if proposal is None:
+                task.status = "queued"
+                task.detail = "已提交给 OpenClaw 外部编排器，等待进一步执行。"
+                task.updated_at = time.time()
+            else:
+                task.status = "generating_temporary_asset"
+                task.detail = f"OpenClaw 正在调用 {proposal.worker} 生成 temporary 方案。"
+                task.updated_at = time.time()
+        await self._publish_task_update(task)
+
+        if proposal is None:
+            return
+
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.proposals.append(proposal)
+            task.status = "awaiting_promotion_confirmation"
+            task.detail = "OpenClaw 生成了 temporary 方案，等待你确认是否 promoted。"
+            task.updated_at = time.time()
+            task_snapshot = task.to_dict()
+            proposal_snapshot = proposal.to_dict()
+
+        logger.info(
+            "openclaw.code_worker_generated_proposal",
+            task_id=task.task_id,
+            proposal_id=proposal.proposal_id,
+            worker=proposal.worker,
+        )
+        await asyncio.sleep(0)
+        logger.info(
+            "openclaw.promotion_requested",
+            task_id=task.task_id,
+            proposal_id=proposal.proposal_id,
+            proposal_type=proposal.proposal_type,
+        )
+        await self._events.publish(
+            OpenClawPromotionRequested(
+                request_id=task.request_id,
+                task_id=task.task_id,
+                proposal=proposal_snapshot,
+                task=task_snapshot,
+            )
+        )
+        await self._publish_task_update(task)
+        return
+
+    async def _publish_task_update(self, task: OpenClawTask) -> None:
+        snapshot = task.to_dict()
+        await self._events.publish(OpenClawTaskUpdated(request_id=task.request_id, task=snapshot))
+
+    def _build_proposal(self, task: OpenClawTask, payload: dict[str, Any]) -> PromotionProposal | None:
+        text = task.user_text
+        lowered = text.lower()
+        slug = _slug_from_text(text, task.task_id)
+        if any(marker in text for marker in INNOVATION_MARKERS):
+            return PromotionProposal(
+                proposal_id=f"proposal_{uuid.uuid4().hex[:8]}",
+                proposal_type="recording_proposal",
+                title="建议沉淀为新录制动作",
+                summary=(
+                    "OpenClaw 判断该请求更适合先生成一个 temporary 录制动作，"
+                    "验证效果后再提升为长期 recording 能力。"
+                ),
+                files=[
+                    f"assets/recordings/{slug}.csv",
+                    "openclaw-skills/lampgo/SKILL.md",
+                ],
+                risks=[
+                    "动作轨迹需要人工复核安全性",
+                    "生成后的动作名称和语义映射可能需要调整",
+                ],
+                promotion_target="recording",
+            )
+        if any(marker in text for marker in LOGIC_MARKERS) or "code" in lowered:
+            return PromotionProposal(
+                proposal_id=f"proposal_{uuid.uuid4().hex[:8]}",
+                proposal_type="builtin_skill_proposal",
+                title="建议沉淀为 builtin skill",
+                summary="OpenClaw 判断该请求需要新的逻辑型能力，建议先生成 temporary skill 草案，再确认 promoted。",
+                files=[
+                    f"lampgo/skills/builtin/{slug}_skill.py",
+                    f"tests/test_{slug}_skill.py",
+                ],
+                risks=[
+                    "新增 skill 需要补测试和文档",
+                    "可能需要人工调整参数与安全边界",
+                ],
+                promotion_target="builtin_skill",
+            )
+        return None
+
+
+def _slug_from_text(text: str, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    if slug:
+        return slug[:32]
+    return fallback

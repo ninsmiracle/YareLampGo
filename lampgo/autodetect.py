@@ -88,13 +88,68 @@ def _probe_esp32(port: str) -> bool:
         ser.close()
 
 
+def _list_camera_names() -> dict[int, str]:
+    """Best-effort: get human-readable camera names from the OS."""
+    names: dict[int, str] = {}
+    try:
+        import subprocess, json as _json
+        proc = subprocess.run(
+            ["system_profiler", "SPCameraDataType", "-json"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if proc.returncode == 0:
+            data = _json.loads(proc.stdout)
+            for i, cam in enumerate(data.get("SPCameraDataType", [])):
+                names[i] = cam.get("_name", f"camera_{i}")
+    except Exception:
+        pass
+    return names
+
+
+def _detect_camera() -> tuple[str | None, list[str]]:
+    """Probe camera indices 0..3 and return (recommended_port, info_messages)."""
+    try:
+        import cv2
+    except ImportError:
+        logger.info("autodetect.camera_skip", reason="opencv_not_installed")
+        return None, ["Camera detection skipped: opencv-python not installed."]
+
+    cam_names = _list_camera_names()
+    found: list[str] = []
+    recommended: str | None = None
+
+    import os, sys
+    for idx in range(4):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 2)
+        try:
+            cap = cv2.VideoCapture(idx)
+            opened = cap.isOpened()
+            cap.release()
+        finally:
+            os.dup2(old_stderr, 2)
+            os.close(devnull)
+            os.close(old_stderr)
+        if opened:
+            name = cam_names.get(idx, "")
+            label = f"{idx} ({name})" if name else str(idx)
+            found.append(f"Camera port {label}")
+            logger.info("autodetect.camera_found", port=str(idx), name=name)
+            if recommended is None:
+                recommended = str(idx)
+
+    return recommended, found
+
+
 def detect_ports() -> dict:
-    """Auto-detect motor and LED serial ports.
+    """Auto-detect motor bus, LED controller, and USB camera.
 
     Returns:
         {
             "motor_port": "/dev/ttyUSB0" or None,
             "led_port": "/dev/ttyUSB1" or None,
+            "camera_port": "0" or None,
             "all_ports": [...],
             "messages": ["..."]
         }
@@ -106,39 +161,45 @@ def detect_ports() -> dict:
 
     if not ports:
         messages.append("No serial ports found. Is the hardware connected?")
-        return {"motor_port": None, "led_port": None, "all_ports": [], "messages": messages}
+    else:
+        messages.append(f"Found {len(ports)} serial port(s): {ports}")
 
-    messages.append(f"Found {len(ports)} serial port(s): {ports}")
+        for port in ports:
+            if motor_port is not None:
+                break
+            logger.info("autodetect.probing_feetech", port=port)
+            if _probe_feetech(port):
+                motor_port = port
+                messages.append(f"Motor bus detected: {port}")
 
-    for port in ports:
-        if motor_port is not None:
-            break
-        logger.info("autodetect.probing_feetech", port=port)
-        if _probe_feetech(port):
-            motor_port = port
-            messages.append(f"Motor bus detected: {port}")
+        remaining = [p for p in ports if p != motor_port]
+        for port in remaining:
+            if led_port is not None:
+                break
+            logger.info("autodetect.probing_esp32", port=port)
+            if _probe_esp32(port):
+                led_port = port
+                messages.append(f"LED controller detected: {port}")
 
-    remaining = [p for p in ports if p != motor_port]
-    for port in remaining:
-        if led_port is not None:
-            break
-        logger.info("autodetect.probing_esp32", port=port)
-        if _probe_esp32(port):
-            led_port = port
-            messages.append(f"LED controller detected: {port}")
+        if motor_port is None:
+            messages.append("Motor bus not detected. Check connection and power.")
+            if len(ports) == 1:
+                motor_port = ports[0]
+                messages.append(f"Only one port found, assuming motor bus: {motor_port}")
+        if led_port is None and len(remaining) > 0:
+            messages.append(f"LED controller not detected. Candidate ports: {remaining}")
 
-    if motor_port is None:
-        messages.append("Motor bus not detected. Check connection and power.")
-        if len(ports) == 1:
-            motor_port = ports[0]
-            messages.append(f"Only one port found, assuming motor bus: {motor_port}")
-    if led_port is None and len(remaining) > 0:
-        messages.append(f"LED controller not detected. Candidate ports: {remaining}")
+    camera_port, cam_msgs = _detect_camera()
+    if cam_msgs:
+        messages.extend(cam_msgs)
+    elif camera_port is None:
+        messages.append("No camera detected. Check USB connection or install opencv-python.")
 
     return {
         "motor_port": motor_port,
         "led_port": led_port,
-        "all_ports": ports,
+        "camera_port": camera_port,
+        "all_ports": ports if ports else [],
         "messages": messages,
     }
 

@@ -99,6 +99,22 @@ class LLMConfig(BaseModel):
     api_base: str = Field(default="", description="Custom API base URL (for local/proxy models)")
     temperature: float = Field(default=0.3, ge=0, le=2)
     max_tokens: int = Field(default=512, gt=0)
+    timeout_s: float = Field(default=15.0, gt=0, description="HTTP timeout for LLM requests")
+    web_search_enabled: bool = Field(default=True, description="Enable MiMo built-in web search when supported")
+    web_search_force: bool = Field(default=False, description="Force MiMo web search on every request")
+    web_search_limit: int = Field(default=3, ge=1, le=10, description="Max web pages used per MiMo web search")
+    web_search_max_keyword: int = Field(default=3, ge=1, le=10, description="Max keywords per MiMo web search")
+    web_search_country: str = Field(default="", description="Approximate country for MiMo web search")
+    web_search_region: str = Field(default="", description="Approximate region for MiMo web search")
+    web_search_city: str = Field(default="", description="Approximate city for MiMo web search")
+    max_agent_turns: int = Field(default=20, ge=1, le=50, description="Max LLM agent loop turns")
+    max_agent_tool_calls: int = Field(default=50, ge=1, le=100, description="Max total tool calls per agent loop")
+
+
+class CameraConfig(BaseModel):
+    """Camera capture settings used for LLM vision input."""
+
+    port: str = Field(default="", description="Camera device index or path (empty = disabled)")
 
 
 class VoiceConfig(BaseModel):
@@ -114,6 +130,14 @@ class VoiceConfig(BaseModel):
     vad_enabled: bool = Field(default=False, description="Enable voice activity detection")
 
 
+class WebConfig(BaseModel):
+    """Web UI / gateway settings."""
+
+    host: str = Field(default="0.0.0.0", description="Web server bind address")
+    port: int = Field(default=8420, ge=1, le=65535, description="Web server port")
+    status_interval: float = Field(default=2.0, gt=0, description="Seconds between status broadcasts to WS clients")
+
+
 class LampgoConfig(BaseModel):
     """Root configuration combining all sub-configs."""
 
@@ -122,11 +146,14 @@ class LampgoConfig(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     led: LEDConfig = Field(default_factory=LEDConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    camera: CameraConfig = Field(default_factory=CameraConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
     socket_path: str = Field(default="/tmp/lampgo.sock", description="Unix socket path for IPC")
     voice_enabled: bool = Field(default=False, description="Enable voice loop on startup")
-    home_on_start: bool = Field(default=True, description="Slowly return to safe position on startup")
+    web_enabled: bool = Field(default=False, description="Enable web UI on startup")
+    home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
 
 
 def _find_project_root() -> Path:
@@ -190,6 +217,17 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
         "LAMPGO_LLM_PROVIDER": ("llm", "provider"),
         "LAMPGO_LLM_MODEL": ("llm", "model"),
         "LAMPGO_LLM_FAST_MODEL": ("llm", "fast_model"),
+        "LAMPGO_LLM_TIMEOUT_S": ("llm", "timeout_s"),
+        "LAMPGO_LLM_WEB_SEARCH_ENABLED": ("llm", "web_search_enabled"),
+        "LAMPGO_LLM_WEB_SEARCH_FORCE": ("llm", "web_search_force"),
+        "LAMPGO_LLM_WEB_SEARCH_LIMIT": ("llm", "web_search_limit"),
+        "LAMPGO_LLM_WEB_SEARCH_MAX_KEYWORD": ("llm", "web_search_max_keyword"),
+        "LAMPGO_LLM_WEB_SEARCH_COUNTRY": ("llm", "web_search_country"),
+        "LAMPGO_LLM_WEB_SEARCH_REGION": ("llm", "web_search_region"),
+        "LAMPGO_LLM_WEB_SEARCH_CITY": ("llm", "web_search_city"),
+        "LAMPGO_LLM_MAX_AGENT_TURNS": ("llm", "max_agent_turns"),
+        "LAMPGO_LLM_MAX_AGENT_TOOL_CALLS": ("llm", "max_agent_tool_calls"),
+        "LAMPGO_CAMERA_PORT": ("camera", "port"),
         "LAMPGO_VOICE_STT_PROVIDER": ("voice", "stt_provider"),
         "LAMPGO_VOICE_TTS_PROVIDER": ("voice", "tts_provider"),
         "LAMPGO_VOICE_TTS_VOICE": ("voice", "tts_voice"),
@@ -201,10 +239,25 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
         if value is None:
             continue
         if section is None:
-            setattr(config, field, Path(value) if field.endswith("_dir") else value)
+            current = getattr(config, field)
+            setattr(config, field, _coerce_env_value(current, value))
         else:
             sub = getattr(config, section)
-            setattr(sub, field, value)
+            current = getattr(sub, field)
+            setattr(sub, field, _coerce_env_value(current, value))
+
+
+def _coerce_env_value(current: object, raw: str) -> object:
+    """Best-effort env var coercion based on the target field's current type."""
+    if isinstance(current, bool):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(current, int) and not isinstance(current, bool):
+        return int(raw)
+    if isinstance(current, float):
+        return float(raw)
+    if isinstance(current, Path):
+        return Path(raw)
+    return raw
 
 
 def _apply_cli_overrides(config: LampgoConfig, overrides: dict) -> None:

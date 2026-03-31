@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>lampgo 控制台</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="left-rail">
+      <div class="brand-card">
+        <div class="brand-mark">
+          <img src="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg" alt="lampgo 头像" class="brand-avatar">
+        </div>
+        <div>
+          <div class="brand-title">lampgo</div>
+          <div class="brand-subtitle">Robot console</div>
+        </div>
+      </div>
+
+      <div class="nav-card">
+        <button class="nav-item nav-item-active" type="button">聊天</button>
+        <button class="nav-item" id="btn-open-events" type="button">活动流</button>
+      </div>
+
+      <section class="panel-card">
+        <div class="panel-title">设备状态</div>
+        <div id="status-panel" class="status-list">
+          <div>健康 <span id="st-health" class="status-value status-neutral">--</span></div>
+          <div>忙碌 <span id="st-busy" class="status-value status-neutral">--</span></div>
+          <div>当前技能 <span id="st-skill" class="status-value status-neutral">--</span></div>
+          <div>急停 <span id="st-estop" class="status-value status-neutral">--</span></div>
+        </div>
+      </section>
+
+      <section class="panel-card">
+        <div class="panel-title">关节角度</div>
+        <div id="joint-panel" class="joint-panel"></div>
+      </section>
+
+      <section class="panel-card">
+        <div class="panel-title">OpenClaw 任务</div>
+        <div id="openclaw-task-list" class="openclaw-task-list">
+          <div class="openclaw-empty">暂无复杂任务</div>
+        </div>
+      </section>
+
+      <section class="panel-card panel-grow">
+        <div class="panel-title">动作面板</div>
+        <div class="action-group" data-group="skills">
+          <button class="group-header" type="button" data-toggle-group="skills" aria-expanded="true">
+            <span class="group-title">内置技能</span>
+            <span class="group-arrow">▾</span>
+          </button>
+          <div class="group-body" data-group-body="skills">
+            <div id="skill-grid" class="skill-grid"></div>
+          </div>
+        </div>
+        <div class="action-group" data-group="recordings">
+          <button class="group-header" type="button" data-toggle-group="recordings" aria-expanded="true">
+            <span class="group-title">录制动作</span>
+            <span class="group-arrow">▾</span>
+          </button>
+          <div class="group-body" data-group-body="recordings">
+            <div id="recording-grid" class="skill-grid"></div>
+          </div>
+        </div>
+        <div class="action-group" data-group="expressions">
+          <button class="group-header" type="button" data-toggle-group="expressions" aria-expanded="false">
+            <span class="group-title">灯光表情</span>
+            <span class="group-arrow">▾</span>
+          </button>
+          <div class="group-body group-collapsed" data-group-body="expressions">
+            <div id="expression-grid" class="skill-grid"></div>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <div
+      id="pane-resizer"
+      class="pane-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整侧栏宽度"
+      title="拖动调整左侧区域宽度"
+    ></div>
+
+    <main class="workspace">
+      <header class="workspace-header">
+        <div>
+          <div class="workspace-title">聊天</div>
+          <div class="workspace-subtitle">发送自然语言指令，查看每一步执行状态</div>
+        </div>
+
+        <div class="workspace-actions">
+          <div id="conn-badge" class="connection-chip">
+            <span class="connection-dot is-offline" id="conn-dot"></span>
+            <span id="conn-text">未连接</span>
+          </div>
+          <button id="btn-estop" class="danger-button" type="button">E-STOP</button>
+        </div>
+      </header>
+
+      <section class="chat-card">
+        <div id="chat-messages" class="chat-messages">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-state-title">开始一次对话</div>
+            <div class="empty-state-body">例如输入“做个点头的动作”或“回到安全位置”。</div>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <form id="chat-form" class="composer">
+            <input
+              id="chat-input"
+              type="text"
+              placeholder="输入指令，例如：做个点头的动作"
+              autocomplete="off"
+              class="composer-input"
+            >
+            <button class="send-button" type="submit">发送</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <aside id="event-drawer" class="event-drawer hidden">
+    <div class="event-drawer-header">
+      <div>
+        <div class="drawer-title">活动流</div>
+        <div class="drawer-subtitle">实时事件与执行记录</div>
+      </div>
+      <button id="btn-close-drawer" class="drawer-close" type="button">&times;</button>
+    </div>
+    <div id="event-log" class="event-log"></div>
+  </aside>
+
+  <script src="/app.js"></script>
+</body>
+</html>

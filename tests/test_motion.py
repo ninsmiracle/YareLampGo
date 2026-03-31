@@ -66,6 +66,33 @@ def test_stream_frames():
         done = motion.stream_frames(frames, fps=50)
         done.wait(timeout=3.0)
         assert done.is_set()
+        final = hal.read_positions()
+        assert abs(final.positions["base_yaw"] - 30.0) < 0.1
+    finally:
+        motion.stop()
+
+
+def test_stream_frames_preserves_recorded_frame_steps():
+    hal = MockHAL()
+    hal.connect()
+    safety = SafetyKernel(SafetyConfig(max_velocity=60.0))
+    config = MotionConfig(tick_rate_hz=200)
+    motion = MotionRuntime(hal, safety, config)
+    motion.start()
+
+    try:
+        frames = [
+            {"base_yaw": 4.0},
+            {"base_yaw": 8.0},
+        ]
+        done = motion.stream_frames(frames, fps=20)
+        done.wait(timeout=3.0)
+
+        assert done.is_set()
+        final = hal.read_positions()
+        assert abs(final.positions["base_yaw"] - 8.0) < 0.1
+        assert {"base_yaw": 4.0} in hal.write_log
+        assert {"base_yaw": 8.0} in hal.write_log
     finally:
         motion.stop()
 
