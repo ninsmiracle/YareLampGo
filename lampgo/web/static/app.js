@@ -564,7 +564,7 @@
   function addUserBubble(text) {
     const row = document.createElement("div");
     row.className = "flex justify-end mb-4";
-    row.innerHTML = `<div class="msg-user">${esc(text)}</div>`;
+    row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${esc(text)}</div><span class="msg-time">${formatTime()}</span></div>`;
     chatMessages.appendChild(row);
     scrollChat();
   }
@@ -573,11 +573,20 @@
     const row = document.createElement("div");
     row.className = "flex justify-start mb-4";
 
+    const wrap = document.createElement("div");
+    wrap.className = "msg-bubble-wrap";
+
     const bubble = document.createElement("div");
     bubble.className = "msg-assistant";
     bubble.innerHTML = '<div class="steps"></div><div class="response-text"></div>';
 
-    row.appendChild(bubble);
+    const time = document.createElement("span");
+    time.className = "msg-time";
+    time.textContent = formatTime();
+
+    wrap.appendChild(bubble);
+    wrap.appendChild(time);
+    row.appendChild(wrap);
     chatMessages.appendChild(row);
     pendingMessages.set(requestId, bubble);
     scrollChat();
@@ -762,6 +771,11 @@
 
   function getRecordingExpression(name) {
     return RECORDING_EXPRESSIONS[name] || "smiley";
+  }
+
+  function formatTime(date) {
+    const d = date || new Date();
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
   function esc(s) {

@@ -109,6 +109,8 @@ class LEDController:
             return False
         try:
             self._serial.write(command.encode())
+            self._serial.flush()
+            logger.info("led.sent", cmd=command.strip(), port=self._config.port)
             return True
         except Exception:
             logger.exception("led.send_failed", cmd=command.strip())

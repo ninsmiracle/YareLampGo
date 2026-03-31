@@ -616,6 +616,29 @@ button {
   border-bottom-left-radius: 8px;
 }
 
+.msg-bubble-wrap {
+  display: flex;
+  flex-direction: column;
+  max-width: min(720px, 88%);
+}
+
+.msg-bubble-wrap .msg-user,
+.msg-bubble-wrap .msg-assistant {
+  max-width: 100%;
+}
+
+.msg-time {
+  display: block;
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 4px;
+  padding: 0 4px;
+}
+
+.flex.justify-end .msg-time {
+  text-align: right;
+}
+
 .response-text {
   margin-top: 10px;
   color: var(--text);

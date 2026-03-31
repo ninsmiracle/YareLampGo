@@ -75,7 +75,12 @@ class MoveToSkill(Skill):
             logger.warning("move_to.timeout", target=joints)
             return SkillResult(status="error", message="Motion did not complete within timeout")
 
-        return SkillResult(status="ok", data={"target": joints})
+        actual = {k: round(ctx.state.get(k, 0.0), 1) for k in joints}
+        data: dict[str, Any] = {"target": joints, "actual": actual}
+        if ctx.motion.status.stalled:
+            data["stalled"] = True
+            data["warning"] = "Some joints could not reach their target (physically blocked or out of range)."
+        return SkillResult(status="ok", data=data)
 
 
 STARTUP_HOME_VELOCITY = 30.0

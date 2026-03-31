@@ -105,7 +105,13 @@ class LookAtSkill(Skill):
         while not done.is_set():
             await asyncio.sleep(0.03)
 
-        return SkillResult(status="ok", data={"yaw": yaw, "pitch": pitch})
+        actual_yaw = round(ctx.state.get("base_yaw", yaw), 1)
+        actual_pitch = round(ctx.state.get("base_pitch", pitch), 1)
+        data: dict[str, Any] = {"yaw": yaw, "pitch": pitch, "actual_yaw": actual_yaw, "actual_pitch": actual_pitch}
+        if ctx.motion.status.stalled:
+            data["stalled"] = True
+            data["warning"] = f"Could not reach target (actual yaw={actual_yaw}, pitch={actual_pitch}). Do NOT retry the same target."
+        return SkillResult(status="ok", data=data)
 
 
 class IdleSwaySkill(Skill):

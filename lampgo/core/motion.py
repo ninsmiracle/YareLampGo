@@ -283,6 +283,7 @@ class MotionRuntime:
                     for j, tv in self._current_target.joints.items()
                 )
 
+                _was_stalled = False
                 all_done = all(
                     abs(check_pos.get(j, self._current_state.get(j, tv)) - tv) < 1.0
                     for j, tv in self._current_target.joints.items()
@@ -305,12 +306,13 @@ class MotionRuntime:
                             for j, tv in self._current_target.joints.items()
                         })
                         all_done = True
+                        _was_stalled = True
 
                 if all_done:
                     self._current_target = None
                     self._joint_velocities.clear()
                     self._planned_positions.clear()
-                    self._status = MotionStatus(progress=1.0, is_done=True)
+                    self._status = MotionStatus(progress=1.0, is_done=True, stalled=_was_stalled)
                     logger.info("motion.move_done")
                     if _active_done:
                         _active_done.set()

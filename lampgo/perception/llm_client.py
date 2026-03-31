@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -41,13 +42,19 @@ IMPORTANT: base_pitch and elbow_pitch work together as a kinematic chain.
 Rules:
 - You may call tools multiple times.
 - After each tool call, you will receive the tool result before deciding the next step.
+- CRITICAL: Never describe an action you intend to take — ALWAYS call the tool instead. If you say "show a heart" or "light up", you MUST call set_expression BEFORE finish_response. Words without tool calls are empty promises.
 - For look_at, yaw and pitch are ABSOLUTE angles for base_yaw and base_pitch. To adjust camera tilt, use move_to with wrist_pitch.
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.
 - When the task is complete, call finish_response with a short user-facing message.
 - If the request is impossible or outside lampgo's abilities, call __complex__ with a short reason.
 - Always respond in the same language as the user.
-- Keep replies concise and action-oriented."""
+- Keep replies concise and action-oriented.
+
+Efficiency:
+- If a tool result contains "stalled":true, the target position is physically unreachable. Do NOT retry the same or a nearby target — accept the actual position and move on.
+- After scan_and_capture completes, you already have all the images. Analyze them immediately and call finish_response. Do NOT do extra move_to + capture_image cycles unless the scan clearly missed the area you need.
+- Aim to finish in as few turns as possible. Every extra turn costs real time (~5-7s each)."""
 
 
 @dataclass
@@ -90,6 +97,16 @@ def _build_function_tool(
             },
         },
     }
+
+
+_MALFORMED_TOOL_RE = re.compile(
+    r"<tool_call>|<function=|<parameter=|```\s*tool_call|<\|tool_call\|>",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_malformed_tool_call(content: str) -> bool:
+    return bool(_MALFORMED_TOOL_RE.search(content))
 
 
 def _build_skill_tools_from_skills(skills: list[dict]) -> list[dict]:
@@ -148,21 +165,14 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
         )
     )
     if config.web_search_enabled and config.fast_model.strip().lower() in MIMO_WEB_SEARCH_MODELS:
-        tool: dict[str, Any] = {
-            "type": "web_search",
-            "max_keyword": config.web_search_max_keyword,
-            "force_search": config.web_search_force,
-            "limit": config.web_search_limit,
-        }
-        location = {
-            "type": "approximate",
-            "country": config.web_search_country,
-            "region": config.web_search_region,
-            "city": config.web_search_city,
-        }
-        if any((config.web_search_country, config.web_search_region, config.web_search_city)):
-            tool["user_location"] = location
-        tools.append(tool)
+        tools.append(
+            _build_function_tool(
+                "web_search",
+                "Search the web for real-time information such as weather, news, sports scores, stock prices, or any factual question you cannot answer from your own knowledge.",
+                {"query": {"type": "string", "description": "The search query"}},
+                ["query"],
+            )
+        )
     return tools
 
 
@@ -229,12 +239,13 @@ class LLMClient:
             if on_progress is not None:
                 await on_progress("llm_request", f"LLM 第 {turn_index} 轮分析指令...", "llm")
 
+            choice = "required" if turn_index == 1 else "auto"
             data = await self._chat_completion(
                 messages=messages,
                 tools=self._agent_tools,
-                tool_choice="required",
                 log_name="llm_client.agent_turn_start",
                 log_context={"text": text, "turn_index": turn_index},
+                tool_choice=choice,
             )
             if data is None:
                 return AgentLoopResult(
@@ -249,6 +260,15 @@ class LLMClient:
             tool_calls = message.get("tool_calls", [])
             if not tool_calls:
                 content = message.get("content", "")
+                if content and _looks_like_malformed_tool_call(content):
+                    logger.warning("llm_client.malformed_tool_call", preview=content[:120], turn_index=turn_index)
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": "You tried to call a tool by writing XML/text. That does NOT work. "
+                        "You MUST use the function calling API. Please retry your action using a proper tool call.",
+                    })
+                    continue
                 if content:
                     logger.info("llm_client.agent_text_fallback", preview=content[:120], turn_index=turn_index)
                     return AgentLoopResult(
@@ -322,12 +342,19 @@ class LLMClient:
                         tool_calls=tool_records,
                     )
 
-                if tool_name == "capture_image":
+                if tool_name == "web_search":
+                    query = str(arguments.get("query", text)).strip()
+                    tool_result = await self._handle_web_search(query)
+                elif tool_name == "capture_image":
                     tool_result = self._handle_capture_image(messages)
                     logger.info("llm_client.capture_image", has_image=tool_result.get("ok", False))
                 elif tool_name == "scan_and_capture":
                     tool_result = await self._handle_scan_and_capture(
-                        arguments, execute_tool, turn_index, tool_index, messages,
+                        arguments,
+                        execute_tool,
+                        turn_index,
+                        tool_index,
+                        messages,
                     )
                 else:
                     tool_result = await execute_tool(tool_name, arguments, turn_index, tool_index)
@@ -366,13 +393,15 @@ class LLMClient:
         image_url = self._camera.capture_data_url()
         if not image_url:
             return {"ok": False, "status": "error", "result": None, "error": "capture_failed"}
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "[camera update] Here is the latest view from your camera."},
-                {"type": "image_url", "image_url": {"url": image_url}},
-            ],
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "[camera update] Here is the latest view from your camera."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        )
         return {"ok": True, "status": "ok", "result": {"captured": True}, "error": None}
 
     async def _handle_scan_and_capture(
@@ -406,21 +435,25 @@ class LLMClient:
                 label = f"[scan step {i+1}/{steps}] yaw={yaw:.0f}°"
                 if target_desc:
                     label += f" — looking for: {target_desc}"
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": label},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": label},
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    }
+                )
                 scan_results.append({"yaw": round(yaw, 1), "captured": True})
             else:
                 scan_results.append({"yaw": round(yaw, 1), "error": "capture_failed"})
 
         logger.info("llm_client.scan_complete", steps=steps, captured=sum(1 for r in scan_results if r.get("captured")))
-        summary = f"Scanned {steps} positions from yaw={yaw_start:.0f}° to {yaw_end:.0f}°."
+        captured_count = sum(1 for r in scan_results if r.get("captured"))
+        summary = f"Scan complete: captured {captured_count}/{steps} images from yaw={yaw_start:.0f}° to {yaw_end:.0f}°."
         if target_desc:
-            summary += f" Look at the captured images to find: {target_desc}"
+            summary += f" All images are now in the conversation. Analyze them to find: {target_desc}."
+        summary += " You now have all the visual information. Call finish_response with your findings."
         return {
             "ok": True,
             "status": "ok",
@@ -428,13 +461,52 @@ class LLMClient:
             "error": None,
         }
 
+    def _build_web_search_tools(self) -> list[dict[str, Any]]:
+        """Build MiMo-native web_search tool list for a dedicated search request."""
+        tool: dict[str, Any] = {
+            "type": "web_search",
+            "max_keyword": self._config.web_search_max_keyword,
+            "force_search": True,
+            "limit": self._config.web_search_limit,
+        }
+        location = {
+            "type": "approximate",
+            "country": self._config.web_search_country,
+            "region": self._config.web_search_region,
+            "city": self._config.web_search_city,
+        }
+        if any((self._config.web_search_country, self._config.web_search_region, self._config.web_search_city)):
+            tool["user_location"] = location
+        return [tool]
+
+    async def _handle_web_search(self, query: str) -> dict[str, Any]:
+        """Perform web search via a dedicated MiMo API call with only the web_search tool."""
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": query},
+        ]
+        data = await self._chat_completion(
+            messages=messages,
+            tools=self._build_web_search_tools(),
+            log_name="llm_client.web_search",
+            log_context={"query": query},
+        )
+        if data is None:
+            return {"ok": False, "status": "error", "result": None, "error": "web_search_request_failed"}
+
+        message = self._extract_message(data)
+        content = message.get("content", "")
+        if content:
+            logger.info("llm_client.web_search_result", preview=content[:200])
+            return {"ok": True, "status": "ok", "result": {"answer": content}, "error": None}
+        return {"ok": False, "status": "error", "result": None, "error": "web_search_empty_response"}
+
     async def _chat_completion(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        tool_choice: str,
         log_name: str,
         log_context: dict[str, Any] | None = None,
+        tool_choice: str = "auto",
     ) -> dict[str, Any] | None:
         if not self._config.api_key:
             return None

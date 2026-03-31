@@ -152,7 +152,7 @@ async def test_agent_loop_can_call_multiple_tools(monkeypatch):
     progress: list[tuple[str, str, str]] = []
     executed: list[tuple[str, dict[str, object], int, int]] = []
 
-    async def fake_chat_completion(messages, tools, tool_choice, log_name, log_context):
+    async def fake_chat_completion(messages, tools, log_name, log_context=None, tool_choice="auto"):
         return next(scripted)
 
     async def execute_tool(tool_name: str, params: dict[str, object], turn_index: int, tool_index: int):
@@ -198,7 +198,7 @@ async def test_agent_loop_attaches_camera_image_once(monkeypatch):
 
     captured_bodies: list[dict] = []
 
-    async def fake_chat_completion(self, *, messages, tools, tool_choice, log_name, log_context=None):
+    async def fake_chat_completion(self, *, messages, tools, log_name, log_context=None, tool_choice="auto"):
         from copy import deepcopy
         captured_bodies.append(deepcopy(messages))
         return {
