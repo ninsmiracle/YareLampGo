@@ -50,6 +50,11 @@ NORMALIZE_TABLE = str.maketrans(
 )
 TRAILING_PUNCTUATION = " ,.?!;:()[]{}\"'`"
 COMPOSITE_MARKERS = ("然后", "再", "并且", "接着", "随后", "同时", "之后", ",", ";", "、")
+CREATIVE_MARKERS = ("创作", "设计", "编排", "自定义", "原创", "即兴", "生成", "写一个", "做一个新的", "新动作", "新舞")
+SCREEN_MARKERS = ("浏览器", "网页", "网站", "截图", "屏幕", "窗口", "打开", "保存文件", "下载", "登录", "表格", "邮箱")
+PHYSICAL_MARKERS = ("台灯", "lampgo", "机械臂", "灯光", "打光", "表情", "动作", "点头", "摇头", "跳舞", "看桌面", "摄像头", "麦克风")
+EXTERNAL_KNOWLEDGE_MARKERS = ("搜索", "查一下", "查找", "对比", "总结", "写代码", "代码", "工作流", "自动化", "cron", "日程")
+ESCALATION_THRESHOLD = 5
 GREETING_PHRASES = {
     "你好",
     "hi",
@@ -129,6 +134,7 @@ class IntentRouter:
 
     def _keyword_route(self, text: str) -> RoutedIntent:
         normalized = _normalize_text(text)
+        # Backward-compatible: any composite/multi-step structure skips the keyword fast path.
         if _looks_composite(normalized):
             logger.info("router.keyword_skipped_composite", text=text, normalized=normalized)
             return RoutedIntent(
@@ -197,3 +203,32 @@ def _normalize_text(text: str) -> str:
 
 def _looks_composite(normalized: str) -> bool:
     return any(marker in normalized for marker in COMPOSITE_MARKERS)
+
+
+def _complexity_score(text: str, normalized: str) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+
+    if _looks_composite(normalized):
+        score += 2
+        reasons.append("multi_step")
+
+    if any(marker in text for marker in CREATIVE_MARKERS):
+        score += 3
+        reasons.append("creative")
+
+    has_screen = any(marker in text for marker in SCREEN_MARKERS)
+    has_physical = any(marker in text.lower() for marker in PHYSICAL_MARKERS)
+    if has_screen and has_physical:
+        score += 4
+        reasons.append("cross_domain")
+
+    if any(marker in text for marker in EXTERNAL_KNOWLEDGE_MARKERS):
+        score += 3
+        reasons.append("external_knowledge")
+
+    if len(text) >= 50:
+        score += 1
+        reasons.append("long_input")
+
+    return score, reasons

@@ -10,3 +10,7 @@ lampgo.toml
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+# User-created recordings and runtime alias mappings (not project assets)
+assets/recordings/user/
+assets/recordings/aliases.json
