@@ -142,14 +142,45 @@ def _detect_camera() -> tuple[str | None, list[str]]:
     return recommended, found
 
 
+def _detect_microphones() -> tuple[str | None, list[str]]:
+    """List available input audio devices and recommend one."""
+    try:
+        import sounddevice as sd
+    except ImportError:
+        return None, ["Microphone detection skipped: sounddevice not installed."]
+
+    messages: list[str] = []
+    recommended: str | None = None
+    try:
+        devices = sd.query_devices()
+        default_input = sd.default.device[0]
+    except Exception as e:
+        return None, [f"Microphone detection failed: {e}"]
+
+    for i, dev in enumerate(devices):
+        if dev["max_input_channels"] > 0:
+            marker = " (default)" if i == default_input else ""
+            messages.append(f"  Mic {i}: {dev['name']}{marker}")
+            if recommended is None:
+                recommended = str(i)
+
+    if not messages:
+        messages.append("No microphone found.")
+    else:
+        messages.insert(0, "Available microphones:")
+
+    return recommended, messages
+
+
 def detect_ports() -> dict:
-    """Auto-detect motor bus, LED controller, and USB camera.
+    """Auto-detect motor bus, LED controller, USB camera, and microphones.
 
     Returns:
         {
             "motor_port": "/dev/ttyUSB0" or None,
             "led_port": "/dev/ttyUSB1" or None,
             "camera_port": "0" or None,
+            "mic_device": "2" or None,
             "all_ports": [...],
             "messages": ["..."]
         }
@@ -195,10 +226,14 @@ def detect_ports() -> dict:
     elif camera_port is None:
         messages.append("No camera detected. Check USB connection or install opencv-python.")
 
+    mic_device, mic_msgs = _detect_microphones()
+    messages.extend(mic_msgs)
+
     return {
         "motor_port": motor_port,
         "led_port": led_port,
         "camera_port": camera_port,
+        "mic_device": mic_device,
         "all_ports": ports if ports else [],
         "messages": messages,
     }

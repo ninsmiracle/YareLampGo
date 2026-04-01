@@ -228,6 +228,19 @@ class WebGateway:
             result["request_id"] = request_id
             await ws.send_json(result)
 
+        elif msg_type == "audio":
+            audio_data = msg.get("audio_data", "").strip()
+            if not audio_data:
+                await ws.send_json({"ok": False, "error": "empty audio_data", "request_id": request_id})
+                return
+
+            result = await self.server.handle_request(
+                {"cmd": "audio", "audio_data": audio_data, "request_id": request_id}
+            )
+
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
         elif msg_type == "invoke":
             result = await self.server.handle_request(
                 {

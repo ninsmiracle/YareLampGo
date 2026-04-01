@@ -50,6 +50,11 @@ NORMALIZE_TABLE = str.maketrans(
 )
 TRAILING_PUNCTUATION = " ,.?!;:()[]{}\"'`"
 COMPOSITE_MARKERS = ("然后", "再", "并且", "接着", "随后", "同时", "之后", ",", ";", "、")
+INLINE_PUNCTUATION_RE = re.compile(r"[,.;:!?、]+")
+LEADING_FILLER_RE = re.compile(
+    r"^(?:(?:嗯+|呃+|额+|啊+|哦+|喔+|诶+|欸+|uh+|um+|erm+|mmm+|那个|就是)[,.;:!?、]*)+",
+    re.IGNORECASE,
+)
 GREETING_PHRASES = {
     "你好",
     "hi",
@@ -128,7 +133,7 @@ class IntentRouter:
         return result
 
     def _keyword_route(self, text: str) -> RoutedIntent:
-        normalized = _normalize_text(text)
+        normalized = _strip_leading_fillers(_normalize_text(text))
         if _looks_composite(normalized):
             logger.info("router.keyword_skipped_composite", text=text, normalized=normalized)
             return RoutedIntent(
@@ -137,14 +142,15 @@ class IntentRouter:
                 detail="包含复合结构，跳过关键词快路径",
             )
 
-        if normalized in GREETING_PHRASES:
-            logger.info("router.keyword_greeting_hit", text=text, normalized=normalized)
+        greeting_keyword = _match_greeting_phrase(normalized)
+        if greeting_keyword:
+            logger.info("router.keyword_greeting_hit", text=text, normalized=normalized, keyword=greeting_keyword)
             return RoutedIntent(
                 intent_type=IntentType.CHAT,
                 chat_response=self._greeting_response(text),
                 source="keyword",
-                detail="问候语整句命中",
-                matched_keyword=normalized,
+                detail="问候语命中",
+                matched_keyword=greeting_keyword,
             )
 
         if normalized in SKILL_KEYWORDS:
@@ -173,12 +179,23 @@ class IntentRouter:
         execute_tool: Callable[[str, dict[str, Any], int, int], Awaitable[dict[str, Any]]],
         on_progress: Callable[[str, str, str], Awaitable[None]] | None = None,
         joint_state: dict[str, float] | None = None,
+        audio_data: str | None = None,
     ):
         if self._llm_client is None:
             raise RuntimeError("LLM client not configured")
         return await self._llm_client.run_agent_loop(
-            text, execute_tool=execute_tool, on_progress=on_progress, joint_state=joint_state,
+            text,
+            execute_tool=execute_tool,
+            on_progress=on_progress,
+            joint_state=joint_state,
+            audio_data=audio_data,
         )
+
+    async def transcribe_audio(self, audio_data: str) -> str:
+        """Use omni model to transcribe audio to text (no tool calling)."""
+        if self._llm_client is None:
+            raise RuntimeError("LLM client not configured")
+        return await self._llm_client.transcribe_audio(audio_data)
 
     def _greeting_response(self, text: str) -> str:
         if any(w in text for w in ("早", "morning")):
@@ -193,6 +210,26 @@ def _normalize_text(text: str) -> str:
     normalized = re.sub(r"\s+", "", normalized)
     normalized = normalized.rstrip(TRAILING_PUNCTUATION)
     return normalized
+
+
+def _strip_leading_fillers(normalized: str) -> str:
+    return LEADING_FILLER_RE.sub("", normalized)
+
+
+def _match_greeting_phrase(normalized: str) -> str | None:
+    compact = INLINE_PUNCTUATION_RE.sub("", normalized)
+    if compact in GREETING_PHRASES:
+        return compact
+
+    for phrase in sorted(GREETING_PHRASES, key=len, reverse=True):
+        remaining = compact
+        matched = 0
+        while remaining.startswith(phrase):
+            remaining = remaining[len(phrase):]
+            matched += 1
+        if matched and not remaining:
+            return phrase
+    return None
 
 
 def _looks_composite(normalized: str) -> bool:

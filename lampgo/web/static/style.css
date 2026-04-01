@@ -514,6 +514,7 @@ button {
 }
 
 .chat-card {
+  min-width: 0;
   min-height: 0;
   flex: 1;
   border-radius: 28px;
@@ -553,12 +554,14 @@ button {
 }
 
 .composer-wrap {
+  min-width: 0;
   padding: 18px;
   background: rgba(255, 252, 250, 0.96);
   border-top: 1px solid var(--border);
 }
 
 .composer {
+  min-width: 0;
   display: flex;
   gap: 12px;
   align-items: center;
@@ -593,6 +596,100 @@ button {
 .send-button:hover {
   transform: translateY(-1px);
   box-shadow: 0 12px 24px rgba(221, 147, 136, 0.25);
+}
+
+.mic-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.mic-select {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  font-size: 10px;
+  cursor: pointer;
+  appearance: none;
+  text-indent: -9999px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24'%3E%3Cpath d='M7 10l5 5 5-5' fill='none' stroke='%237a7570' stroke-width='2'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+.mic-select:focus {
+  text-indent: 0;
+  width: auto;
+  min-width: 120px;
+}
+
+.mic-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.mic-button:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.mic-button.is-recording {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(221, 124, 120, 0.3); }
+  50% { box-shadow: 0 0 0 8px rgba(221, 124, 120, 0); }
+}
+
+.voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 12px;
+  min-width: 0;
+  width: 100%;
+}
+
+.voice-wave.hidden {
+  display: none;
+}
+
+.voice-canvas {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  height: 48px;
+  display: block;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  box-sizing: border-box;
+}
+
+.voice-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
 }
 
 .msg-user,

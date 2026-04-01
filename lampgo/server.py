@@ -18,7 +18,7 @@ import structlog
 
 from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.core.config import LampgoConfig
-from lampgo.core.events import AgentFinished, EventBus, IntentProgress, ToolCallFinished, ToolCallPlanned
+from lampgo.core.events import AgentFinished, ChatMessage, EventBus, IntentProgress, IntentRouting, ToolCallFinished, ToolCallPlanned, TtsAudio
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.config import LEDConfig
 from lampgo.core.led import LEDController
@@ -100,6 +100,9 @@ class LampgoServer:
 
         if cmd == "text":
             return await self._handle_text(data)
+
+        if cmd == "audio":
+            return await self._handle_audio(data)
 
         if cmd == "status":
             return self._handle_status()
@@ -286,6 +289,46 @@ class LampgoServer:
             },
         }
 
+    async def _handle_audio(self, data: dict) -> dict:
+        """Handle audio input: omni transcribes → text goes through normal _handle_text.
+
+        Two-step approach because mimo-v2-omni cannot reliably do
+        function calling + audio understanding simultaneously.
+        """
+        audio_data = data.get("audio_data", "")
+        if not audio_data:
+            return {"ok": False, "error": "empty audio_data"}
+
+        request_id = data.get("request_id", "")
+
+        if not self.router.has_llm_client:
+            return {"ok": False, "error": "LLM client not configured — cannot process audio"}
+
+        audio_rms = self._measure_audio_rms(audio_data)
+        logger.info("server.audio_transcribing", request_id=request_id, audio_b64_len=len(audio_data), rms=f"{audio_rms:.1f}")
+        await self.events.publish(IntentRouting(text="[语音输入]", request_id=request_id))
+        await self.events.publish(
+            IntentProgress(stage="audio_transcribe", message="正在识别语音...", source="llm", request_id=request_id)
+        )
+
+        text = await self.router.transcribe_audio(audio_data)
+        if not text:
+            logger.warning("server.audio_transcribe_empty", request_id=request_id)
+            return {"ok": True, "result": {"type": "chat", "response": "抱歉，没有听清您说的话。", "source": "audio"}}
+
+        logger.info("server.audio_transcribed", request_id=request_id, text=text)
+        await self.events.publish(
+            IntentProgress(stage="audio_transcribed", message=f"听到：{text}", source="llm", request_id=request_id)
+        )
+
+        result = await self._handle_text({"input": text, "request_id": request_id})
+
+        response_text = result.get("result", {}).get("response") or result.get("result", {}).get("chat_response")
+        if response_text:
+            asyncio.create_task(self._tts_for_web(response_text, request_id))
+
+        return result
+
     async def _execute_agent_tool(
         self,
         request_id: str,
@@ -377,6 +420,45 @@ class LampgoServer:
         }
 
     @staticmethod
+    def _measure_audio_rms(audio_b64: str) -> float:
+        """Decode base64 WAV and compute RMS to check if audio has content."""
+        import base64, struct, math
+        try:
+            raw = base64.b64decode(audio_b64)
+            if len(raw) < 46:
+                return 0.0
+            pcm = raw[44:]
+            n = len(pcm) // 2
+            if n == 0:
+                return 0.0
+            sum_sq = 0.0
+            for i in range(0, len(pcm) - 1, 2):
+                sample = struct.unpack_from("<h", pcm, i)[0]
+                sum_sq += sample * sample
+            return math.sqrt(sum_sq / n)
+        except Exception:
+            return -1.0
+
+    async def _tts_for_web(self, text: str, request_id: str) -> None:
+        """Synthesize TTS and publish audio event for web playback."""
+        try:
+            from lampgo.voice.tts import synthesize_for_web
+            result = await synthesize_for_web(
+                text,
+                api_key=self.config.llm.api_key,
+                api_base=self.config.llm.api_base,
+                voice=self.config.voice.tts_voice,
+            )
+            if result:
+                audio_b64, fmt = result
+                await self.events.publish(TtsAudio(audio=audio_b64, format=fmt, request_id=request_id))
+                logger.debug("server.tts_for_web_done", request_id=request_id, format=fmt)
+            else:
+                logger.warning("server.tts_for_web_empty", request_id=request_id)
+        except Exception:
+            logger.exception("server.tts_for_web_failed", request_id=request_id)
+
+    @staticmethod
     def _format_agent_result(agent_result, text: str) -> dict[str, Any]:
         tool_calls = [
             {
@@ -460,9 +542,12 @@ class LampgoServer:
 
     async def start(self) -> None:
         logger.info("server.starting")
-        self.hal.connect()
-        self.led.connect()
-        self.motion.start()
+        if self.config.no_hw:
+            logger.info("server.no_hw_mode", msg="Skipping motor and LED connections")
+        else:
+            self.hal.connect()
+            self.led.connect()
+            self.motion.start()
 
         self._register_builtin_skills()
         if self.config.home_on_start:
@@ -472,7 +557,7 @@ class LampgoServer:
         logger.info(
             "server.ready",
             skills=self.registry.list_ids(),
-            motor_port=self.config.device.motor_port,
+            motor_port="(disabled)" if self.config.no_hw else self.config.device.motor_port,
             socket=self.config.socket_path,
         )
 
@@ -530,10 +615,11 @@ class LampgoServer:
             except asyncio.CancelledError:
                 pass
         await self._ipc.stop()
-        self.motion.stop()
-        await self._run_blocking_shutdown_step("led.off", self.led.off)
-        await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)
-        await self._run_blocking_shutdown_step("hal.disconnect", self.hal.disconnect, timeout_s=3.0)
+        if not self.config.no_hw:
+            self.motion.stop()
+            await self._run_blocking_shutdown_step("led.off", self.led.off)
+            await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)
+            await self._run_blocking_shutdown_step("hal.disconnect", self.hal.disconnect, timeout_s=3.0)
         logger.info("server.stopped")
 
     async def run_forever(self) -> None:

@@ -63,6 +63,7 @@ def main() -> None:
     run_p.add_argument("--web", action="store_true", help="Enable web UI (chat interface)")
     run_p.add_argument("--web-port", type=int, default=None, help="Web UI port (default: 8420)")
     run_p.add_argument("--no-home", action="store_true", help="Skip automatic homing on startup")
+    run_p.add_argument("--no-hw", action="store_true", help="Skip hardware (motors/LED) — voice & web only")
 
     # --- invoke (IPC) ---
     inv_p = sub.add_parser("invoke", help="Invoke a skill on the running daemon")
@@ -520,6 +521,9 @@ def _cmd_run(args: argparse.Namespace) -> None:
     if web_port is not None:
         config.web.port = web_port
     if getattr(args, "no_home", False):
+        config.home_on_start = False
+    if getattr(args, "no_hw", False):
+        config.no_hw = True
         config.home_on_start = False
     asyncio.run(run_server(config))
 

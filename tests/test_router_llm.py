@@ -152,7 +152,7 @@ async def test_agent_loop_can_call_multiple_tools(monkeypatch):
     progress: list[tuple[str, str, str]] = []
     executed: list[tuple[str, dict[str, object], int, int]] = []
 
-    async def fake_chat_completion(messages, tools, log_name, log_context=None, tool_choice="auto"):
+    async def fake_chat_completion(messages, tools, log_name, log_context=None, tool_choice="auto", model_override=None):
         return next(scripted)
 
     async def execute_tool(tool_name: str, params: dict[str, object], turn_index: int, tool_index: int):
@@ -198,7 +198,7 @@ async def test_agent_loop_attaches_camera_image_once(monkeypatch):
 
     captured_bodies: list[dict] = []
 
-    async def fake_chat_completion(self, *, messages, tools, log_name, log_context=None, tool_choice="auto"):
+    async def fake_chat_completion(self, *, messages, tools, log_name, log_context=None, tool_choice="auto", model_override=None):
         from copy import deepcopy
         captured_bodies.append(deepcopy(messages))
         return {
@@ -228,3 +228,52 @@ async def test_agent_loop_attaches_camera_image_once(monkeypatch):
     assert isinstance(user_msg["content"], list)
     assert user_msg["content"][0] == {"type": "text", "text": "看看前面"}
     assert user_msg["content"][1]["type"] == "image_url"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_disables_thinking_for_mimo(monkeypatch):
+    import httpx
+
+    client = LLMClient(
+        LLMConfig(
+            api_key="test-key",
+            fast_model="mimo-v2-omni",
+            web_search_enabled=False,
+        ),
+        skill_specs=[],
+    )
+    seen_json: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"tool_calls": []}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            seen_json.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    await client._chat_completion(
+        messages=[{"role": "user", "content": "hello hello"}],
+        tools=[],
+        log_name="test",
+        tool_choice="required",
+    )
+
+    assert seen_json["model"] == "mimo-v2-omni"
+    assert seen_json["thinking"] == {"type": "disabled"}
+    assert seen_json["tool_choice"] == "required"

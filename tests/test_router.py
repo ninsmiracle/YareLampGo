@@ -16,6 +16,20 @@ def test_english_greeting():
     assert result.intent_type == IntentType.CHAT
 
 
+def test_repeated_english_greeting_without_spaces():
+    router = IntentRouter()
+    result = router.route("hellohello")
+    assert result.intent_type == IntentType.CHAT
+    assert result.matched_keyword == "hello"
+
+
+def test_greeting_with_leading_filler_words():
+    router = IntentRouter()
+    result = router.route("嗯，hello hello。")
+    assert result.intent_type == IntentType.CHAT
+    assert result.matched_keyword == "hello"
+
+
 def test_skill_keyword():
     router = IntentRouter()
     result = router.route("点头")

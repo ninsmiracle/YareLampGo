@@ -25,6 +25,9 @@
   const jointPanel = document.getElementById("joint-panel");
   const openclawTaskList = document.getElementById("openclaw-task-list");
   const eventLog = document.getElementById("event-log");
+  const btnMic = document.getElementById("btn-mic");
+  const voiceWave = document.getElementById("voice-wave");
+  const voiceCanvas = document.getElementById("voice-canvas");
   const groupToggles = document.querySelectorAll("[data-toggle-group]");
 
   const RECORDING_EXPRESSIONS = Object.freeze({
@@ -70,6 +73,7 @@
   let ws = null;
   let reqCounter = 0;
   const pendingMessages = new Map();
+  const pendingUserMessages = new Map();
   const openclawTasks = new Map();
   let isResizing = false;
 
@@ -170,6 +174,10 @@
       upsertOpenClawTask(data.task);
     }
 
+    if (evt === "TtsAudio" && data.audio) {
+      handleTtsAudio(data.audio, data.format || "mp3");
+    }
+
     const requestId = data.request_id || "";
     const bubble = requestId ? pendingMessages.get(requestId) : null;
 
@@ -188,6 +196,9 @@
         break;
       case "IntentProgress":
         if (data.message) {
+          if (data.stage === "audio_transcribed") {
+            updateUserBubbleText(requestId, data.message.replace(/^听到：\s*/, ""));
+          }
           if (stepsEl.querySelector(".step-row.active:last-child")) {
             updateActiveStep(stepsEl, data.message);
           } else {
@@ -552,6 +563,7 @@
       return;
     }
 
+    void unlockTtsPlayback();
     clearEmptyState();
     chatInput.value = "";
     addUserBubble(text);
@@ -561,12 +573,17 @@
     send({ type: "text", input: text, request_id: requestId });
   });
 
-  function addUserBubble(text) {
+  function addUserBubble(text, requestId) {
     const row = document.createElement("div");
     row.className = "flex justify-end mb-4";
     row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${esc(text)}</div><span class="msg-time">${formatTime()}</span></div>`;
     chatMessages.appendChild(row);
+    const bubble = row.querySelector(".msg-user");
+    if (requestId && bubble) {
+      pendingUserMessages.set(requestId, bubble);
+    }
     scrollChat();
+    return bubble;
   }
 
   function addAssistantBubble(requestId) {
@@ -613,7 +630,16 @@
     }
 
     pendingMessages.delete(msg.request_id);
+    pendingUserMessages.delete(msg.request_id);
     scrollChat();
+  }
+
+  function updateUserBubbleText(requestId, text) {
+    const bubble = pendingUserMessages.get(requestId);
+    if (!bubble || !text) {
+      return;
+    }
+    bubble.textContent = text;
   }
 
   function appendTextToBubble(bubble, text) {
@@ -839,6 +865,405 @@
     requestAnimationFrame(() => {
       chatMessages.scrollTop = chatMessages.scrollHeight;
     });
+  }
+
+  /* ---- Voice Recording ---- */
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let audioContext = null;
+  let analyserNode = null;
+  let sourceNode = null;
+  let waveAnimId = null;
+  let micStream = null;
+  let isVoiceMode = false;
+  let selectedMicId = "";
+  const micSelect = document.getElementById("mic-select");
+
+  async function enumerateMics() {
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => s.getTracks().forEach((t) => t.stop()));
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const mics = devices.filter((d) => d.kind === "audioinput");
+      micSelect.innerHTML = '<option value="">默认麦克风</option>';
+      mics.forEach((d) => {
+        const opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.textContent = d.label || `麦克风 ${d.deviceId.slice(0, 8)}`;
+        micSelect.appendChild(opt);
+      });
+      console.log("[voice] found", mics.length, "mic devices:", mics.map((d) => d.label));
+    } catch (err) {
+      console.warn("[voice] cannot enumerate mics:", err);
+    }
+  }
+
+  micSelect.addEventListener("change", () => {
+    selectedMicId = micSelect.value;
+    console.log("[voice] selected mic:", selectedMicId || "(default)");
+  });
+
+  enumerateMics();
+
+  btnMic.addEventListener("click", () => {
+    void unlockTtsPlayback();
+    if (isVoiceMode) {
+      stopVoiceMode();
+    } else {
+      startVoiceMode();
+    }
+  });
+
+  async function startVoiceMode() {
+    const constraints = {
+      audio: {
+        autoGainControl: true,
+        echoCancellation: false,
+        noiseSuppression: false,
+      },
+    };
+    if (selectedMicId) {
+      constraints.audio.deviceId = { exact: selectedMicId };
+    }
+
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      console.error("mic access denied", err);
+      addSystemMessage("无法访问麦克风，请检查浏览器权限");
+      return;
+    }
+
+    isVoiceMode = true;
+    btnMic.classList.add("is-recording");
+    chatInput.style.display = "none";
+    voiceWave.classList.remove("hidden");
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode = audioContext.createMediaStreamSource(micStream);
+    analyserNode = audioContext.createAnalyser();
+    analyserNode.fftSize = 1024;
+    analyserNode.smoothingTimeConstant = 0.88;
+    sourceNode.connect(analyserNode);
+
+    const tracks = micStream.getAudioTracks();
+    const settings = tracks[0]?.getSettings() || {};
+    console.log("[voice] mic started:", tracks[0]?.label, "sampleRate:", settings.sampleRate, "state:", audioContext.state);
+
+    requestAnimationFrame(() => drawWaveform());
+
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(micStream, { mimeType: pickMimeType() });
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+    mediaRecorder.onstop = () => finishRecording();
+    mediaRecorder.start();
+  }
+
+  function stopVoiceMode() {
+    isVoiceMode = false;
+    btnMic.classList.remove("is-recording");
+    voiceWave.classList.add("hidden");
+    chatInput.style.display = "";
+
+    if (waveAnimId) {
+      cancelAnimationFrame(waveAnimId);
+      waveAnimId = null;
+    }
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+    if (micStream) {
+      micStream.getTracks().forEach((t) => t.stop());
+      micStream = null;
+    }
+    if (audioContext) {
+      audioContext.close();
+      audioContext = null;
+    }
+  }
+
+  async function finishRecording() {
+    if (!audioChunks.length) {
+      console.warn("[voice] no audio chunks captured");
+      return;
+    }
+
+    const blob = new Blob(audioChunks, { type: audioChunks[0].type || "audio/webm" });
+    audioChunks = [];
+    console.log("[voice] raw blob:", blob.size, "bytes, type:", blob.type);
+
+    const wavBlob = await blobToWav(blob);
+    const b64 = await blobToBase64(wavBlob);
+
+    const rms = await measureWavRms(wavBlob);
+    console.log("[voice] WAV:", wavBlob.size, "bytes, RMS:", rms.toFixed(1), rms < 10 ? "⚠️ VERY QUIET" : "✓ OK");
+
+    if (rms < 1) {
+      addSystemMessage("录音似乎是静音，请检查浏览器麦克风权限和设备选择");
+      return;
+    }
+
+    clearEmptyState();
+    const requestId = nextId();
+    addUserBubble("[语音消息]", requestId);
+    addAssistantBubble(requestId);
+    send({ type: "audio", audio_data: b64, request_id: requestId });
+  }
+
+  async function measureWavRms(wavBlob) {
+    try {
+      const buf = await wavBlob.arrayBuffer();
+      const view = new DataView(buf);
+      const pcmStart = 44;
+      let sumSq = 0;
+      let count = 0;
+      for (let i = pcmStart; i < buf.byteLength - 1; i += 2) {
+        const sample = view.getInt16(i, true);
+        sumSq += sample * sample;
+        count++;
+      }
+      return count > 0 ? Math.sqrt(sumSq / count) : 0;
+    } catch {
+      return -1;
+    }
+  }
+
+  function drawWaveform() {
+    if (!analyserNode || !voiceCanvas) return;
+    const ctx = voiceCanvas.getContext("2d");
+    const bufLen = analyserNode.frequencyBinCount;
+    const dataArray = new Uint8Array(bufLen);
+    const smoothed = new Float32Array(bufLen);
+    const ysBuf = new Float32Array(bufLen);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const AMP = 6;
+    const SMOOTH = 0.12;
+    const MIN_FRAME_MS = 55;
+
+    let lastDraw = 0;
+
+    function draw(ts) {
+      if (!analyserNode) return;
+      waveAnimId = requestAnimationFrame(draw);
+      const now = ts || performance.now();
+      if (now - lastDraw < MIN_FRAME_MS) return;
+      lastDraw = now;
+
+      const rect = voiceCanvas.getBoundingClientRect();
+      let cw = Math.round(rect.width);
+      let ch = Math.round(rect.height);
+      cw = Math.min(Math.max(cw, 1), 4096);
+      ch = Math.min(Math.max(ch, 1), 512);
+      if (cw < 2 || ch < 2) return;
+
+      const bw = Math.floor(cw * dpr);
+      const bh = Math.floor(ch * dpr);
+      if (voiceCanvas.width !== bw || voiceCanvas.height !== bh) {
+        voiceCanvas.width = bw;
+        voiceCanvas.height = bh;
+      }
+
+      const W = voiceCanvas.width;
+      const H = voiceCanvas.height;
+      const mid = H / 2;
+      const half = (H / 2) * 0.92;
+
+      analyserNode.getByteTimeDomainData(dataArray);
+
+      for (let i = 0; i < bufLen; i++) {
+        const dev = (dataArray[i] - 128) / 128;
+        smoothed[i] += SMOOTH * (dev - smoothed[i]);
+      }
+
+      ctx.clearRect(0, 0, W, H);
+      const sliceWidth = W / bufLen;
+      for (let i = 0; i < bufLen; i++) {
+        const y = mid - smoothed[i] * half * AMP;
+        ysBuf[i] = Math.max(2, Math.min(H - 2, y));
+      }
+
+      ctx.fillStyle = "rgba(221, 147, 136, 0.2)";
+      ctx.beginPath();
+      ctx.moveTo(0, mid);
+      for (let i = 0; i < bufLen; i++) {
+        ctx.lineTo(i * sliceWidth, ysBuf[i]);
+      }
+      ctx.lineTo(W, mid);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.lineWidth = Math.max(1.5, 2 * dpr);
+      ctx.strokeStyle = "#c97a6e";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      for (let i = 0; i < bufLen; i++) {
+        const px = i * sliceWidth;
+        if (i === 0) ctx.moveTo(px, ysBuf[i]);
+        else ctx.lineTo(px, ysBuf[i]);
+      }
+      ctx.stroke();
+    }
+    waveAnimId = requestAnimationFrame(draw);
+  }
+
+  function pickMimeType() {
+    const types = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+    for (const t of types) {
+      if (MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return "";
+  }
+
+  async function blobToWav(blob) {
+    const arrayBuf = await blob.arrayBuffer();
+    const actx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 1, 16000);
+    let audioBuf;
+    try {
+      audioBuf = await actx.decodeAudioData(arrayBuf);
+    } catch {
+      return blob;
+    }
+
+    const sampleRate = 16000;
+    const offCtx = new OfflineAudioContext(1, Math.ceil(audioBuf.duration * sampleRate), sampleRate);
+    const src = offCtx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(offCtx.destination);
+    src.start();
+    const rendered = await offCtx.startRendering();
+    const samples = rendered.getChannelData(0);
+
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+
+    const wavBuf = new ArrayBuffer(44 + pcm.length * 2);
+    const view = new DataView(wavBuf);
+    function writeStr(offset, str) {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + pcm.length * 2, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, "data");
+    view.setUint32(40, pcm.length * 2, true);
+    const pcmBytes = new Uint8Array(wavBuf, 44);
+    pcmBytes.set(new Uint8Array(pcm.buffer));
+
+    return new Blob([wavBuf], { type: "audio/wav" });
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result;
+        resolve(dataUrl.split(",")[1]);
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /* ---- TTS Audio Playback ---- */
+  let ttsQueue = [];
+  let ttsPlaying = false;
+  let ttsAudioContext = null;
+
+  async function unlockTtsPlayback() {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {
+      return null;
+    }
+    if (!ttsAudioContext || ttsAudioContext.state === "closed") {
+      ttsAudioContext = new AudioContextCtor();
+    }
+    if (ttsAudioContext.state === "suspended") {
+      try {
+        await ttsAudioContext.resume();
+      } catch (err) {
+        console.warn("[tts] resume failed:", err);
+      }
+    }
+    return ttsAudioContext;
+  }
+
+  function handleTtsAudio(audioB64, format) {
+    const mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", pcm16: "audio/wav", opus: "audio/ogg" };
+    const mime = mimeMap[format] || "audio/mpeg";
+    const bytes = Uint8Array.from(atob(audioB64), (c) => c.charCodeAt(0));
+    ttsQueue.push({ bytes, mime, format });
+    if (!ttsPlaying) {
+      void playNextTts();
+    }
+  }
+
+  async function playBlobWithAudioElement(blob) {
+    const url = URL.createObjectURL(blob);
+    try {
+      await new Promise((resolve, reject) => {
+        const audio = new Audio(url);
+        audio.onended = () => resolve();
+        audio.onerror = () => reject(new Error("audio element playback failed"));
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          playPromise.catch(reject);
+        }
+      });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function playTtsChunk(chunk) {
+    const blob = new Blob([chunk.bytes], { type: chunk.mime });
+    const ctx = await unlockTtsPlayback();
+    if (ctx) {
+      try {
+        const buffer = await blob.arrayBuffer();
+        const audioBuffer = await ctx.decodeAudioData(buffer.slice(0));
+        await new Promise((resolve) => {
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(ctx.destination);
+          source.onended = () => resolve();
+          source.start(0);
+        });
+        return;
+      } catch (err) {
+        console.warn("[tts] AudioContext playback failed, fallback to <audio>:", err);
+      }
+    }
+    await playBlobWithAudioElement(blob);
+  }
+
+  async function playNextTts() {
+    if (ttsPlaying) {
+      return;
+    }
+    ttsPlaying = true;
+    try {
+      while (ttsQueue.length) {
+        const chunk = ttsQueue.shift();
+        try {
+          await playTtsChunk(chunk);
+        } catch (err) {
+          console.warn("[tts] playback failed:", err);
+        }
+      }
+    } finally {
+      ttsPlaying = false;
+    }
   }
 
   connect();

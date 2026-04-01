@@ -113,6 +113,10 @@
         </div>
 
         <div class="composer-wrap">
+          <div id="voice-wave" class="voice-wave hidden">
+            <canvas id="voice-canvas" class="voice-canvas"></canvas>
+            <span class="voice-hint">聆听中…</span>
+          </div>
           <form id="chat-form" class="composer">
             <input
               id="chat-input"
@@ -121,6 +125,14 @@
               autocomplete="off"
               class="composer-input"
             >
+            <div class="mic-group">
+              <button id="btn-mic" class="mic-button" type="button" title="语音输入">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+              </button>
+              <select id="mic-select" class="mic-select" title="选择麦克风">
+                <option value="">默认麦克风</option>
+              </select>
+            </div>
             <button class="send-button" type="submit">发送</button>
           </form>
         </div>

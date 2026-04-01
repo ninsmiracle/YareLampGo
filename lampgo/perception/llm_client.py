@@ -105,6 +105,16 @@ _MALFORMED_TOOL_RE = re.compile(
 )
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_think_tags(content: str) -> str:
+    """Remove <think>...</think> blocks emitted by reasoning models (e.g. mimo-v2-omni)."""
+    result = _THINK_RE.sub("", content).strip()
+    result = re.sub(r"</think>\s*", "", result).strip()
+    return result
+
+
 def _looks_like_malformed_tool_call(content: str) -> bool:
     return bool(_MALFORMED_TOOL_RE.search(content))
 
@@ -208,8 +218,15 @@ class LLMClient:
         execute_tool: Callable[[str, dict[str, Any], int, int], Awaitable[dict[str, Any]]],
         on_progress: Callable[[str, str, str], Awaitable[None]] | None = None,
         joint_state: dict[str, float] | None = None,
+        audio_data: str | None = None,
     ) -> AgentLoopResult:
-        """Run a bounded tool-calling loop until the model finishes or escalates."""
+        """Run a bounded tool-calling loop until the model finishes or escalates.
+
+        Args:
+            text: User text input (may be empty if audio_data is provided).
+            audio_data: Base64-encoded WAV audio from microphone. When provided,
+                        sent as input_audio to the omni model — no separate STT needed.
+        """
         if not self._config.api_key:
             return AgentLoopResult(
                 intent_type="complex",
@@ -219,14 +236,9 @@ class LLMClient:
             )
 
         system_prompt = _build_agent_system_prompt(joint_state)
-        user_content: Any = text
-        image_url = self._camera.capture_data_url() if self._camera.enabled else None
-        if image_url:
-            user_content = [
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": image_url}},
-            ]
-            logger.info("llm_client.camera_attached", device=self._camera.device_label)
+        user_content: Any = self._build_user_content(text, audio_data)
+
+        audio_model = "mimo-v2-omni" if audio_data else None
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -239,13 +251,15 @@ class LLMClient:
             if on_progress is not None:
                 await on_progress("llm_request", f"LLM 第 {turn_index} 轮分析指令...", "llm")
 
-            choice = "required" if turn_index == 1 else "auto"
+            choice = "auto" if audio_data else ("required" if turn_index == 1 else "auto")
+            use_model = audio_model if (turn_index == 1 and audio_model) else None
             data = await self._chat_completion(
                 messages=messages,
                 tools=self._agent_tools,
                 log_name="llm_client.agent_turn_start",
-                log_context={"text": text, "turn_index": turn_index},
+                log_context={"text": text or "[audio]", "turn_index": turn_index},
                 tool_choice=choice,
+                model_override=use_model,
             )
             if data is None:
                 return AgentLoopResult(
@@ -259,10 +273,13 @@ class LLMClient:
             message = self._extract_message(data)
             tool_calls = message.get("tool_calls", [])
             if not tool_calls:
-                content = message.get("content", "")
+                raw_content = message.get("content", "")
+                content = _strip_think_tags(raw_content) if raw_content else ""
+                if raw_content and raw_content != content:
+                    logger.debug("llm_client.stripped_think_tags", raw_len=len(raw_content), clean_len=len(content))
                 if content and _looks_like_malformed_tool_call(content):
                     logger.warning("llm_client.malformed_tool_call", preview=content[:120], turn_index=turn_index)
-                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "assistant", "content": raw_content})
                     messages.append({
                         "role": "user",
                         "content": "You tried to call a tool by writing XML/text. That does NOT work. "
@@ -320,8 +337,8 @@ class LLMClient:
                 )
 
                 if tool_name == "finish_response":
-                    message_text = str(arguments.get("message", "")).strip()
-                    summary = str(arguments.get("summary", "")).strip() or "LLM Agent 完成任务"
+                    message_text = _strip_think_tags(str(arguments.get("message", ""))).strip()
+                    summary = _strip_think_tags(str(arguments.get("summary", ""))).strip() or "LLM Agent 完成任务"
                     if not message_text and tool_records:
                         message_text = f"已完成 {len(tool_records)} 次工具调用。"
                     return AgentLoopResult(
@@ -385,6 +402,88 @@ class LLMClient:
             stop_reason="max_turns",
             tool_calls=tool_records,
         )
+
+    async def transcribe_audio(self, audio_data: str) -> str:
+        """Use omni model to transcribe audio — no tools, just text output.
+
+        Uses MiMo ``thinking: {type: disabled}`` so the model skips deep-reasoning
+        (no ``<redacted_thinking>``), faster first token for ASR-only calls.
+        """
+        if not self._config.api_key:
+            return ""
+
+        try:
+            import httpx
+        except ImportError:
+            return ""
+
+        messages = [
+            {"role": "system", "content": (
+                "You are a speech recognition assistant. "
+                "Listen to the audio and output ONLY the exact words the user said, nothing else. "
+                "If the audio is silence or unintelligible, output an empty string. "
+                "Output in the same language as the speaker."
+            )},
+            {"role": "user", "content": [
+                {"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}},
+            ]},
+        ]
+
+        body: dict[str, Any] = {
+            "model": "mimo-v2-omni",
+            "messages": messages,
+            "temperature": 0.1,
+            "max_completion_tokens": 256,
+            "thinking": {"type": "disabled"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._config.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
+        logger.info("llm_client.transcribe_start", audio_b64_len=len(audio_data))
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{self._api_base}/chat/completions", json=body, headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            text = _strip_think_tags(content).strip()
+            logger.info("llm_client.transcribe_done", text=text[:100])
+            return text
+        except Exception:
+            logger.exception("llm_client.transcribe_failed")
+            return ""
+
+    def _build_user_content(self, text: str, audio_data: str | None) -> Any:
+        """Build the user message content, optionally with audio and/or camera image."""
+        parts: list[dict[str, Any]] = []
+
+        if audio_data:
+            audio_hint = text or (
+                "The attached audio is a voice command from the user's microphone. "
+                "Listen to what they said, then respond or call the appropriate tools. "
+                "If it is a simple greeting or question, just reply with finish_response. "
+                "Reply in the same language as the user spoke."
+            )
+            parts.append({"type": "text", "text": audio_hint})
+            parts.append({"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}})
+            logger.info("llm_client.audio_attached", audio_b64_len=len(audio_data))
+        elif text:
+            parts.append({"type": "text", "text": text})
+
+        image_url = self._camera.capture_data_url() if self._camera.enabled else None
+        if image_url:
+            parts.append({"type": "image_url", "image_url": {"url": image_url}})
+            logger.info("llm_client.camera_attached", device=self._camera.device_label)
+
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            return parts[0]["text"]
+        return parts or text
 
     def _handle_capture_image(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         """Capture a fresh frame and inject it into the conversation as a user image message."""
@@ -507,6 +606,7 @@ class LLMClient:
         log_name: str,
         log_context: dict[str, Any] | None = None,
         tool_choice: str = "auto",
+        model_override: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._config.api_key:
             return None
@@ -517,16 +617,20 @@ class LLMClient:
             logger.warning("llm_client.no_httpx", msg="Install httpx for LLM support")
             return None
 
+        model = model_override or self._config.fast_model
+        is_mimo = model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+
         request_messages = self._prepare_messages_for_request(messages)
         body: dict[str, Any] = {
-            "model": self._config.fast_model,
+            "model": model,
             "messages": request_messages,
             "tools": tools,
             "tool_choice": tool_choice,
             "temperature": self._config.temperature,
         }
-        if self._is_mimo_model:
+        if is_mimo:
             body["max_completion_tokens"] = self._config.max_tokens
+            body["thinking"] = {"type": "disabled"}
         else:
             body["max_tokens"] = self._config.max_tokens
 
@@ -534,7 +638,7 @@ class LLMClient:
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",
         }
-        logger.info(log_name, model=self._config.fast_model, api_base=self._api_base, **(log_context or {}))
+        logger.info(log_name, model=model, api_base=self._api_base, **(log_context or {}))
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout_s) as client:
                 resp = await client.post(f"{self._api_base}/chat/completions", json=body, headers=headers)

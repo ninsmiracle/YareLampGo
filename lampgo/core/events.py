@@ -169,6 +169,15 @@ class ChatMessage(Event):
     request_id: str = ""
 
 
+@dataclass
+class TtsAudio(Event):
+    """A chunk of TTS audio to play in the browser."""
+
+    audio: str
+    format: str = "mp3"
+    request_id: str = ""
+
+
 class EventBus:
     """Simple in-process typed pub/sub.  Handlers are async callables."""
 
