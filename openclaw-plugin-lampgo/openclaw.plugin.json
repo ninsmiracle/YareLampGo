@@ -1,0 +1,15 @@
+{
+  "id": "lampgo",
+  "name": "LampGo",
+  "description": "Bridge OpenClaw tools to a local lampgo daemon via HTTP.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "lampgoApiBase": {
+        "type": "string",
+        "description": "Base URL for lampgo Web Gateway (e.g. http://127.0.0.1:18790)."
+      }
+    }
+  }
+}

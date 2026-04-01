@@ -1,8 +1,8 @@
 {
   "name": "lampgo",
-  "version": "0.1.0",
-  "description": "Control lampgo desk lamp robot — 5-DOF arm + 8x8 LED expression matrix. Smooth motion, 37 actions, 30 LED modes.",
+  "version": "0.2.0",
+  "description": "lampgo desk lamp robot — 5-DOF arm + LED expressions + camera vision + visual servoing + complex animation",
   "author": "lampgo-team",
-  "tags": ["robotics", "lamp", "motion", "led", "openclaw"],
+  "tags": ["robotics", "lamp", "motion", "led", "vision", "openclaw"],
   "license": "Apache-2.0"
 }

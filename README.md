@@ -115,6 +115,79 @@ uv run pytest
 uv run ruff check lampgo/ tests/
 ```
 
+## OpenClaw 生态接入
+
+lampgo 可作为 [OpenClaw](https://github.com/openclaw/openclaw) 生态的配件运行，使 OpenClaw 的 AI Agent 直接控制台灯机械臂。
+
+### 快速接入
+
+**1. 注册 AgentSkill**
+
+在 `~/.openclaw/openclaw.json` 中添加：
+
+```jsonc
+{
+  "skills": {
+    "load": {
+      "extraDirs": ["/path/to/lampgo/openclaw-skills"]
+    }
+  }
+}
+```
+
+**2. 安装 Plugin**
+
+```bash
+rm -rf ~/.openclaw/extensions/lampgo   # 清理旧版本
+openclaw plugins install ./openclaw-plugin-lampgo
+```
+
+在 `~/.openclaw/openclaw.json` 中信任该插件：
+
+```jsonc
+{
+  "plugins": {
+    "trusted": ["lampgo"]
+  }
+}
+```
+
+**3. 启动 lampgo**
+
+```bash
+uv run lampgo run --web   # 开启 Web UI（端口 8420）
+```
+
+### 能力覆盖
+
+通过单一 AgentSkill 包 `openclaw-skills/lampgo` 提供：
+
+| 能力 | 描述 |
+|------|------|
+| 基础控制 | 37 动作 + 30 LED 表情 + 5-DOF 关节精确控制 |
+| 视觉感知 | 摄像头抓帧、场景分析、自动反应 |
+| 复杂动画 | 多步编排，AI 设计关键帧后热加载为新录制 |
+| 视觉伺服 | 全景扫描 → 目标定位 → 伸手触碰 |
+
+### Plugin Tools
+
+OpenClaw 通过 HTTP 调用 lampgo 守护进程，可用工具：
+
+| Tool | 说明 |
+|------|------|
+| `lampgo_move` | 关节运动 |
+| `lampgo_play` | 播放预录动作 |
+| `lampgo_expression` | 设置 LED 表情 |
+| `lampgo_camera_snap` | 摄像头拍照 |
+| `lampgo_ask_user` | 通过 TTS/Web UI 询问用户并等待回复 |
+| `lampgo_save_recording` | 保存新录制文件（热加载） |
+| `lampgo_status` | 查询运行状态 |
+| `lampgo_recordings` | 列出所有录制 |
+
+详见 `docs/project_description.md`。
+
+---
+
 ## 架构
 
 详见 `docs/architecture.md`。功能状态和验证方法详见 `docs/project_description.md`。
@@ -129,9 +202,10 @@ uv run ruff check lampgo/ tests/
 | `lampgo.core.config` | 配置管理 (Pydantic + TOML + .env) |
 | `lampgo.core.led` | ESP32 LED 控制 |
 | `lampgo.skills` | 技能系统 (基类、注册表、执行器、FSM) |
-| `lampgo.bridge.openclaw` | OpenClaw 适配器 (骨架) |
+| `lampgo.bridge.openclaw` | OpenClaw 适配器 + Plugin Bridge |
 | `lampgo.bridge.desktop` | PC 桌面控制 (骨架) |
 | `lampgo.perception` | 感知 (人脸检测骨架, VAD stub) |
+| `lampgo.web` | Web Gateway (REST + WebSocket, 端口 8420) |
 
 ## License
 

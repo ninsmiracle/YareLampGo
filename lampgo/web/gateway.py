@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from lampgo.core.config import WebConfig
 from lampgo.core.led import LED_EXPRESSIONS
 from lampgo.core.events import ChatMessage, IntentResolved, IntentRouting
+from lampgo.perception.camera import CameraCapture
 from lampgo.web.ws_bridge import WsBridge
 
 if TYPE_CHECKING:
@@ -49,7 +51,14 @@ class WebGateway:
             Route("/api/status", self.api_status),
             Route("/api/skills", self.api_skills),
             Route("/api/recordings", self.api_recordings),
+            Route("/api/recordings/save", self.api_recordings_save, methods=["POST"]),
+            Route("/api/recordings/aliases", self.api_recording_aliases, methods=["GET", "POST"]),
             Route("/api/expressions", self.api_expressions),
+            Route("/api/camera/snap", self.api_camera_snap),
+            Route("/api/sensor/context", self.api_sensor_context),
+            Route("/api/openclaw/ask", self.api_openclaw_ask, methods=["POST"]),
+            Route("/api/openclaw/ask/reply", self.api_openclaw_ask_reply, methods=["POST"]),
+            Route("/api/openclaw/callback", self.api_openclaw_callback, methods=["POST"]),
             Route("/api/openclaw/tasks", self.api_openclaw_tasks),
             Route("/api/openclaw/tasks/{task_id:str}/confirm", self.api_openclaw_confirm, methods=["POST"]),
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
@@ -147,8 +156,144 @@ class WebGateway:
     async def api_recordings(self, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "result": {"recordings": self._list_recordings()}})
 
+    async def api_recordings_save(self, request: Request) -> JSONResponse:
+        """POST /api/recordings/save — write a CSV recording + optional keyword alias.
+
+        Body: { "name": "my_skill", "csv": "<csv content>", "alias": "触发词" (optional) }
+        Saves to <recordings_dir>/user/<name>.csv (user-created recordings are isolated from
+        built-in assets; the user/ subdirectory is gitignored).
+        Updates aliases.json in recordings_dir root if alias provided.
+        """
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        csv_content = body.get("csv", "")
+        alias = str(body.get("alias", "")).strip()
+
+        if not name or not re.match(r"^[\w\-]+$", name):
+            return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
+        if not isinstance(csv_content, str) or not csv_content.strip():
+            return JSONResponse({"ok": False, "error": "csv must be a non-empty string"}, status_code=400)
+
+        recordings_dir = Path(self.server.config.recordings_dir)
+        user_dir = recordings_dir / "user"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = user_dir / f"{name}.csv"
+        csv_path.write_text(csv_content, encoding="utf-8")
+
+        if alias:
+            alias_path = recordings_dir / "aliases.json"
+            try:
+                existing: dict = json.loads(alias_path.read_text(encoding="utf-8")) if alias_path.exists() else {}
+            except Exception:
+                existing = {}
+            existing[alias] = name
+            alias_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        return JSONResponse({"ok": True, "result": {"name": name, "path": str(csv_path), "alias": alias or None}})
+
+    async def api_recording_aliases(self, request: Request) -> JSONResponse:
+        import json
+
+        path = Path(self.server.config.recordings_dir) / "aliases.json"
+        if request.method == "GET":
+            if not path.exists():
+                return JSONResponse({"ok": True, "result": {"aliases": {}}})
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            return JSONResponse({"ok": True, "result": {"aliases": data if isinstance(data, dict) else {}}})
+
+        body = await request.json()
+        aliases = body.get("aliases")
+        if not isinstance(aliases, dict):
+            return JSONResponse({"ok": False, "error": "aliases must be an object"}, status_code=400)
+        normalized = {str(k).strip(): str(v).strip() for k, v in aliases.items() if str(k).strip() and str(v).strip()}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return JSONResponse({"ok": True, "result": {"aliases": normalized}})
+
     async def api_expressions(self, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "result": {"expressions": self._list_expressions()}})
+
+    async def api_camera_snap(self, request: Request) -> JSONResponse:
+        camera = CameraCapture(self.server.config.camera)
+        if not camera.enabled:
+            return JSONResponse({"ok": False, "error": "camera_disabled", "result": {"device": camera.device_label}})
+        data_url = camera.capture_data_url()
+        if not data_url:
+            return JSONResponse({"ok": False, "error": "capture_failed", "result": {"device": camera.device_label}})
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "device": camera.device_label,
+                    "data_url": data_url,
+                },
+            }
+        )
+
+    async def api_sensor_context(self, request: Request) -> JSONResponse:
+        camera = CameraCapture(self.server.config.camera)
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "device": {
+                        "lamp_id": self.server.config.device.lamp_id,
+                    },
+                    "camera": {
+                        "enabled": camera.enabled,
+                        "device": camera.device_label,
+                    },
+                    "voice": {
+                        "enabled": bool(self.server.config.voice_enabled),
+                        "stt_provider": self.server.config.voice.stt_provider,
+                        "tts_provider": self.server.config.voice.tts_provider,
+                        "vad_enabled": bool(self.server.config.voice.vad_enabled),
+                    },
+                },
+            }
+        )
+
+    async def api_openclaw_ask(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        question = str(body.get("question", "")).strip()
+        if not question:
+            return JSONResponse({"ok": False, "error": "question_required"}, status_code=400)
+        options = body.get("options") or []
+        if not isinstance(options, list):
+            options = []
+        options = [str(item) for item in options if str(item).strip()]
+        request_id = str(body.get("request_id", "")).strip()
+        timeout_s = float(body.get("timeout_s", 120.0))
+        result = await self.server.openclaw_ask_user(
+            question=question,
+            options=options,
+            request_id=request_id,
+            timeout_s=timeout_s,
+        )
+        return JSONResponse({"ok": True, "result": result})
+
+    async def api_openclaw_ask_reply(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        ask_id = str(body.get("ask_id", "")).strip()
+        reply = str(body.get("reply", "")).strip()
+        request_id = str(body.get("request_id", "")).strip()
+        if not ask_id or not reply:
+            return JSONResponse({"ok": False, "error": "ask_id_and_reply_required"}, status_code=400)
+        ok = await self.server.openclaw_reply_user(ask_id=ask_id, reply=reply, request_id=request_id)
+        return JSONResponse({"ok": ok, "result": {"accepted": ok}})
+
+    async def api_openclaw_callback(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        # Free-form status payload from the OpenClaw plugin.
+        status = body.get("status")
+        detail = body.get("detail")
+        request_id = str(body.get("request_id", "")).strip()
+        if status:
+            await self.server.events.publish(ChatMessage(role="assistant", content=f"[OpenClaw] {status}: {detail or ''}".strip(), request_id=request_id))
+        return JSONResponse({"ok": True, "result": {"accepted": True}})
 
     async def api_openclaw_tasks(self, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "result": {"openclaw_tasks": self.server.openclaw.list_tasks()}})
@@ -307,7 +452,14 @@ class WebGateway:
         recordings_dir = Path(self.server.config.recordings_dir)
         if not recordings_dir.exists():
             return []
-        return sorted(path.stem for path in recordings_dir.glob("*.csv"))
+        # Built-in recordings in root; user-created in user/ subdir.
+        # User recordings shadow built-ins of the same name.
+        names: dict[str, str] = {p.stem: "builtin" for p in recordings_dir.glob("*.csv")}
+        user_dir = recordings_dir / "user"
+        if user_dir.is_dir():
+            for p in user_dir.glob("*.csv"):
+                names[p.stem] = "user"
+        return sorted(names)
 
     def _list_expressions(self) -> list[str]:
         return sorted(LED_EXPRESSIONS.keys())

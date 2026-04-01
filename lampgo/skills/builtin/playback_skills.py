@@ -33,8 +33,9 @@ async def _await_done(done_event, timeout: float) -> bool:
 def load_recording(path: Path) -> tuple[list[dict[str, float]], int]:
     """Load a CSV recording. Returns (frames, estimated_fps).
 
-    CSV format: columns like ``base_yaw.pos``, ``base_pitch.pos``, ...
-    plus an optional ``timestamp`` column.
+    Accepts two column naming conventions:
+    - Native recorder format: ``base_yaw.pos``, ``base_pitch.pos``, ... + optional ``timestamp``
+    - Simplified format (OpenClaw-generated): bare joint names ``base_yaw``, ``base_pitch``, ...
     """
     frames: list[dict[str, float]] = []
     timestamps: list[float] = []
@@ -44,12 +45,14 @@ def load_recording(path: Path) -> tuple[list[dict[str, float]], int]:
         for row in reader:
             frame: dict[str, float] = {}
             for joint in JOINT_NAMES:
-                key = f"{joint}.pos"
-                if key in row:
-                    try:
-                        frame[joint] = float(row[key])
-                    except (ValueError, TypeError):
-                        pass
+                # Try native ".pos" suffix first, then bare joint name
+                for key in (f"{joint}.pos", joint):
+                    if key in row:
+                        try:
+                            frame[joint] = float(row[key])
+                        except (ValueError, TypeError):
+                            pass
+                        break
             if frame:
                 frames.append(frame)
             if "timestamp" in row:
@@ -90,9 +93,15 @@ class PlayRecordingSkill(Skill):
             return SkillResult(status="error", message="Recording name required")
         expression = str(params.get("expression", "")).strip()
 
-        path = self._recordings_dir / f"{name}.csv"
+        # User-created recordings (user/) shadow built-ins of the same name.
+        user_path = self._recordings_dir / "user" / f"{name}.csv"
+        builtin_path = self._recordings_dir / f"{name}.csv"
+        path = user_path if user_path.exists() else builtin_path
         if not path.exists():
-            available = [p.stem for p in self._recordings_dir.glob("*.csv")]
+            builtin = [p.stem for p in self._recordings_dir.glob("*.csv")]
+            user_dir = self._recordings_dir / "user"
+            user = [p.stem for p in user_dir.glob("*.csv")] if user_dir.is_dir() else []
+            available = sorted(set(builtin + user))
             return SkillResult(
                 status="error",
                 message=f"Recording '{name}' not found. Available: {available}",
