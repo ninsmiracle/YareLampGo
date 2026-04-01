@@ -1,7 +1,0 @@
-{
-  "name": "lampgo-vision",
-  "version": "0.1.0",
-  "description": "Camera vision for lampgo desk lamp robot — snap photos, analyze scenes, detect presence",
-  "author": "lampgo-team",
-  "tags": ["robotics", "vision", "camera", "lampgo"]
-}

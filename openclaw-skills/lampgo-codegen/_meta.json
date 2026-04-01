@@ -1,7 +1,0 @@
-{
-  "name": "lampgo-codegen",
-  "version": "0.1.0",
-  "description": "Generate Python scripts for complex lampgo animations and choreographed behaviors",
-  "author": "lampgo-team",
-  "tags": ["robotics", "animation", "codegen", "lampgo"]
-}

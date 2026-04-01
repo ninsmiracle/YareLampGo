@@ -47,7 +47,7 @@ Rules:
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.
 - When the task is complete, call finish_response with a short user-facing message.
-- If the request is impossible or outside lampgo's abilities, call __complex__ with a short reason.
+- If the request is impossible or outside lampgo's abilities, call escalate_to_openclaw with a short reason.
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
 
@@ -159,9 +159,12 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
     )
     tools.append(
         _build_function_tool(
-            "__complex__",
-            "Hand off to the slow path for tasks that exceed lampgo's local capabilities",
-            {"reason": {"type": "string", "description": "Short reason why this needs the complex path"}},
+            "escalate_to_openclaw",
+            "Hand off to OpenClaw slow path for tasks that exceed lampgo's local capabilities",
+            {
+                "reason": {"type": "string", "description": "Short reason why this needs OpenClaw"},
+                "context_summary": {"type": "string", "description": "Optional short context summary for the handoff"},
+            },
         )
     )
     if config.web_search_enabled and config.fast_model.strip().lower() in MIMO_WEB_SEARCH_MODELS:
@@ -332,8 +335,11 @@ class LLMClient:
                         tool_calls=tool_records,
                     )
 
-                if tool_name == "__complex__":
+                if tool_name == "escalate_to_openclaw":
                     reason = str(arguments.get("reason", "")).strip() or "LLM 判定请求过于复杂"
+                    context_summary = str(arguments.get("context_summary", "")).strip()
+                    if context_summary:
+                        reason = f"{reason} | {context_summary}"
                     return AgentLoopResult(
                         intent_type="complex",
                         response="This request is too complex for the fast path. Please use OpenClaw.",
