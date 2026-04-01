@@ -1,7 +1,0 @@
-{
-  "name": "lampgo-search-touch",
-  "version": "0.1.0",
-  "description": "Visual servoing: search for objects on the desk and touch them with the lamp head",
-  "author": "lampgo-team",
-  "tags": ["robotics", "vision", "servoing", "lampgo"]
-}

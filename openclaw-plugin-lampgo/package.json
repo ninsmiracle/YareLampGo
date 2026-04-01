@@ -1,0 +1,12 @@
+{
+  "name": "lampgo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41"
+  }
+}
