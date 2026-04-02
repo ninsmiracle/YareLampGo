@@ -661,13 +661,61 @@ button {
   50% { box-shadow: 0 0 0 8px rgba(221, 124, 120, 0); }
 }
 
+.stop-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border: 1px solid rgba(221, 124, 120, 0.4);
+  border-radius: 14px;
+  background: var(--danger-soft);
+  color: #b05955;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.18s ease;
+}
+
+.stop-button:hover {
+  background: #f8d9d6;
+  border-color: var(--danger);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(221, 124, 120, 0.2);
+}
+
+.stop-button.hidden {
+  display: none;
+}
+
+.voice-cancel-button {
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.voice-cancel-button:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.voice-cancel-button.hidden {
+  display: none;
+}
+
 .voice-wave {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 0 12px;
+  flex: 1;
   min-width: 0;
-  width: 100%;
 }
 
 .voice-wave.hidden {
@@ -768,6 +816,52 @@ button {
   color: #3f3b38;
 }
 
+.thinking-block {
+  margin: 6px 0;
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-soft);
+  border-radius: 0 10px 10px 0;
+  font-size: 13px;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
+.thinking-block > summary {
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+  opacity: 0.8;
+  list-style: none;
+}
+
+.thinking-block > summary::before {
+  content: "▶ ";
+  font-size: 10px;
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.thinking-block[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.thinking-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-body {
+  padding: 4px 12px 8px;
+}
+
+.thinking-body p {
+  margin: 0 0 4px;
+}
+
+.thinking-body p:last-child {
+  margin-bottom: 0;
+}
+
 .system-note {
   text-align: center;
   font-size: 12px;
@@ -794,6 +888,11 @@ button {
 
 .step-row.error {
   color: var(--danger);
+}
+
+.step-row.narration {
+  color: #6b7280;
+  font-style: italic;
 }
 
 .step-icon {

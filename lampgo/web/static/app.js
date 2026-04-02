@@ -26,6 +26,8 @@
   const openclawTaskList = document.getElementById("openclaw-task-list");
   const eventLog = document.getElementById("event-log");
   const btnMic = document.getElementById("btn-mic");
+  const btnVoiceCancel = document.getElementById("btn-voice-cancel");
+  const btnStop = document.getElementById("btn-stop");
   const voiceWave = document.getElementById("voice-wave");
   const voiceCanvas = document.getElementById("voice-canvas");
   const groupToggles = document.querySelectorAll("[data-toggle-group]");
@@ -75,7 +77,9 @@
   const pendingMessages = new Map();
   const pendingUserMessages = new Map();
   const openclawTasks = new Map();
+  const streamingState = new Map();
   let isResizing = false;
+  let activeAgentRequestId = null;
 
   const SIDEBAR_WIDTH_KEY = "lampgo.sidebarWidth";
   const SIDEBAR_MIN = 220;
@@ -199,7 +203,23 @@
           if (data.stage === "audio_transcribed") {
             updateUserBubbleText(requestId, data.message.replace(/^听到：\s*/, ""));
           }
-          if (stepsEl.querySelector(".step-row.active:last-child")) {
+          if (data.stage === "llm_fallback" && requestId) {
+            activeAgentRequestId = requestId;
+            btnStop.classList.remove("hidden");
+          }
+          if (data.stage === "llm_request") {
+            finalizeStreamingThinking(requestId);
+            markAllActiveDone(stepsEl);
+            addStep(stepsEl, data.message, "active");
+          } else if (data.stage === "llm_thinking_delta") {
+            appendThinkingDelta(bubble, requestId, data.message);
+          } else if (data.stage === "llm_response_delta") {
+            appendResponseDelta(bubble, requestId, data.message);
+          } else if (data.stage === "llm_narration") {
+            finalizeNarration(bubble, requestId, data.message);
+          } else if (data.stage === "llm_thinking") {
+            appendThinkingToBubble(bubble, data.message);
+          } else if (stepsEl.querySelector(".step-row.active:last-child")) {
             updateActiveStep(stepsEl, data.message);
           } else {
             addStep(stepsEl, data.message, "active");
@@ -209,6 +229,10 @@
       case "IntentResolved":
         markLastDone(stepsEl);
         addStep(stepsEl, formatIntentResolved(data), "done");
+        if (requestId && requestId === activeAgentRequestId) {
+          activeAgentRequestId = null;
+          btnStop.classList.add("hidden");
+        }
         break;
       case "OpenClawTaskUpdated":
         markLastDone(stepsEl);
@@ -246,8 +270,15 @@
         markLastDone(stepsEl);
         if (data.stop_reason === "finish_response") {
           addStep(stepsEl, "任务完成", "done");
+        } else if (data.stop_reason === "user_cancelled") {
+          markAllActiveDone(stepsEl);
+          addStep(stepsEl, "已停止", "error");
         } else {
           addStep(stepsEl, `流程结束：${data.stop_reason || "unknown"}`, "error");
+        }
+        if (requestId && requestId === activeAgentRequestId) {
+          activeAgentRequestId = null;
+          btnStop.classList.add("hidden");
         }
         break;
       case "SkillStarted":
@@ -284,7 +315,11 @@
 
     item.className = `event-item ${cls}`;
     const t = new Date(msg.ts * 1000).toLocaleTimeString();
-    item.textContent = `[${t}] ${msg.event}: ${JSON.stringify(msg.data)}`;
+    let displayData = msg.data;
+    if (msg.event === "TtsAudio" && displayData && displayData.audio && displayData.audio.length > 100) {
+      displayData = { ...displayData, audio: displayData.audio.slice(0, 100) + "…" };
+    }
+    item.textContent = `[${t}] ${msg.event}: ${JSON.stringify(displayData)}`;
     eventLog.appendChild(item);
     eventLog.scrollTop = eventLog.scrollHeight;
   }
@@ -558,12 +593,21 @@
 
   chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
+    void unlockTtsPlayback();
+
+    if (isVoiceMode) {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      stopVoiceMode();
+      return;
+    }
+
     const text = chatInput.value.trim();
     if (!text) {
       return;
     }
 
-    void unlockTtsPlayback();
     clearEmptyState();
     chatInput.value = "";
     addUserBubble(text);
@@ -616,17 +660,25 @@
       return;
     }
 
+    finalizeStreamingThinking(msg.request_id);
+    streamingState.delete(msg.request_id);
+
     const stepsEl = bubble.querySelector(".steps");
     markLastDone(stepsEl);
 
     const result = msg.result || {};
     const text = result.response || result.chat_response;
-    if (text && !bubble.querySelector(".response-text").textContent) {
+    if (text) {
       appendTextToBubble(bubble, text);
     }
 
     if (!msg.ok && msg.error) {
       addStep(stepsEl, `错误：${msg.error}`, "error");
+    }
+
+    if (msg.request_id === activeAgentRequestId) {
+      activeAgentRequestId = null;
+      btnStop.classList.add("hidden");
     }
 
     pendingMessages.delete(msg.request_id);
@@ -642,11 +694,128 @@
     bubble.textContent = text;
   }
 
-  function appendTextToBubble(bubble, text) {
+  function appendThinkingToBubble(bubble, text) {
+    if (!bubble || !text) {
+      return;
+    }
+    const stepsEl = bubble.querySelector(".steps");
+    if (!stepsEl) {
+      return;
+    }
+    const details = document.createElement("details");
+    details.className = "thinking-block";
+    const summary = document.createElement("summary");
+    summary.textContent = "思考过程";
+    details.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "thinking-body";
+    body.innerHTML = formatAssistantText(text);
+    details.appendChild(body);
+    stepsEl.appendChild(details);
+    scrollChat();
+  }
+
+  function appendThinkingDelta(bubble, requestId, chunk) {
+    if (!bubble) {
+      return;
+    }
+    const stepsEl = bubble.querySelector(".steps");
+    if (!stepsEl) {
+      return;
+    }
+    let state = streamingState.get(requestId);
+    if (!state) {
+      state = { thinkingEl: null, thinkingText: "" };
+      streamingState.set(requestId, state);
+    }
+    if (!state.thinkingEl) {
+      const details = document.createElement("details");
+      details.className = "thinking-block";
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = "思考中…";
+      details.appendChild(summary);
+      const body = document.createElement("div");
+      body.className = "thinking-body";
+      details.appendChild(body);
+      stepsEl.appendChild(details);
+      state.thinkingEl = details;
+      state.thinkingText = "";
+    }
+    state.thinkingText += chunk;
+    const body = state.thinkingEl.querySelector(".thinking-body");
+    body.textContent = state.thinkingText;
+    scrollChat();
+  }
+
+  function appendResponseDelta(bubble, requestId, chunk) {
+    if (!bubble) {
+      return;
+    }
+    const el = bubble.querySelector(".response-text");
+    if (!el) {
+      return;
+    }
+    let finalEl = el.querySelector(".final-response");
+    if (!finalEl) {
+      finalEl = document.createElement("div");
+      finalEl.className = "final-response";
+      el.appendChild(finalEl);
+    }
+    finalEl.textContent += chunk;
+    scrollChat();
+  }
+
+  function finalizeStreamingThinking(requestId) {
+    const state = streamingState.get(requestId);
+    if (state && state.thinkingEl && state.thinkingText) {
+      const body = state.thinkingEl.querySelector(".thinking-body");
+      if (body) {
+        body.innerHTML = formatAssistantText(state.thinkingText);
+      }
+      state.thinkingEl.open = false;
+      const summary = state.thinkingEl.querySelector("summary");
+      if (summary) {
+        summary.textContent = "思考过程";
+      }
+    }
+    if (state) {
+      state.thinkingEl = null;
+      state.thinkingText = "";
+    }
+  }
+
+  function finalizeNarration(bubble, requestId, text) {
+    if (!bubble || !text) return;
     const el = bubble.querySelector(".response-text");
     if (el) {
-      el.innerHTML = formatAssistantText(text);
+      const finalEl = el.querySelector(".final-response");
+      if (finalEl) {
+        finalEl.textContent = "";
+      }
     }
+    const stepsEl = bubble.querySelector(".steps");
+    if (stepsEl) {
+      const row = document.createElement("div");
+      row.className = "step-row narration";
+      row.innerHTML = `<span class="step-icon">💬</span><span>${esc(text)}</span>`;
+      stepsEl.appendChild(row);
+      scrollChat();
+    }
+  }
+
+  function appendTextToBubble(bubble, text) {
+    const el = bubble.querySelector(".response-text");
+    if (!el) {
+      return;
+    }
+    let finalEl = el.querySelector(".final-response");
+    if (!finalEl) {
+      finalEl = document.createElement("div");
+      finalEl.className = "final-response";
+      el.appendChild(finalEl);
+    }
+    finalEl.innerHTML = formatAssistantText(text);
   }
 
   function addStep(container, text, state) {
@@ -659,6 +828,15 @@
     row.innerHTML = `<span class="step-icon">${icon}</span><span>${esc(text)}</span>`;
     container.appendChild(row);
     scrollChat();
+  }
+
+  function markAllActiveDone(container) {
+    container.querySelectorAll(".step-row.active").forEach((el) => {
+      el.classList.remove("active");
+      el.classList.add("done");
+      const icon = el.querySelector(".step-icon");
+      if (icon) icon.textContent = "✓";
+    });
   }
 
   function markLastDone(container) {
@@ -686,6 +864,13 @@
       spans[1].textContent = text;
     }
   }
+
+  btnStop.addEventListener("click", () => {
+    stopAllTts();
+    send({ type: "stop_loop", request_id: activeAgentRequestId || "" });
+    btnStop.classList.add("hidden");
+    activeAgentRequestId = null;
+  });
 
   btnEstop.addEventListener("click", () => {
     if (confirm("确认发送急停命令？")) {
@@ -876,6 +1061,7 @@
   let waveAnimId = null;
   let micStream = null;
   let isVoiceMode = false;
+  let voiceCancelled = false;
   let selectedMicId = "";
   const micSelect = document.getElementById("mic-select");
 
@@ -904,13 +1090,23 @@
 
   enumerateMics();
 
+  const micGroup = document.querySelector(".mic-group");
+
   btnMic.addEventListener("click", () => {
+    stopAllTts();
     void unlockTtsPlayback();
-    if (isVoiceMode) {
-      stopVoiceMode();
-    } else {
+    if (!isVoiceMode) {
       startVoiceMode();
     }
+  });
+
+  btnVoiceCancel.addEventListener("click", () => {
+    if (!isVoiceMode) return;
+    voiceCancelled = true;
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+    stopVoiceMode();
   });
 
   async function startVoiceMode() {
@@ -934,9 +1130,11 @@
     }
 
     isVoiceMode = true;
-    btnMic.classList.add("is-recording");
+    voiceCancelled = false;
+    micGroup.style.display = "none";
     chatInput.style.display = "none";
     voiceWave.classList.remove("hidden");
+    btnVoiceCancel.classList.remove("hidden");
 
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     sourceNode = audioContext.createMediaStreamSource(micStream);
@@ -962,16 +1160,14 @@
 
   function stopVoiceMode() {
     isVoiceMode = false;
-    btnMic.classList.remove("is-recording");
+    micGroup.style.display = "";
     voiceWave.classList.add("hidden");
+    btnVoiceCancel.classList.add("hidden");
     chatInput.style.display = "";
 
     if (waveAnimId) {
       cancelAnimationFrame(waveAnimId);
       waveAnimId = null;
-    }
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-      mediaRecorder.stop();
     }
     if (micStream) {
       micStream.getTracks().forEach((t) => t.stop());
@@ -984,6 +1180,11 @@
   }
 
   async function finishRecording() {
+    if (voiceCancelled) {
+      audioChunks = [];
+      console.log("[voice] recording cancelled by user");
+      return;
+    }
     if (!audioChunks.length) {
       console.warn("[voice] no audio chunks captured");
       return;
@@ -1179,6 +1380,8 @@
   let ttsQueue = [];
   let ttsPlaying = false;
   let ttsAudioContext = null;
+  let ttsCurrentSource = null;
+  let ttsCurrentAudioEl = null;
 
   async function unlockTtsPlayback() {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -1213,8 +1416,15 @@
     try {
       await new Promise((resolve, reject) => {
         const audio = new Audio(url);
-        audio.onended = () => resolve();
-        audio.onerror = () => reject(new Error("audio element playback failed"));
+        ttsCurrentAudioEl = audio;
+        audio.onended = () => {
+          ttsCurrentAudioEl = null;
+          resolve();
+        };
+        audio.onerror = () => {
+          ttsCurrentAudioEl = null;
+          reject(new Error("audio element playback failed"));
+        };
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.then === "function") {
           playPromise.catch(reject);
@@ -1236,7 +1446,11 @@
           const source = ctx.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(ctx.destination);
-          source.onended = () => resolve();
+          source.onended = () => {
+            ttsCurrentSource = null;
+            resolve();
+          };
+          ttsCurrentSource = source;
           source.start(0);
         });
         return;
@@ -1263,6 +1477,27 @@
       }
     } finally {
       ttsPlaying = false;
+    }
+  }
+
+  function stopAllTts() {
+    ttsQueue.length = 0;
+    if (ttsCurrentSource) {
+      try {
+        ttsCurrentSource.stop();
+      } catch (_) {}
+      ttsCurrentSource = null;
+    }
+    if (ttsCurrentAudioEl) {
+      try {
+        ttsCurrentAudioEl.pause();
+        ttsCurrentAudioEl.src = "";
+      } catch (_) {}
+      ttsCurrentAudioEl = null;
+    }
+    ttsPlaying = false;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "stop_tts" }));
     }
   }
 

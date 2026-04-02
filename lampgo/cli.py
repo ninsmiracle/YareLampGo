@@ -638,7 +638,11 @@ def _cmd_record(args: argparse.Namespace) -> None:
     hal = HardwareAbstraction(dev_config)
     hal.connect()
 
-    recordings_dir = Path(args.recordings_dir) if args.recordings_dir else Path(config.recordings_dir)
+    # User teach-in recordings go to the user/ subdir (gitignored) to keep
+    # built-in assets clean. Override with --recordings-dir if needed.
+    default_user_dir = Path(config.recordings_dir) / "user"
+    recordings_dir = Path(args.recordings_dir) if args.recordings_dir else default_user_dir
+    recordings_dir.mkdir(parents=True, exist_ok=True)
     rec = TeachRecorder(hal, recordings_dir, fps=args.fps)
     interval = 1.0 / args.fps
 

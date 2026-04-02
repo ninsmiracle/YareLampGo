@@ -22,6 +22,7 @@ from lampgo.core.types import InvokeResult
 from lampgo.skills.base import Skill, SkillContext
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.registry import SkillRegistry
+from lampgo.bridge.openclaw_client import run_openclaw_agent
 
 logger = structlog.get_logger(__name__)
 INNOVATION_MARKERS = ("创新", "新动作", "表演", "编一个", "设计一个", "原创", "即兴", "新舞", "动作")
@@ -167,6 +168,7 @@ class OpenClawAdapter:
 
     async def confirm_promotion(self, task_id: str, proposal_id: str, decision: str) -> dict[str, Any]:
         normalized = "approve" if decision in {"approve", "approved", "confirm"} else "reject"
+        user_text: str = ""
         async with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
@@ -175,12 +177,13 @@ class OpenClawAdapter:
             if proposal is None:
                 raise KeyError(proposal_id)
             proposal.status = "approved" if normalized == "approve" else "rejected"
-            task.status = "promoted" if normalized == "approve" else "rejected"
-            task.detail = (
-                "已确认沉淀，等待 OpenClaw 后续落地。"
-                if normalized == "approve"
-                else "已拒绝沉淀，保留 temporary 方案，不进入长期能力。"
-            )
+            if normalized == "approve":
+                task.status = "executing"
+                task.detail = "已确认沉淀，正在调用 OpenClaw 执行..."
+                user_text = task.user_text
+            else:
+                task.status = "rejected"
+                task.detail = "已拒绝沉淀，保留 temporary 方案，不进入长期能力。"
             task.updated_at = time.time()
             task_snapshot = task.to_dict()
         logger.info(
@@ -199,7 +202,47 @@ class OpenClawAdapter:
             )
         )
         await self._publish_task_update(task)
+
+        # Spawn actual OpenClaw execution after approval.
+        if normalized == "approve" and user_text:
+            asyncio.create_task(self._execute_after_promotion(task_id, user_text, proposal))
+
         return task_snapshot
+
+    async def _execute_after_promotion(
+        self,
+        task_id: str,
+        user_text: str,
+        proposal: PromotionProposal,
+    ) -> None:
+        """Run `openclaw agent` after user approves a promotion proposal."""
+        message = (
+            f"用户任务：{user_text}\n"
+            f"沉淀类型：{proposal.promotion_target}\n"
+            "指令：请使用 lampgo plugin tools（lampgo_status / lampgo_move / lampgo_expression / "
+            "lampgo_save_recording 等）完成该任务，并通过 lampgo_save_recording 将最终动作保存为录制文件。\n"
+            "lampgo_save_recording CSV 格式要求：\n"
+            "- header: timestamp,base_yaw.pos,base_pitch.pos,elbow_pitch.pos,wrist_roll.pos,wrist_pitch.pos\n"
+            "- timestamp 从 0 开始，每帧递增 1/fps（例如 30fps 则每帧 +0.033）\n"
+            "- 角度单位均为度（degrees）\n"
+            "- 示例行: 0.000,0,-45,65,0,5\n"
+            "如需用户确认，请调用 lampgo_ask_user 工具。"
+        )
+        logger.info("openclaw.executing_after_promotion", task_id=task_id, message_preview=message[:120])
+        result = await run_openclaw_agent(message, thinking="high")
+
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            if result.ok:
+                task.status = "completed"
+                task.detail = f"OpenClaw 执行完成。{result.stdout[:200] if result.stdout else ''}"
+            else:
+                task.status = "failed"
+                task.detail = f"OpenClaw 执行失败: {result.stderr[:200] or result.stdout[:200]}"
+            task.updated_at = time.time()
+        await self._publish_task_update(task)
 
     async def _plan_task(self, task_id: str, payload: dict[str, Any]) -> None:
         await asyncio.sleep(0)
@@ -211,9 +254,9 @@ class OpenClawAdapter:
             task.detail = "OpenClaw 正在分析任务，并评估是否能复用现有能力。"
             task.updated_at = time.time()
         await self._publish_task_update(task)
-
         task_snapshot: dict[str, Any] | None = None
         proposal_snapshot: dict[str, Any] | None = None
+
         async with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
@@ -224,47 +267,23 @@ class OpenClawAdapter:
                 task.detail = "已提交给 OpenClaw 外部编排器，等待进一步执行。"
                 task.updated_at = time.time()
             else:
-                task.status = "generating_temporary_asset"
-                task.detail = f"OpenClaw 正在调用 {proposal.worker} 生成 temporary 方案。"
+                task.proposals.append(proposal)
+                task.status = "awaiting_promotion_confirmation"
+                task.detail = "已生成 temporary 方案，等待确认是否继续执行并沉淀。"
                 task.updated_at = time.time()
+                task_snapshot = task.to_dict()
+                proposal_snapshot = proposal.to_dict()
+
         await self._publish_task_update(task)
 
-        if proposal is None:
-            return
-
-        async with self._lock:
-            task = self._tasks.get(task_id)
-            if task is None:
-                return
-            task.proposals.append(proposal)
-            task.status = "awaiting_promotion_confirmation"
-            task.detail = "OpenClaw 生成了 temporary 方案，等待你确认是否 promoted。"
-            task.updated_at = time.time()
-            task_snapshot = task.to_dict()
-            proposal_snapshot = proposal.to_dict()
-
-        logger.info(
-            "openclaw.code_worker_generated_proposal",
-            task_id=task.task_id,
-            proposal_id=proposal.proposal_id,
-            worker=proposal.worker,
-        )
-        await asyncio.sleep(0)
-        logger.info(
-            "openclaw.promotion_requested",
-            task_id=task.task_id,
-            proposal_id=proposal.proposal_id,
-            proposal_type=proposal.proposal_type,
-        )
         await self._events.publish(
             OpenClawPromotionRequested(
-                request_id=task.request_id,
-                task_id=task.task_id,
-                proposal=proposal_snapshot,
-                task=task_snapshot,
+                request_id=payload.get("request_id", ""),
+                task_id=task_id,
+                proposal=proposal_snapshot or {},
+                task=task_snapshot or {},
             )
         )
-        await self._publish_task_update(task)
         return
 
     async def _publish_task_update(self, task: OpenClawTask) -> None:

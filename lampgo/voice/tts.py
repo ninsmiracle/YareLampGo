@@ -71,33 +71,40 @@ class MiMoTTS:
         }
 
         url = f"{self._api_base}/chat/completions"
-        total_bytes = 0
-        timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+        max_retries = 2
 
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", url, json=body, headers=headers) as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        payload = line[6:]
-                        if payload.strip() == "[DONE]":
-                            break
+        for attempt in range(1, max_retries + 1):
+            total_bytes = 0
+            timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream("POST", url, json=body, headers=headers) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            payload = line[6:]
+                            if payload.strip() == "[DONE]":
+                                break
 
-                        try:
-                            chunk = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
+                            try:
+                                chunk = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
 
-                        pcm = _extract_stream_audio(chunk)
-                        if pcm:
-                            total_bytes += len(pcm)
-                            yield pcm
+                            pcm = _extract_stream_audio(chunk)
+                            if pcm:
+                                total_bytes += len(pcm)
+                                yield pcm
 
-            logger.debug("tts.stream_complete", chars=len(text), pcm_bytes=total_bytes)
-        except Exception:
-            logger.exception("tts.stream_failed")
+                logger.debug("tts.stream_complete", chars=len(text), pcm_bytes=total_bytes)
+                return
+            except Exception:
+                if attempt < max_retries:
+                    logger.warning("tts.stream_retry", attempt=attempt, chars=len(text))
+                    await asyncio.sleep(1.0)
+                else:
+                    logger.exception("tts.stream_failed")
 
     async def stream_speak(self, text: str) -> None:
         """Stream-synthesize text and play through sounddevice in real-time."""

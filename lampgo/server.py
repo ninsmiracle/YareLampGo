@@ -11,14 +11,28 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 from lampgo.bridge.openclaw import OpenClawAdapter
+from lampgo.bridge.state_writer import MinimalState, StateWriter
 from lampgo.core.config import LampgoConfig
-from lampgo.core.events import AgentFinished, ChatMessage, EventBus, IntentProgress, IntentRouting, ToolCallFinished, ToolCallPlanned, TtsAudio
+from lampgo.core.events import (
+    AgentFinished,
+    ChatMessage,
+    EventBus,
+    IntentProgress,
+    IntentRouting,
+    OpenClawAskRequested,
+    OpenClawAskResolved,
+    ToolCallFinished,
+    ToolCallPlanned,
+    TtsAudio,
+)
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.config import LEDConfig
 from lampgo.core.led import LEDController
@@ -43,6 +57,7 @@ from lampgo.skills.fsm import StateMachine
 from lampgo.skills.registry import SkillRegistry
 
 logger = structlog.get_logger(__name__)
+RECORDING_ALIASES_FILE = "aliases.json"
 
 
 class LampgoServer:
@@ -66,6 +81,11 @@ class LampgoServer:
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
         self._web_gateway = None
+        self._state_writer = StateWriter()
+        self._recording_alias_cache: tuple[float, dict[str, str]] = (0.0, {})
+        self._openclaw_asks: dict[str, asyncio.Future[str]] = {}
+        self._openclaw_asks_lock = asyncio.Lock()
+        self._tts_tasks: set[asyncio.Task] = set()
 
     def _register_builtin_skills(self) -> None:
         recordings_dir = Path(self.config.recordings_dir)
@@ -99,7 +119,9 @@ class LampgoServer:
             return await self._handle_invoke(data)
 
         if cmd == "text":
-            return await self._handle_text(data)
+            result = await self._handle_text(data)
+            await self._maybe_tts(result, data.get("request_id", ""))
+            return result
 
         if cmd == "audio":
             return await self._handle_audio(data)
@@ -120,6 +142,43 @@ class LampgoServer:
             return {"ok": True, "result": {"status": "estopped"}}
 
         return {"ok": False, "error": f"unknown command: {cmd}"}
+
+    async def openclaw_ask_user(
+        self,
+        *,
+        question: str,
+        options: list[str] | None = None,
+        request_id: str = "",
+        timeout_s: float = 120.0,
+    ) -> dict[str, Any]:
+        ask_id = f"ask_{uuid.uuid4().hex[:10]}"
+        fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+        async with self._openclaw_asks_lock:
+            self._openclaw_asks[ask_id] = fut
+
+        opts = list(options or [])
+        await self.events.publish(OpenClawAskRequested(ask_id=ask_id, question=question, options=opts, request_id=request_id))
+        await self.events.publish(ChatMessage(role="assistant", content=question, request_id=request_id))
+
+        try:
+            reply = await asyncio.wait_for(fut, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            reply = ""
+        finally:
+            async with self._openclaw_asks_lock:
+                self._openclaw_asks.pop(ask_id, None)
+
+        await self.events.publish(OpenClawAskResolved(ask_id=ask_id, reply=reply, request_id=request_id))
+        return {"ask_id": ask_id, "reply": reply, "timeout": reply == "", "ts": time.time()}
+
+    async def openclaw_reply_user(self, *, ask_id: str, reply: str, request_id: str = "") -> bool:
+        async with self._openclaw_asks_lock:
+            fut = self._openclaw_asks.get(ask_id)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(reply)
+        await self.events.publish(ChatMessage(role="user", content=reply, request_id=request_id))
+        return True
 
     async def _handle_invoke(self, data: dict) -> dict:
         skill_id = data.get("skill_id", "")
@@ -150,6 +209,29 @@ class LampgoServer:
         asyncio.ensure_future(_bg())
         return {"ok": True, "result": {"status": "accepted", "skill_id": skill_id}}
 
+    def _extract_response_text(self, result: dict) -> str | None:
+        r = result.get("result", {})
+        return r.get("response") or r.get("chat_response") or None
+
+    async def _maybe_tts(self, result: dict, request_id: str) -> None:
+        text = self._extract_response_text(result)
+        if text:
+            task = asyncio.create_task(self._tts_for_web(text, request_id))
+            self._tts_tasks.add(task)
+            task.add_done_callback(self._tts_tasks.discard)
+
+    def cancel_pending_tts(self) -> int:
+        """Cancel all in-flight TTS synthesis tasks. Returns count cancelled."""
+        cancelled = 0
+        for t in list(self._tts_tasks):
+            if not t.done():
+                t.cancel()
+                cancelled += 1
+        self._tts_tasks.clear()
+        if cancelled:
+            logger.info("server.tts_cancelled", count=cancelled)
+        return cancelled
+
     async def _handle_text(self, data: dict) -> dict:
         """Route free text through the IntentRouter, then invoke or reply."""
         text = data.get("input", "").strip()
@@ -158,7 +240,26 @@ class LampgoServer:
 
         request_id = data.get("request_id", "")
 
-        async def _publish_intent_progress(stage: str, message: str, source: str) -> None:
+        alias = self._resolve_recording_alias(text)
+        if alias:
+            ctx = self.make_context()
+            result = await self.executor.invoke("play_recording", ctx, name=alias)
+            return {
+                "ok": result.status in ("ok", "cancelled"),
+                "result": {
+                    "type": "skill",
+                    "skill_id": "play_recording",
+                    "invocation_id": result.invocation_id,
+                    "status": result.status,
+                    "data": result.result,
+                    "chat_response": f"好的，播放录制动作：{alias}",
+                    "source": "recording_alias",
+                    "detail": f"recording_alias:{alias}",
+                    "matched_keyword": text,
+                },
+            }
+
+        async def _publish_intent_progress(stage: str, message: str, source: str) -> asyncio.Task | None:
             await self.events.publish(
                 IntentProgress(
                     stage=stage,
@@ -167,6 +268,12 @@ class LampgoServer:
                     request_id=request_id,
                 )
             )
+            if stage == "llm_narration" and message.strip():
+                task = asyncio.create_task(self._tts_for_web(message, request_id))
+                self._tts_tasks.add(task)
+                task.add_done_callback(self._tts_tasks.discard)
+                return task
+            return None
 
         intent = self.router.route(text)
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
@@ -322,12 +429,31 @@ class LampgoServer:
         )
 
         result = await self._handle_text({"input": text, "request_id": request_id})
-
-        response_text = result.get("result", {}).get("response") or result.get("result", {}).get("chat_response")
-        if response_text:
-            asyncio.create_task(self._tts_for_web(response_text, request_id))
-
+        await self._maybe_tts(result, request_id)
         return result
+
+    def _resolve_recording_alias(self, text: str) -> str | None:
+        path = Path(self.config.recordings_dir) / RECORDING_ALIASES_FILE
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            return None
+
+        cached_mtime, cached = self._recording_alias_cache
+        if mtime != cached_mtime:
+            import json
+
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    cached = {str(k).strip(): str(v).strip() for k, v in data.items() if str(k).strip() and str(v).strip()}
+                else:
+                    cached = {}
+            except Exception:
+                cached = {}
+            self._recording_alias_cache = (mtime, cached)
+
+        return cached.get(text.strip())
 
     async def _execute_agent_tool(
         self,
@@ -554,11 +680,24 @@ class LampgoServer:
             await self._home_on_start()
         await self._ipc.start()
         self._setup_llm_router()
+        self._state_writer.start(get_state=self._get_minimal_state)
         logger.info(
             "server.ready",
             skills=self.registry.list_ids(),
             motor_port="(disabled)" if self.config.no_hw else self.config.device.motor_port,
             socket=self.config.socket_path,
+        )
+
+    def _get_minimal_state(self) -> MinimalState:
+        camera_connected = bool(self.config.camera.port.strip())
+        mic_active = bool(self.config.voice_enabled)
+        return MinimalState(
+            status="busy" if self.executor.is_busy else "idle",
+            is_busy=self.executor.is_busy,
+            running_skill=self.executor.current_skill_id,
+            estopped=self.safety.is_estopped(),
+            camera_connected=camera_connected,
+            mic_active=mic_active,
         )
 
     async def _home_on_start(self) -> None:
@@ -608,6 +747,7 @@ class LampgoServer:
 
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
+        await self._state_writer.stop()
         if self._voice_task is not None:
             self._voice_task.cancel()
             try:

@@ -151,6 +151,25 @@ class OpenClawPromotionDecision(Event):
 
 
 @dataclass
+class OpenClawAskRequested(Event):
+    """OpenClaw asked the user a question via lampgo."""
+
+    ask_id: str
+    question: str
+    options: list[str]
+    request_id: str = ""
+
+
+@dataclass
+class OpenClawAskResolved(Event):
+    """User replied to an OpenClaw question via lampgo."""
+
+    ask_id: str
+    reply: str
+    request_id: str = ""
+
+
+@dataclass
 class SkillProgress(Event):
     """Skill execution progress update."""
 

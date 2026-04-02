@@ -113,18 +113,7 @@
         </div>
 
         <div class="composer-wrap">
-          <div id="voice-wave" class="voice-wave hidden">
-            <canvas id="voice-canvas" class="voice-canvas"></canvas>
-            <span class="voice-hint">聆听中…</span>
-          </div>
           <form id="chat-form" class="composer">
-            <input
-              id="chat-input"
-              type="text"
-              placeholder="输入指令，例如：做个点头的动作"
-              autocomplete="off"
-              class="composer-input"
-            >
             <div class="mic-group">
               <button id="btn-mic" class="mic-button" type="button" title="语音输入">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
@@ -133,6 +122,22 @@
                 <option value="">默认麦克风</option>
               </select>
             </div>
+            <input
+              id="chat-input"
+              type="text"
+              placeholder="输入指令，例如：做个点头的动作"
+              autocomplete="off"
+              class="composer-input"
+            >
+            <div id="voice-wave" class="voice-wave hidden">
+              <canvas id="voice-canvas" class="voice-canvas"></canvas>
+              <span class="voice-hint">聆听中…</span>
+            </div>
+            <button id="btn-voice-cancel" class="voice-cancel-button hidden" type="button" title="取消录音">取消</button>
+            <button id="btn-stop" class="stop-button hidden" type="button" title="停止当前任务">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+              停止
+            </button>
             <button class="send-button" type="submit">发送</button>
           </form>
         </div>
