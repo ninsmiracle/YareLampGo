@@ -8,6 +8,8 @@ Baud rate: 9600.
 
 from __future__ import annotations
 
+import time
+
 import structlog
 
 from lampgo.core.config import LEDConfig
@@ -110,6 +112,7 @@ class LEDController:
         try:
             self._serial.write(command.encode())
             self._serial.flush()
+            time.sleep(0.05)
             logger.info("led.sent", cmd=command.strip(), port=self._config.port)
             return True
         except Exception:

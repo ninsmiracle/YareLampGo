@@ -5,7 +5,7 @@ Moves wrist_roll from safe position to +20, pauses, then to -20, pauses,
 then returns. Observe which direction is clockwise vs counter-clockwise.
 
 Usage (daemon must be running):
-    uv run python scripts/test_wrist_roll.py
+    uv run python tests/test_wrist_roll.py
 """
 
 import sys

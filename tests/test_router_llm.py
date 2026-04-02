@@ -94,65 +94,45 @@ async def test_agent_loop_can_call_multiple_tools(monkeypatch):
     scripted = iter(
         [
             {
-                "choices": [
+                "content": "",
+                "tool_calls": [
                     {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "function": {
-                                        "name": "play_recording",
-                                        "arguments": "{\"name\": \"dance\"}",
-                                    },
-                                }
-                            ]
-                        }
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "play_recording", "arguments": '{"name": "dance"}'},
                     }
-                ]
+                ],
             },
             {
-                "choices": [
+                "content": "",
+                "tool_calls": [
                     {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "id": "call_2",
-                                    "function": {
-                                        "name": "set_expression",
-                                        "arguments": "{\"expression\": \"music\"}",
-                                    },
-                                }
-                            ]
-                        }
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "set_expression", "arguments": '{"expression": "music"}'},
                     }
-                ]
+                ],
             },
             {
-                "choices": [
+                "content": "",
+                "tool_calls": [
                     {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "id": "call_3",
-                                    "function": {
-                                        "name": "finish_response",
-                                        "arguments": (
-                                            "{\"message\": \"好的，先跳舞再切到音乐表情\", "
-                                            "\"summary\": \"完成两次工具调用\"}"
-                                        ),
-                                    },
-                                }
-                            ]
-                        }
+                        "id": "call_3",
+                        "type": "function",
+                        "function": {
+                            "name": "finish_response",
+                            "arguments": '{"message": "好的，先跳舞再切到音乐表情", "summary": "完成两次工具调用"}',
+                        },
                     }
-                ]
+                ],
             },
         ]
     )
     progress: list[tuple[str, str, str]] = []
     executed: list[tuple[str, dict[str, object], int, int]] = []
 
-    async def fake_chat_completion(messages, tools, log_name, log_context=None, tool_choice="auto"):
+    async def fake_stream(messages, tools, log_name, log_context=None, tool_choice="auto",
+                          model_override=None, on_reasoning_delta=None, on_content_delta=None):
         return next(scripted)
 
     async def execute_tool(tool_name: str, params: dict[str, object], turn_index: int, tool_index: int):
@@ -168,7 +148,7 @@ async def test_agent_loop_can_call_multiple_tools(monkeypatch):
     async def on_progress(stage: str, message: str, source: str) -> None:
         progress.append((stage, message, source))
 
-    monkeypatch.setattr(client, "_chat_completion", fake_chat_completion)
+    monkeypatch.setattr(client, "_stream_chat_completion", fake_stream)
     result = await client.run_agent_loop("跳个舞，唱个歌", execute_tool=execute_tool, on_progress=on_progress)
 
     assert result.intent_type == "agent"
@@ -198,23 +178,23 @@ async def test_agent_loop_attaches_camera_image_once(monkeypatch):
 
     captured_bodies: list[dict] = []
 
-    async def fake_chat_completion(self, *, messages, tools, log_name, log_context=None, tool_choice="auto"):
+    async def fake_stream(self, messages, tools, log_name, log_context=None, tool_choice="auto",
+                          model_override=None, on_reasoning_delta=None, on_content_delta=None):
         from copy import deepcopy
+
         captured_bodies.append(deepcopy(messages))
         return {
-            "choices": [{
-                "message": {
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "finish_response", "arguments": '{"message":"done"}'},
-                    }],
-                },
-            }],
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "finish_response", "arguments": '{"message":"done"}'},
+                }
+            ],
         }
 
-    monkeypatch.setattr(LLMClient, "_chat_completion", fake_chat_completion)
+    monkeypatch.setattr(LLMClient, "_stream_chat_completion", fake_stream)
 
     async def noop_exec(name, args, ti, toi):
         return {"ok": True, "status": "ok"}
@@ -228,3 +208,52 @@ async def test_agent_loop_attaches_camera_image_once(monkeypatch):
     assert isinstance(user_msg["content"], list)
     assert user_msg["content"][0] == {"type": "text", "text": "看看前面"}
     assert user_msg["content"][1]["type"] == "image_url"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_disables_thinking_for_mimo(monkeypatch):
+    import httpx
+
+    client = LLMClient(
+        LLMConfig(
+            api_key="test-key",
+            fast_model="mimo-v2-omni",
+            web_search_enabled=False,
+        ),
+        skill_specs=[],
+    )
+    seen_json: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"tool_calls": []}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            seen_json.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    await client._chat_completion(
+        messages=[{"role": "user", "content": "hello hello"}],
+        tools=[],
+        log_name="test",
+        tool_choice="required",
+    )
+
+    assert seen_json["model"] == "mimo-v2-omni"
+    assert "thinking" not in seen_json, "agent loop should use default thinking (enabled) for mimo"
+    assert seen_json["tool_choice"] == "required"
