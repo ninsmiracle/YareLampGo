@@ -118,14 +118,15 @@ class CameraConfig(BaseModel):
 
 
 class VoiceConfig(BaseModel):
-    """Voice / TTS / STT configuration.
+    """Voice / TTS / STT configuration."""
 
-    Used for real-time voice conversation (future milestone).
-    """
-
-    stt_provider: str = Field(default="", description="STT provider: whisper, azure, local (empty = disabled)")
-    tts_provider: str = Field(default="", description="TTS provider: edge-tts, azure, local (empty = disabled)")
-    tts_voice: str = Field(default="zh-CN-XiaoxiaoNeural", description="TTS voice identifier")
+    stt_provider: str = Field(default="omni", description="STT provider: omni (mimo-v2-omni), whisper")
+    stt_model: str = Field(default="mimo-v2-omni", description="STT model name (for omni provider)")
+    tts_provider: str = Field(default="mimo", description="TTS provider: mimo (mimo-v2-tts), edge-tts")
+    tts_voice: str = Field(default="mimo_default", description="TTS voice identifier")
+    tts_style_prompt: str = Field(default="", description="MiMo TTS style instruction (e.g. '温柔甜美的女声')")
+    chat_model: str = Field(default="mimo-v2-pro", description="LLM model for voice chat streaming responses")
+    mic_device: str = Field(default="", description="Microphone device index or name (empty = system default)")
     wake_word: str = Field(default="", description="Wake word for hands-free activation (empty = disabled)")
     vad_enabled: bool = Field(default=False, description="Enable voice activity detection")
 
@@ -154,6 +155,7 @@ class LampgoConfig(BaseModel):
     voice_enabled: bool = Field(default=False, description="Enable voice loop on startup")
     web_enabled: bool = Field(default=False, description="Enable web UI on startup")
     home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
+    no_hw: bool = Field(default=False, description="Skip hardware connections (motors/LED)")
 
 
 def _find_project_root() -> Path:
@@ -229,8 +231,12 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
         "LAMPGO_LLM_MAX_AGENT_TOOL_CALLS": ("llm", "max_agent_tool_calls"),
         "LAMPGO_CAMERA_PORT": ("camera", "port"),
         "LAMPGO_VOICE_STT_PROVIDER": ("voice", "stt_provider"),
+        "LAMPGO_VOICE_STT_MODEL": ("voice", "stt_model"),
         "LAMPGO_VOICE_TTS_PROVIDER": ("voice", "tts_provider"),
         "LAMPGO_VOICE_TTS_VOICE": ("voice", "tts_voice"),
+        "LAMPGO_VOICE_TTS_STYLE_PROMPT": ("voice", "tts_style_prompt"),
+        "LAMPGO_VOICE_CHAT_MODEL": ("voice", "chat_model"),
+        "LAMPGO_VOICE_MIC_DEVICE": ("voice", "mic_device"),
         "LAMPGO_RECORDINGS_DIR": (None, "recordings_dir"),
         "LAMPGO_SOCKET": (None, "socket_path"),
     }

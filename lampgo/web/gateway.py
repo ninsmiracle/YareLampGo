@@ -22,7 +22,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from lampgo.core.config import WebConfig
 from lampgo.core.led import LED_EXPRESSIONS
-from lampgo.core.events import ChatMessage, IntentResolved, IntentRouting
+from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, IntentRouting
 from lampgo.perception.camera import CameraCapture
 from lampgo.web.ws_bridge import WsBridge
 
@@ -42,6 +42,7 @@ class WebGateway:
         self.config = config or WebConfig()
         self.bridge = WsBridge(server.events)
         self._status_task: asyncio.Task | None = None
+        self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self.app = self._build_app()
 
     def _build_app(self) -> Starlette:
@@ -332,12 +333,21 @@ class WebGateway:
                 except json.JSONDecodeError:
                     await ws.send_json({"ok": False, "error": "invalid json"})
                     continue
-                await self._handle_ws_message(ws, msg)
+                msg_type = msg.get("type", "")
+                if msg_type in ("text", "audio"):
+                    task = asyncio.create_task(self._handle_ws_message(ws, msg))
+                    self._active_request_tasks[ws] = task
+                    task.add_done_callback(lambda _t: self._active_request_tasks.pop(ws, None))
+                else:
+                    await self._handle_ws_message(ws, msg)
         except WebSocketDisconnect:
             pass
         except Exception:
             logger.exception("web.ws_error")
         finally:
+            task = self._active_request_tasks.pop(ws, None)
+            if task and not task.done():
+                task.cancel()
             await self.bridge.remove_client(ws)
 
     async def _handle_ws_message(self, ws: WebSocket, msg: dict[str, Any]) -> None:
@@ -350,28 +360,44 @@ class WebGateway:
                 await ws.send_json({"ok": False, "error": "empty input", "request_id": request_id})
                 return
 
-            await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
-            result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id})
+            try:
+                await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
+                result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id})
 
-            intent_type = result.get("result", {}).get("type", "unknown")
-            skill_id = result.get("result", {}).get("skill_id")
-            chat_resp = result.get("result", {}).get("response") or result.get("result", {}).get("chat_response")
-            await self.server.events.publish(
-                IntentResolved(
-                    intent_type=intent_type,
-                    skill_id=skill_id,
-                    chat_response=chat_resp,
-                    source=result.get("result", {}).get("source", ""),
-                    detail=result.get("result", {}).get("detail"),
-                    matched_keyword=result.get("result", {}).get("matched_keyword"),
-                    request_id=request_id,
+                intent_type = result.get("result", {}).get("type", "unknown")
+                skill_id = result.get("result", {}).get("skill_id")
+                chat_resp = result.get("result", {}).get("response") or result.get("result", {}).get("chat_response")
+                await self.server.events.publish(
+                    IntentResolved(
+                        intent_type=intent_type,
+                        skill_id=skill_id,
+                        chat_response=chat_resp,
+                        source=result.get("result", {}).get("source", ""),
+                        detail=result.get("result", {}).get("detail"),
+                        matched_keyword=result.get("result", {}).get("matched_keyword"),
+                        request_id=request_id,
+                    )
                 )
-            )
-            if chat_resp:
-                await self.server.events.publish(ChatMessage(role="assistant", content=chat_resp, request_id=request_id))
+                if chat_resp:
+                    await self.server.events.publish(ChatMessage(role="assistant", content=chat_resp, request_id=request_id))
 
-            result["request_id"] = request_id
-            await ws.send_json(result)
+                result["request_id"] = request_id
+                await ws.send_json(result)
+            except asyncio.CancelledError:
+                await self._send_cancel_response(ws, request_id)
+
+        elif msg_type == "audio":
+            audio_data = msg.get("audio_data", "").strip()
+            if not audio_data:
+                await ws.send_json({"ok": False, "error": "empty audio_data", "request_id": request_id})
+                return
+
+            try:
+                result = await self.server.handle_request({"cmd": "audio", "audio_data": audio_data, "request_id": request_id})
+                result["request_id"] = request_id
+                await ws.send_json(result)
+            except asyncio.CancelledError:
+                await self._send_cancel_response(ws, request_id)
 
         elif msg_type == "invoke":
             result = await self.server.handle_request(
@@ -440,6 +466,20 @@ class WebGateway:
             await self.server.executor.cancel_current()
             await ws.send_json({"ok": True, "result": {"status": "cancelled"}, "request_id": request_id})
 
+        elif msg_type == "stop_loop":
+            task = self._active_request_tasks.get(ws)
+            cancelled = 0
+            if task and not task.done():
+                task.cancel()
+                cancelled = 1
+            self.server.cancel_pending_tts()
+            await self.server.executor.cancel_current()
+            logger.info("web.stop_loop", request_id=request_id, cancelled=cancelled)
+
+        elif msg_type == "stop_tts":
+            cancelled = self.server.cancel_pending_tts()
+            await ws.send_json({"ok": True, "result": {"cancelled": cancelled}, "request_id": request_id})
+
         elif msg_type == "estop":
             result = await self.server.handle_request({"cmd": "estop"})
             result["request_id"] = request_id
@@ -447,6 +487,32 @@ class WebGateway:
 
         else:
             await ws.send_json({"ok": False, "error": f"unknown type: {msg_type}", "request_id": request_id})
+
+    async def _send_cancel_response(self, ws: WebSocket, request_id: str) -> None:
+        """Publish cancellation events and send a response after stop_loop."""
+        await self.server.events.publish(
+            AgentFinished(
+                request_id=request_id,
+                stop_reason="user_cancelled",
+                tool_call_count=0,
+                response="已停止",
+                detail="用户手动停止",
+            )
+        )
+        try:
+            await ws.send_json({
+                "ok": True,
+                "result": {
+                    "type": "agent",
+                    "response": "已停止",
+                    "source": "user",
+                    "detail": "用户手动停止",
+                    "stop_reason": "user_cancelled",
+                },
+                "request_id": request_id,
+            })
+        except Exception:
+            pass
 
     def _list_recordings(self) -> list[str]:
         recordings_dir = Path(self.server.config.recordings_dir)

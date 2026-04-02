@@ -32,6 +32,7 @@ from lampgo.core.events import (
     SkillStarted,
     ToolCallFinished,
     ToolCallPlanned,
+    TtsAudio,
 )
 
 if TYPE_CHECKING:
@@ -59,6 +60,7 @@ ALL_EVENT_TYPES: list[type[Event]] = [
     AgentFinished,
     SkillProgress,
     ChatMessage,
+    TtsAudio,
 ]
 
 
