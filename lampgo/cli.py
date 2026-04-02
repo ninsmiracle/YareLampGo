@@ -155,6 +155,7 @@ def main() -> None:
 # IPC helpers
 # ---------------------------------------------------------------------------
 
+
 def _ipc_or_die(request: dict) -> dict:
     """Send IPC request; exit with helpful message if daemon is not running."""
     from lampgo.ipc import ipc_send
@@ -163,9 +164,7 @@ def _ipc_or_die(request: dict) -> dict:
         return ipc_send(request)
     except (ConnectionRefusedError, FileNotFoundError, OSError):
         print(
-            "Error: lampgo daemon is not running.\n"
-            "Start it with: lampgo run\n"
-            "Or use --motor-port for standalone mode.",
+            "Error: lampgo daemon is not running.\n" "Start it with: lampgo run\n" "Or use --motor-port for standalone mode.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -188,6 +187,7 @@ def _parse_kv_params(pairs: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 # IPC-based commands (talk to running daemon)
 # ---------------------------------------------------------------------------
+
 
 def _cmd_invoke(args: argparse.Namespace) -> None:
     params = _parse_kv_params(args.params) if args.params else {}
@@ -234,7 +234,7 @@ def _build_help_text() -> str:
         "  uv run lampgo calibrate --port /dev/tty.usbmodemXXXX --id AL01\n\n"
         "6) 表情与文本路由\n"
         "  uv run lampgo invoke set_expression expression=heart\n"
-        "  uv run lampgo text \"做个害羞的表情\"\n\n"
+        '  uv run lampgo text "做个害羞的表情"\n\n'
         "7) 硬件检测（串口 + 摄像头）\n"
         "  uv run lampgo detect\n\n"
         "提示: 推荐用 Ctrl+C 优雅退出 daemon，避免电机保持扭矩锁死。"
@@ -333,6 +333,7 @@ def _cmd_ping(args: argparse.Namespace) -> None:
     port = args.port or config.device.motor_port
     if not port:
         from lampgo.autodetect import detect_ports
+
         detected = detect_ports()
         port = detected.get("motor_port")
     if not port:
@@ -346,10 +347,7 @@ def _cmd_ping(args: argparse.Namespace) -> None:
         print("Error: lerobot[feetech] not installed.", file=sys.stderr)
         sys.exit(1)
 
-    motors = {
-        name: Motor(mc.id, mc.model, MotorNormMode.DEGREES)
-        for name, mc in config.device.motors.items()
-    }
+    motors = {name: Motor(mc.id, mc.model, MotorNormMode.DEGREES) for name, mc in config.device.motors.items()}
     bus = FeetechMotorsBus(port=port, motors=motors)
     bus.connect(handshake=False)
 
@@ -358,18 +356,12 @@ def _cmd_ping(args: argparse.Namespace) -> None:
         model, comm, error = bus.packet_handler.ping(bus.port_handler, m.id)
         if not bus._is_comm_success(comm):
             all_ok = False
-            print(
-                f"  ID={m.id:>2} ({name:>15}): ✗ OFFLINE "
-                f"({bus.packet_handler.getTxRxResult(comm)})"
-            )
+            print(f"  ID={m.id:>2} ({name:>15}): ✗ OFFLINE " f"({bus.packet_handler.getTxRxResult(comm)})")
             continue
 
         if bus._is_error(error):
             all_ok = False
-            print(
-                f"  ID={m.id:>2} ({name:>15}): ! STATUS ERROR "
-                f"(model={model}, {bus.packet_handler.getRxPacketError(error)})"
-            )
+            print(f"  ID={m.id:>2} ({name:>15}): ! STATUS ERROR " f"(model={model}, {bus.packet_handler.getRxPacketError(error)})")
             continue
 
         print(f"  ID={m.id:>2} ({name:>15}): ✓ online  (model={model})")
@@ -385,6 +377,7 @@ def _cmd_help(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Commands that try IPC first, then standalone
 # ---------------------------------------------------------------------------
+
 
 def _try_ipc_invoke(skill_id: str, params: dict) -> bool:
     """Try invoking via IPC. Returns True if successful, False if daemon not running."""
@@ -462,8 +455,15 @@ def _cmd_skills(args: argparse.Namespace) -> None:
 
     registry = SkillRegistry()
     for skill_cls in [
-        MoveToSkill, ReturnSafeSkill, EStopSkill, SetExpressionSkill,
-        NodSkill, HeadShakeSkill, LookAtSkill, IdleSwaySkill, DanceSkill,
+        MoveToSkill,
+        ReturnSafeSkill,
+        EStopSkill,
+        SetExpressionSkill,
+        NodSkill,
+        HeadShakeSkill,
+        LookAtSkill,
+        IdleSwaySkill,
+        DanceSkill,
     ]:
         registry.register(skill_cls())
     registry.register(PlayRecordingSkill(Path("assets/recordings")))
@@ -477,6 +477,7 @@ def _cmd_skills(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Server / standalone commands
 # ---------------------------------------------------------------------------
+
 
 def _load_config_from_args(args: argparse.Namespace):
     from lampgo.core.config import load_config
@@ -612,8 +613,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         print(
-            "Hint: ensure no other process is occupying the serial port (try `uv run lampgo clear`) and verify "
-            "motor bus power/cable/ID wiring.",
+            "Hint: ensure no other process is occupying the serial port (try `uv run lampgo clear`) and verify " "motor bus power/cable/ID wiring.",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -179,7 +179,8 @@ async def play_audio_file(path: Path) -> None:
     for cmd in ["ffplay -nodisp -autoexit -loglevel quiet", "mpv --no-terminal"]:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd.split(), str(path),
+                *cmd.split(),
+                str(path),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -221,13 +222,23 @@ async def synthesize_for_web(text: str, api_key: str = "", api_base: str = "", v
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     """Wrap raw PCM16LE mono data in a WAV header."""
     import struct
+
     data_len = len(pcm)
     header = struct.pack(
         "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 36 + data_len, b"WAVE",
-        b"fmt ", 16, 1, 1,
-        sample_rate, sample_rate * 2, 2, 16,
-        b"data", data_len,
+        b"RIFF",
+        36 + data_len,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sample_rate,
+        sample_rate * 2,
+        2,
+        16,
+        b"data",
+        data_len,
     )
     return header + pcm
 

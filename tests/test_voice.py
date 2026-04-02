@@ -15,6 +15,7 @@ from lampgo.voice.vad import EnergyVAD
 
 # ── Audio helpers ──
 
+
 def _make_silence(n_samples: int = 480) -> bytes:
     return struct.pack(f"<{n_samples}h", *([0] * n_samples))
 
@@ -37,6 +38,7 @@ def _calibrate(vad: EnergyVAD, noise_func=_make_low_noise, frames: int = 50) -> 
 
 
 # ── VAD tests ──
+
 
 def test_vad_calibration():
     vad = EnergyVAD(calibration_frames=10)
@@ -111,6 +113,7 @@ def test_vad_rms_empty():
 
 # ── TTS tests ──
 
+
 def test_tts_extract_stream_audio():
     """_extract_stream_audio correctly decodes base64 PCM from SSE chunk."""
     from lampgo.voice.tts import _extract_stream_audio
@@ -132,32 +135,43 @@ def test_tts_extract_stream_audio_missing():
 
 def test_tts_sample_rate():
     from lampgo.voice.tts import TTS_SAMPLE_RATE
+
     assert TTS_SAMPLE_RATE == 24000
 
 
 # ── STT tests ──
+
 
 def test_stt_extract_text():
     from lampgo.voice.stt import _extract_text
 
     assert _extract_text({"choices": [{"message": {"content": "你好世界"}}]}) == "你好世界"
     assert _extract_text({"choices": []}) == ""
-    assert _extract_text({
-        "choices": [{
-            "message": {
-                "content": [
-                    {"type": "text", "text": "你好"},
-                    {"type": "text", "text": "世界"},
+    assert (
+        _extract_text(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "你好"},
+                                {"type": "text", "text": "世界"},
+                            ]
+                        }
+                    }
                 ]
             }
-        }]
-    }) == "你好 世界"
+        )
+        == "你好 世界"
+    )
 
 
 # ── Stream chat tests ──
 
+
 def test_sentence_split_regex():
     from lampgo.voice.stream_chat import SENTENCE_ENDS
+
     assert SENTENCE_ENDS.search("你好。") is not None
     assert SENTENCE_ENDS.search("hello!") is not None
     assert SENTENCE_ENDS.search("问号？") is not None
@@ -175,6 +189,7 @@ async def test_stream_chat_delta_extraction():
 
 
 # ── AudioPlayback tests ──
+
 
 def test_audio_playback_queue():
     """AudioPlayback accepts and signals finish without sounddevice."""

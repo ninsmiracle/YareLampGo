@@ -6,7 +6,7 @@ one by one: moves it to a small positive offset, pauses for observation,
 moves it to a small negative offset, pauses, then returns to origin.
 
 Usage (daemon must be running):
-    uv run python scripts/test_joint_directions.py
+    uv run python tests/test_joint_directions.py
 """
 
 import json

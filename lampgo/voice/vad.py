@@ -102,12 +102,8 @@ class EnergyVAD:
                 # but below threshold) from pushing the floor up.
                 noise_ceiling = self._noise_floor * NOISE_UPDATE_CEILING
                 if energy <= noise_ceiling or noise_ceiling < 1.0:
-                    self._noise_floor = (
-                        (1 - NOISE_FLOOR_ALPHA) * self._noise_floor + NOISE_FLOOR_ALPHA * energy
-                    )
-                    self._threshold = max(
-                        self._noise_floor * self._speech_ratio, MIN_ABSOLUTE_THRESHOLD
-                    )
+                    self._noise_floor = (1 - NOISE_FLOOR_ALPHA) * self._noise_floor + NOISE_FLOOR_ALPHA * energy
+                    self._threshold = max(self._noise_floor * self._speech_ratio, MIN_ABSOLUTE_THRESHOLD)
             if self._silence_frames >= self._silence_limit:
                 if self._is_speaking:
                     self._is_speaking = False

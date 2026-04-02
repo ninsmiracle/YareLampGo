@@ -225,7 +225,7 @@ def _match_greeting_phrase(normalized: str) -> str | None:
         remaining = compact
         matched = 0
         while remaining.startswith(phrase):
-            remaining = remaining[len(phrase):]
+            remaining = remaining[len(phrase) :]
             matched += 1
         if matched and not remaining:
             return phrase

@@ -234,9 +234,7 @@ class WebGateway:
                 await ws.send_json({"ok": False, "error": "empty audio_data", "request_id": request_id})
                 return
 
-            result = await self.server.handle_request(
-                {"cmd": "audio", "audio_data": audio_data, "request_id": request_id}
-            )
+            result = await self.server.handle_request({"cmd": "audio", "audio_data": audio_data, "request_id": request_id})
 
             result["request_id"] = request_id
             await ws.send_json(result)

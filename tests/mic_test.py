@@ -1,7 +1,7 @@
 """Quick mic diagnostic — print RMS energy for each chunk.
 
 Usage:
-    uv run python scripts/mic_test.py [device_index]
+    uv run python tests/mic_test.py [device_index]
 
 Speak into the mic and watch the RMS values.
 Silence should be < 50, speech should be > 200.
@@ -16,14 +16,13 @@ def rms(pcm: bytes) -> float:
     n = len(pcm) // 2
     if n == 0:
         return 0.0
-    samples = struct.unpack(f"<{n}h", pcm[:n * 2])
+    samples = struct.unpack(f"<{n}h", pcm[: n * 2])
     return (sum(s * s for s in samples) / n) ** 0.5
 
 
 def main():
     import sounddevice as sd
 
-    # List all input devices first
     print("可用输入设备:")
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
@@ -39,7 +38,7 @@ def main():
             sys.exit(1)
     else:
         info = sd.query_devices(kind="input")
-        print(f"未指定设备，使用系统默认输入")
+        print("未指定设备，使用系统默认输入")
 
     print(f"Device: {info['name']} (index={device})")
     print(f"Max input channels: {info['max_input_channels']}")
