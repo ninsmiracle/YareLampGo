@@ -15,19 +15,18 @@ logger = structlog.get_logger(__name__)
 
 SAFE_POSITION: dict[str, float] = {
     "base_yaw": 0.0,
-    "base_pitch": -44.68431771894094,
-    "elbow_pitch": 82.83261802575109,
-    "wrist_roll": 5.431619786614931,
-    "wrist_pitch": 3.0620467365028077,
+    "base_pitch": 0.0,
+    "elbow_pitch": 0.0,
+    "wrist_roll": 0.0,
+    "wrist_pitch": 0.0,
 }
 
 def set_calibration_home(home: dict[str, float]) -> None:
-    """Backward-compatible no-op.
-
-    Safe position is intentionally fixed to the first idle frame so that
-    playback, return_safe, and startup homing all use the same pose.
-    """
-    logger.info("motion.safe_position_fixed", ignored_home=home)
+    """Inject calibration-derived home for return_safe/startup homing."""
+    for joint in SAFE_POSITION:
+        if joint in home:
+            SAFE_POSITION[joint] = float(home[joint])
+    logger.info("motion.safe_position_updated_from_calibration", safe_position=SAFE_POSITION)
 
 
 def get_safe_position() -> dict[str, float]:
