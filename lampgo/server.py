@@ -674,6 +674,10 @@ class LampgoServer:
             self.hal.connect()
             self.led.connect()
             self.motion.start()
+            home = self.hal.get_calibration_home()
+            if home is not None:
+                from lampgo.skills.builtin.motion_skills import set_calibration_home
+                set_calibration_home(home)
 
         self._register_builtin_skills()
         if self.config.home_on_start:
