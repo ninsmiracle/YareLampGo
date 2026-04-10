@@ -82,10 +82,19 @@ async def test_play_recording_returns_to_safe_position(tmp_path):
 
 
 def test_safe_position_constant():
-    assert get_safe_position() == {
+    """SAFE_POSITION defaults to zeros until server injects calibration home."""
+    pos = get_safe_position()
+    assert set(pos.keys()) == {
+        "base_yaw",
+        "base_pitch",
+        "elbow_pitch",
+        "wrist_roll",
+        "wrist_pitch",
+    }
+    assert pos == {
         "base_yaw": 0.0,
-        "base_pitch": -44.68431771894094,
-        "elbow_pitch": 82.83261802575109,
-        "wrist_roll": 5.431619786614931,
-        "wrist_pitch": 3.0620467365028077,
+        "base_pitch": 0.0,
+        "elbow_pitch": 0.0,
+        "wrist_roll": 0.0,
+        "wrist_pitch": 0.0,
     }

@@ -57,6 +57,7 @@ class SafetyKernel:
             joints=clamped_joints,
             max_velocity=target.max_velocity,
             max_acceleration=target.max_acceleration,
+            style=target.style,
         )
 
     def clamp_positions(self, current: JointState, positions: dict[str, float]) -> dict[str, float]:
