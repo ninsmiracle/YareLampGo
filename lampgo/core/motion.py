@@ -8,6 +8,7 @@ New targets can be injected at any time without resetting velocity.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -19,6 +20,7 @@ import structlog
 from lampgo.core.config import MotionConfig
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.safety import SafetyKernel
+from lampgo.core.style import TrajectoryPlan, get_motion_style, resolve_style_name
 from lampgo.core.types import JointState, MotionStatus, MotionTarget
 
 logger = structlog.get_logger(__name__)
@@ -68,6 +70,7 @@ class MotionRuntime:
         # Per-joint velocity state for trapezoidal profile
         self._joint_velocities: dict[str, float] = {}
         self._planned_positions: dict[str, float] = {}
+        self._trajectory_plan: TrajectoryPlan | None = None
 
         self._running = False
         self._thread: threading.Thread | None = None
@@ -159,6 +162,8 @@ class MotionRuntime:
         _initial_distance = 0.0
         _stall_ticks = 0
         _prev_hw_remaining = -1.0
+        # LAMPGO_DIAG=1 enables per-tick trajectory diagnostics (planned vs safe vs hw)
+        _diag_mode: bool = os.environ.get("LAMPGO_DIAG", "0").strip() == "1"
 
         while self._running:
             t0 = time.monotonic()
@@ -181,6 +186,7 @@ class MotionRuntime:
                     self._current_target = None
                     self._joint_velocities.clear()
                     self._planned_positions.clear()
+                    self._trajectory_plan = None
                     _stream_frames = []
                     if _active_done:
                         _active_done.set()
@@ -189,6 +195,7 @@ class MotionRuntime:
 
                 elif cmd.type == _CommandType.STOP_SMOOTH:
                     self._current_target = None
+                    self._trajectory_plan = None
                     _stream_frames = []
 
                 elif cmd.type == _CommandType.MOVE_TO:
@@ -197,6 +204,19 @@ class MotionRuntime:
                         self._current_target = validated
                         self._planned_positions = dict(self._current_state.positions)
                         _stream_frames = []
+                        style_key = resolve_style_name(validated.style, self._config.default_style)
+                        if style_key == "linear":
+                            self._trajectory_plan = None
+                        else:
+                            self._trajectory_plan = TrajectoryPlan.create(
+                                self._current_state.positions,
+                                validated.joints,
+                                get_motion_style(style_key, self._config.default_style),
+                                validated.max_velocity or self._config.default_max_velocity,
+                                self._config.default_max_velocity,
+                                safety_max_velocity=self._safety._config.max_velocity,
+                            )
+                            self._joint_velocities.clear()
                         if _active_done:
                             _active_done.set()
                         _active_done = cmd.done_event
@@ -207,7 +227,12 @@ class MotionRuntime:
                         _stall_ticks = 0
                         _prev_hw_remaining = -1.0
                         self._status = MotionStatus(target=validated, progress=0.0, is_done=False)
-                        logger.info("motion.move_accepted", target=validated.joints, vel=validated.max_velocity)
+                        logger.info(
+                            "motion.move_accepted",
+                            target=validated.joints,
+                            vel=validated.max_velocity,
+                            style=style_key,
+                        )
                     else:
                         logger.warning("motion.target_rejected", reason=getattr(validated, "reason", ""))
                         if cmd.done_event:
@@ -219,6 +244,7 @@ class MotionRuntime:
                     _stream_accumulator = 0.0
                     _stream_fps = cmd.fps or 30
                     self._current_target = None
+                    self._trajectory_plan = None
                     if _active_done:
                         _active_done.set()
                     _active_done = cmd.done_event
@@ -260,7 +286,13 @@ class MotionRuntime:
                         _active_done = None
 
             elif self._current_target is not None:
-                next_frame = self._trapezoidal_step(self._current_target, dt)
+                if self._trajectory_plan is not None:
+                    framed, _plan_phase = self._trajectory_plan.sample(dt)
+                    for k, v in framed.items():
+                        self._planned_positions[k] = v
+                    next_frame = framed
+                else:
+                    next_frame = self._trapezoidal_step(self._current_target, dt)
 
             # --- Validate and write ---
             safe_frame = None
@@ -275,6 +307,21 @@ class MotionRuntime:
                     self._safety.report_bus_health(False)
                     logger.exception("motion.write_failed")
 
+                # --- Trajectory diagnostics (LAMPGO_DIAG=1) ---
+                if _diag_mode and self._trajectory_plan is not None and next_frame is not None:
+                    clamped_joints = {
+                        j for j in next_frame
+                        if safe_frame is not None and abs(safe_frame.get(j, next_frame[j]) - next_frame[j]) > 0.01
+                    }
+                    logger.info(
+                        "motion.diag_traj",
+                        elapsed=round(self._trajectory_plan.elapsed, 4),
+                        planned={k: round(v, 2) for k, v in next_frame.items()},
+                        safe={k: round(v, 2) for k, v in safe_frame.items()} if safe_frame else {},
+                        hw={k: round(v, 2) for k, v in self._current_state.positions.items()},
+                        velocity_clamped=sorted(clamped_joints),
+                    )
+
             # --- Check move completion (after write) ---
             if self._current_target is not None and not _stream_frames:
                 check_pos = safe_frame if safe_frame else self._current_state.positions
@@ -284,8 +331,11 @@ class MotionRuntime:
                 )
 
                 _was_stalled = False
+                # Tight tolerance so styled trajectories + per-tick velocity clamps still reach goal
+                # (1.0° was too loose: motion could "complete" before final commanded pose).
+                _done_tol = 0.2
                 all_done = all(
-                    abs(check_pos.get(j, self._current_state.get(j, tv)) - tv) < 1.0
+                    abs(check_pos.get(j, self._current_state.get(j, tv)) - tv) < _done_tol
                     for j, tv in self._current_target.joints.items()
                 )
 
@@ -312,6 +362,7 @@ class MotionRuntime:
                     self._current_target = None
                     self._joint_velocities.clear()
                     self._planned_positions.clear()
+                    self._trajectory_plan = None
                     self._status = MotionStatus(progress=1.0, is_done=True, stalled=_was_stalled)
                     logger.info("motion.move_done")
                     if _active_done:

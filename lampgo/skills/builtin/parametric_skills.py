@@ -6,6 +6,7 @@ import asyncio
 import math
 from typing import Any
 
+from lampgo.core.config import DEFAULT_JOINT_LIMITS
 from lampgo.core.types import MotionTarget, SkillResult
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
@@ -26,14 +27,18 @@ class NodSkill(Skill):
         base = ctx.state.get("base_pitch", 0.0)
 
         for _ in range(count):
-            done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base - amplitude}, max_velocity=speed))
+            done = ctx.motion.move_to(
+                MotionTarget(joints={"base_pitch": base - amplitude}, max_velocity=speed, style="bouncy")
+            )
             while not done.is_set():
                 await asyncio.sleep(0.03)
-            done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base + amplitude * 0.3}, max_velocity=speed))
+            done = ctx.motion.move_to(
+                MotionTarget(joints={"base_pitch": base + amplitude * 0.3}, max_velocity=speed, style="bouncy")
+            )
             while not done.is_set():
                 await asyncio.sleep(0.03)
 
-        done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base}, max_velocity=speed))
+        done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base}, max_velocity=speed, style="bouncy"))
         while not done.is_set():
             await asyncio.sleep(0.03)
 
@@ -100,6 +105,7 @@ class LookAtSkill(Skill):
         target = MotionTarget(
             joints={"base_yaw": yaw, "base_pitch": pitch},
             max_velocity=float(velocity) if velocity is not None else None,
+            style="confident",
         )
         done = ctx.motion.move_to(target)
         while not done.is_set():
@@ -172,7 +178,23 @@ class DanceSkill(Skill):
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         speed = float(params.get("speed", 120.0))
         cycles = int(params.get("cycles", 4))
-        base = {j: ctx.state.get(j, 0.0) for j in ["base_yaw", "base_pitch", "wrist_roll"]}
+        raw_base = {j: ctx.state.get(j, 0.0) for j in ["base_yaw", "base_pitch", "wrist_roll"]}
+
+        # Dance pattern offsets — keep in sync with the loop below.
+        # Per-joint maximum absolute offset used across all steps, plus a small
+        # headroom factor that accounts for ease_out_back overshoot (~10%).
+        _OVERSHOOT_FACTOR = 1.15
+        _MAX_ABS_OFFSETS = {"base_yaw": 20.0, "base_pitch": 10.0, "wrist_roll": 15.0}
+        base: dict[str, float] = {}
+        for j, cur in raw_base.items():
+            limits = DEFAULT_JOINT_LIMITS.get(j)
+            if limits is None:
+                base[j] = cur
+                continue
+            headroom = _MAX_ABS_OFFSETS.get(j, 0.0) * _OVERSHOOT_FACTOR
+            safe_min = limits.min + headroom
+            safe_max = limits.max - headroom
+            base[j] = max(safe_min, min(safe_max, cur))
 
         for _ in range(cycles):
             for yaw_off, pitch_off, roll_off in [(20, -10, 15), (-20, -10, -15), (0, 5, 0)]:
@@ -184,12 +206,13 @@ class DanceSkill(Skill):
                             "wrist_roll": base["wrist_roll"] + roll_off,
                         },
                         max_velocity=speed,
+                        style="bouncy",
                     )
                 )
                 while not done.is_set():
                     await asyncio.sleep(0.03)
 
-        done = ctx.motion.move_to(MotionTarget(joints=dict(base), max_velocity=speed))
+        done = ctx.motion.move_to(MotionTarget(joints=dict(base), max_velocity=speed, style="bouncy"))
         while not done.is_set():
             await asyncio.sleep(0.03)
 

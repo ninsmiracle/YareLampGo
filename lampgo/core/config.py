@@ -68,6 +68,10 @@ class MotionConfig(BaseModel):
     tick_rate_hz: float = Field(default=50.0, gt=0, description="Control loop frequency")
     default_max_velocity: float = Field(default=120.0, gt=0, description="Degrees per second per joint")
     default_max_acceleration: float = Field(default=600.0, gt=0, description="Degrees per second^2 per joint")
+    default_style: str = Field(
+        default="gentle",
+        description="Biomimetic style preset when MotionTarget.style is unset (gentle|confident|curious|bouncy|hesitant|linear)",
+    )
 
 
 class SafetyConfig(BaseModel):

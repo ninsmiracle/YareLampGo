@@ -334,7 +334,12 @@ class WebGateway:
                     await ws.send_json({"ok": False, "error": "invalid json"})
                     continue
                 msg_type = msg.get("type", "")
-                if msg_type in ("text", "audio"):
+                # Long-running messages must not block the receive loop; otherwise
+                # urgent commands like `estop` cannot be processed until completion.
+                run_async = msg_type in ("text", "audio") or (
+                    msg_type == "invoke" and bool(msg.get("wait", True))
+                )
+                if run_async:
                     task = asyncio.create_task(self._handle_ws_message(ws, msg))
                     self._active_request_tasks[ws] = task
                     task.add_done_callback(lambda _t: self._active_request_tasks.pop(ws, None))
