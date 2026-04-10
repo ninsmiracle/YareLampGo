@@ -97,7 +97,20 @@ class MotionRuntime:
         logger.info("motion.stopped")
 
     def update_target(self, target: MotionTarget) -> None:
-        """Send a new target without resetting velocity — the key jitter fix."""
+        """Send a new target without resetting velocity — for real-time reactive control only.
+
+        **Use case**: visual-servo tracking where a new sensor measurement arrives
+        and the target must be updated immediately (e.g. face-follow, object-track).
+        Pass ``style="linear"`` to avoid rebuilding the trajectory plan on each call.
+
+        **Do NOT use** in a fixed-rate loop to implement scripted/parametric motions.
+        Calling this frequently with any non-"linear" style rebuilds the trajectory
+        and clears joint velocities every tick, producing the "micro-start/stop"
+        stutter that the stream_frames architecture is designed to eliminate.
+
+        For pre-planned rhythmic motions (nod, headshake, dance, idle_sway, …) use
+        ``stream_frames()`` or the ``SkillContext.play_frames()`` helper instead.
+        """
         cmd = _Command(type=_CommandType.MOVE_TO, target=target)
         try:
             self._command_queue.put_nowait(cmd)
