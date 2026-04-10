@@ -1,0 +1,37 @@
+{
+  "base_yaw": {
+    "id": 1,
+    "drive_mode": 0,
+    "homing_offset": -1263,
+    "range_min": 950,
+    "range_max": 2181
+  },
+  "base_pitch": {
+    "id": 2,
+    "drive_mode": 0,
+    "homing_offset": 700,
+    "range_min": 1596,
+    "range_max": 3263
+  },
+  "elbow_pitch": {
+    "id": 3,
+    "drive_mode": 0,
+    "homing_offset": -1877,
+    "range_min": 1352,
+    "range_max": 2929
+  },
+  "wrist_roll": {
+    "id": 4,
+    "drive_mode": 0,
+    "homing_offset": 1504,
+    "range_min": 789,
+    "range_max": 2759
+  },
+  "wrist_pitch": {
+    "id": 5,
+    "drive_mode": 0,
+    "homing_offset": 948,
+    "range_min": 1153,
+    "range_max": 2615
+  }
+}
