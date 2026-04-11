@@ -292,6 +292,14 @@ button {
   align-content: start;
 }
 
+.record-action-bar {
+  margin-bottom: 10px;
+}
+
+#btn-record-motion-panel {
+  width: 100%;
+}
+
 .openclaw-empty {
   padding: 10px 12px;
   border-radius: 14px;
@@ -502,6 +510,16 @@ button {
 .ghost-button:hover {
   background: #f7ece8;
   color: #9b5d57;
+}
+
+#btn-record-motion.is-recording {
+  background: var(--danger-soft);
+  border: 1px solid rgba(221, 124, 120, 0.4);
+  color: #b05955;
+}
+
+#btn-record-motion.is-recording:hover {
+  background: #f8d9d6;
 }
 
 .danger-button {
@@ -933,6 +951,87 @@ button {
 
 .event-drawer.hidden {
   display: none;
+}
+
+.record-dialog {
+  border: none;
+  border-radius: 20px;
+  padding: 0;
+  max-width: 560px;
+  width: calc(100vw - 32px);
+  background: transparent;
+}
+
+.record-dialog::backdrop {
+  background: rgba(35, 28, 23, 0.38);
+  backdrop-filter: blur(2px);
+}
+
+.record-dialog-card {
+  background: rgba(255, 253, 251, 0.98);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.record-dialog-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #4a443f;
+}
+
+.record-dialog-desc {
+  font-size: 15px;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
+.record-dialog-timer {
+  font-size: 18px;
+  font-weight: 700;
+  color: #a25d56;
+  background: #faece6;
+  border: 1px solid #f0d0c7;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.record-dialog-metrics {
+  font-size: 14px;
+  color: var(--text-soft);
+  background: #fff7f3;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.record-dialog-input {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  outline: none;
+  background: #fff;
+}
+
+.record-dialog-input:focus {
+  border-color: #e6b4a8;
+  box-shadow: 0 0 0 3px rgba(231, 179, 167, 0.18);
+}
+
+.record-dialog-error {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.record-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .event-drawer-header {

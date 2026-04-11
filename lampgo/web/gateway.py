@@ -336,7 +336,7 @@ class WebGateway:
                 msg_type = msg.get("type", "")
                 # Long-running messages must not block the receive loop; otherwise
                 # urgent commands like `estop` cannot be processed until completion.
-                run_async = msg_type in ("text", "audio") or (
+                run_async = msg_type in ("text", "audio", "recording_save") or (
                     msg_type == "invoke" and bool(msg.get("wait", True))
                 )
                 if run_async:
@@ -434,6 +434,37 @@ class WebGateway:
                     "request_id": request_id,
                 }
             )
+
+        elif msg_type == "recording_start":
+            result = await self.server.start_recording_session(fps=int(msg.get("fps", 30) or 30))
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "recording_stop":
+            result = await self.server.stop_recording_session()
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "recording_save":
+            result = await self.server.save_recording_session(
+                str(msg.get("name", "")),
+                overwrite=bool(msg.get("overwrite", False)),
+            )
+            result["request_id"] = request_id
+            await ws.send_json(result)
+            if result.get("ok"):
+                await ws.send_json(
+                    {
+                        "ok": True,
+                        "result": {"recordings": self._list_recordings()},
+                        "request_id": request_id,
+                    }
+                )
+
+        elif msg_type == "recording_discard":
+            result = await self.server.discard_recording_session()
+            result["request_id"] = request_id
+            await ws.send_json(result)
 
         elif msg_type == "expressions":
             await ws.send_json(

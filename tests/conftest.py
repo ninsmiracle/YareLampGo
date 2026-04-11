@@ -24,9 +24,13 @@ class MockHAL(HardwareAbstraction):
         }
         self._connected = False
         self._write_log: list[dict[str, float]] = []
+        self._torque_disabled = False
+        self._torque_enabled = False
 
     def connect(self, calibrate: bool = True) -> None:
         self._connected = True
+        self._torque_disabled = False
+        self._torque_enabled = True
 
     def disconnect(self) -> None:
         self._connected = False
@@ -38,9 +42,25 @@ class MockHAL(HardwareAbstraction):
         self._positions.update(positions)
         self._write_log.append(dict(positions))
 
+    def disable_torque(self) -> None:
+        self._torque_disabled = True
+        self._torque_enabled = False
+
+    def enable_torque(self) -> None:
+        self._torque_enabled = True
+        self._torque_disabled = False
+
     @property
     def write_log(self) -> list[dict[str, float]]:
         return self._write_log
+
+    @property
+    def torque_disabled(self) -> bool:
+        return self._torque_disabled
+
+    @property
+    def torque_enabled(self) -> bool:
+        return self._torque_enabled
 
 
 @pytest.fixture

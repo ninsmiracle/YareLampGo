@@ -10,7 +10,12 @@ from lampgo.core.led import LEDConfig, LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
 from lampgo.skills.base import SkillContext
-from lampgo.skills.builtin.playback_skills import PlayRecordingSkill, load_recording
+from lampgo.skills.builtin.playback_skills import (
+    FIRST_SEGMENT_MIN_TIMEOUT_S,
+    PlayRecordingSkill,
+    _segment_timeout_s,
+    load_recording,
+)
 from lampgo.skills.builtin.motion_skills import get_safe_position
 from tests.conftest import MockHAL
 
@@ -81,6 +86,46 @@ async def test_play_recording_returns_to_safe_position(tmp_path):
         motion.stop()
 
 
+@pytest.mark.asyncio
+async def test_play_recording_uses_move_to_path_not_stream_frames(tmp_path, monkeypatch):
+    path = tmp_path / "wave.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "timestamp,base_yaw.pos",
+                "0.0,0.0",
+                "0.1,5.0",
+                "0.2,10.0",
+            ]
+        )
+    )
+
+    hal = MockHAL()
+    hal.connect()
+    motion = MotionRuntime(hal, SafetyKernel(SafetyConfig()), MotionConfig(tick_rate_hz=100))
+    motion.start()
+
+    def _fail_stream(*args, **kwargs):
+        raise AssertionError("stream_frames should not be called by PlayRecordingSkill")
+
+    monkeypatch.setattr(motion, "stream_frames", _fail_stream)
+
+    try:
+        skill = PlayRecordingSkill(tmp_path)
+        ctx = SkillContext(
+            motion=motion,
+            led=LEDController(LEDConfig()),
+            events=EventBus(),
+            state=hal.read_positions(),
+        )
+        result = await skill.execute(ctx, name="wave", style="gentle", velocity=80)
+        assert result.status == "ok"
+        assert result.data["style"] == "gentle"
+        assert result.data["safety_path"] == "validate_frame"
+    finally:
+        motion.stop()
+
+
 def test_safe_position_constant():
     """SAFE_POSITION defaults to zeros until server injects calibration home."""
     pos = get_safe_position()
@@ -98,3 +143,15 @@ def test_safe_position_constant():
         "wrist_roll": 0.0,
         "wrist_pitch": 0.0,
     }
+
+
+def test_segment_timeout_first_segment_has_extra_budget():
+    start = {"base_yaw": 0.0}
+    end = {"base_yaw": 180.0}
+    velocity = 80.0
+
+    first = _segment_timeout_s(start, end, velocity, is_first_segment=True)
+    later = _segment_timeout_s(start, end, velocity, is_first_segment=False)
+
+    assert first >= FIRST_SEGMENT_MIN_TIMEOUT_S
+    assert first >= later
