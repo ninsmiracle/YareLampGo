@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.motion
+
 from lampgo.core.config import LampgoConfig, MotionConfig, SafetyConfig
 from lampgo.core.events import EventBus
 from lampgo.core.led import LEDConfig, LEDController

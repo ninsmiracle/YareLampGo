@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.motion
+
 from lampgo.core.config import DeviceConfig, LampgoConfig
 from lampgo.server import LampgoServer
 from tests.conftest import MockHAL

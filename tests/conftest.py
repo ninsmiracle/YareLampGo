@@ -24,6 +24,7 @@ class MockHAL(HardwareAbstraction):
         }
         self._connected = False
         self._write_log: list[dict[str, float]] = []
+        self._move_time_log: list[int] = []
         self._torque_disabled = False
         self._torque_enabled = False
 
@@ -38,9 +39,10 @@ class MockHAL(HardwareAbstraction):
     def read_positions(self) -> JointState:
         return JointState(positions=dict(self._positions))
 
-    def write_positions(self, positions: dict[str, float]) -> None:
+    def write_positions(self, positions: dict[str, float], move_time_ms: int = 0) -> None:
         self._positions.update(positions)
         self._write_log.append(dict(positions))
+        self._move_time_log.append(move_time_ms)
 
     def disable_torque(self) -> None:
         self._torque_disabled = True
@@ -53,6 +55,10 @@ class MockHAL(HardwareAbstraction):
     @property
     def write_log(self) -> list[dict[str, float]]:
         return self._write_log
+
+    @property
+    def move_time_log(self) -> list[int]:
+        return self._move_time_log
 
     @property
     def torque_disabled(self) -> bool:
