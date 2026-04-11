@@ -130,6 +130,9 @@ class HardwareAbstraction:
 
         self._bus.sync_write("Goal_Position", positions)
 
+    # Set to True after the first successful Goal_Position+Goal_Time sync write.
+    _goal_time_confirmed: bool = False
+
     def _sync_write_position_time(self, positions: dict[str, float], move_time_ms: int) -> None:
         """Write Goal_Position (addr 42, 2 B) + Goal_Time (addr 44, 2 B) in one sync-write packet.
 
@@ -154,7 +157,23 @@ class HardwareAbstraction:
             pos_bytes: list[int] = self._bus._serialize_data(raw, 2)
             sw.addParam(id_, pos_bytes + time_bytes)
 
-        sw.txPacket()
+        comm = sw.txPacket()
+
+        if not HardwareAbstraction._goal_time_confirmed:
+            success = self._bus._is_comm_success(comm)
+            HardwareAbstraction._goal_time_confirmed = True
+            if success:
+                logger.info(
+                    "hal.goal_time_active",
+                    move_time_ms=time_val,
+                    motors=list(positions.keys()),
+                )
+            else:
+                logger.warning(
+                    "hal.goal_time_failed",
+                    comm_result=self._bus.packet_handler.getTxRxResult(comm),
+                    move_time_ms=time_val,
+                )
 
     def read_health(self) -> DeviceHealth:
         if not self._connected:
