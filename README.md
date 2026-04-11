@@ -96,6 +96,35 @@ uv run lampgo clear
 uv run lampgo detect
 ```
 
+### 录制与回放（最小闭环）
+
+```bash
+# 1) 手动录制（Ctrl+C 结束）
+uv run lampgo record my_action --fps 30
+
+# 2) 回放刚录制的动作
+uv run lampgo play my_action
+```
+
+- 默认录制目录：`assets/recordings/user/`（用户录制，已在 `.gitignore` 中隔离）
+- 回放查找顺序：先 `assets/recordings/user/<name>.csv`，再 `assets/recordings/<name>.csv`
+- 如需自定义目录：可用 `--recordings-dir /path/to/dir` 传入
+
+### Web 端录制（run 模式）
+
+- 启动：`uv run lampgo run --web`
+- 顶栏点击“开始录制”后进入 teach 模式（自动关力矩，可手动掰动关节）
+- 再次点击按钮“结束录制”后，会弹出保存对话框：
+  - 输入动作名并保存
+  - 或选择放弃 / 重新录制
+- 快捷键：当焦点不在输入框时，回车可触发“开始/结束录制”按钮；命名弹窗打开时，回车触发“保存”
+
+### record / play 的 style 与 safety 路径说明
+
+- `record`：只采样 `HAL.read_positions`，不经过 style 插值
+- `play`：通过 `PlayRecordingSkill -> move_to` 分段回放，走路线规划与 style（默认 `gentle`，可传 `style`）
+- safety：回放路径与 `move_to` 一致，走 `validate_frame`（包含关节限位与逐 tick 速度限幅）
+
 ### 配置优先级
 
 CLI 参数 > 环境变量 (`LAMPGO_*`) > `.env` 文件 > `lampgo.toml` > 内置默认值

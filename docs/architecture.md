@@ -79,6 +79,59 @@ lampgo is a single-process Python runtime for the LeLamp desktop robotic arm
 - System prompt includes joint guide, reference poses, and kinematic constraints
 - Malformed tool call detection: 若 LLM 以文本形式返回工具调用（如 XML），自动检测并要求重试
 
+## Motion Paradigms
+
+MotionRuntime 对外暴露两种范式，选错会直接导致运动质量问题（抖动/顿挫）：
+
+### 范式一：Goal-based（目标驱动）
+
+**场景**：只知道终点坐标，由系统规划中间路径。
+
+```
+调用方  →  move_to(target, style)  →  TrajectoryPlan（easing曲线）  →  SafetyKernel.validate_frame  →  HAL
+                                     或 _trapezoidal_step（linear）
+```
+
+| API | 用途 |
+|-----|------|
+| `ctx.motion.move_to(target)` | 单次点到点移动，返回 done_event，可 await |
+| `ctx.motion.update_target(target, style="linear")` | 实时视觉伺服，高频推送目标，不等待完成 |
+
+**适用**：LLM 指令的 `move_to`、`return_safe`、`look_at`、`presence_react` 的问候姿态。
+
+**禁忌**：不要在循环里用 `move_to` 播放预录轨迹——每次调用都会清零关节速度并重建 TrajectoryPlan，导致每段起步前的微顿挫。
+
+---
+
+### 范式二：Trajectory-based（轨迹驱动）
+
+**场景**：完整帧序列已知，系统直接逐帧执行，不做任何轨迹规划。
+
+```
+调用方  →  stream_frames(frames, fps)  →  SafetyKernel.clamp_positions（仅位置边界）  →  HAL
+```
+
+| API | 用途 |
+|-----|------|
+| `ctx.motion.stream_frames(frames, fps)` | 底层接口，返回 done_event |
+| `ctx.play_frames(frames, fps)` | 封装了等待逻辑的高层接口（推荐） |
+
+**适用**：
+- CSV 录制回放（`play_recording`）——人手遥操作轨迹本身已含自然加减速，无需额外规划
+- 参数化节奏动作（`nod`/`headshake`/`dance`/`idle_sway`）——由 `generate_waypoint_frames` / `generate_sine_frames` 预计算，easing 在生成时烘焙进帧
+
+**禁忌**：不要把 CSV 帧下采样后再逐点 `move_to`——这是此前的错误用法，已删除。
+
+---
+
+### 速查表
+
+| 你拥有的信息 | 正确范式 | API |
+|---|---|---|
+| 只有目标坐标 | Goal-based | `move_to` |
+| 实时传感器反馈（视觉伺服） | Goal-based（线性） | `update_target(style="linear")` |
+| 完整帧序列（录制/参数生成） | Trajectory-based | `stream_frames` / `play_frames` |
+
 ## Key Design Decisions
 
 - **Control loop isolation**: MotionRuntime runs in a dedicated thread to avoid

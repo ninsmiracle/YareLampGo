@@ -235,7 +235,11 @@ def _build_help_text() -> str:
         "6) 表情与文本路由\n"
         "  uv run lampgo invoke set_expression expression=heart\n"
         '  uv run lampgo text "做个害羞的表情"\n\n'
-        "7) 硬件检测（串口 + 摄像头）\n"
+        "7) 录制与回放（CSV）\n"
+        "  uv run lampgo record my_action\n"
+        "  uv run lampgo play my_action\n"
+        "  录制按 Ctrl+C 结束，默认保存到 assets/recordings/user/\n\n"
+        "8) 硬件检测（串口 + 摄像头）\n"
         "  uv run lampgo detect\n\n"
         "提示: 推荐用 Ctrl+C 优雅退出 daemon，避免电机保持扭矩锁死。"
     )
@@ -646,19 +650,23 @@ def _cmd_record(args: argparse.Namespace) -> None:
     rec = TeachRecorder(hal, recordings_dir, fps=args.fps)
     interval = 1.0 / args.fps
 
-    print(f"Recording '{args.name}' at {args.fps} FPS. Press Ctrl+C to stop...")
-    rec.start()
     try:
-        while True:
-            rec.tick()
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        pass
+        # Teach-record mode must release torque, otherwise all joints remain locked.
+        hal.disable_torque()
+        print(f"Recording '{args.name}' at {args.fps} FPS. Press Ctrl+C to stop...")
+        rec.start()
+        try:
+            while True:
+                rec.tick()
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            pass
 
-    rec.stop()
-    path = rec.save(args.name)
-    print(f"Saved {rec.frame_count} frames to {path}")
-    hal.disconnect()
+        rec.stop()
+        path = rec.save(args.name)
+        print(f"Saved {rec.frame_count} frames to {path}")
+    finally:
+        hal.disconnect()
 
 
 if __name__ == "__main__":

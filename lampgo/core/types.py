@@ -38,6 +38,7 @@ class MotionTarget:
     joints: dict[str, float]
     max_velocity: float | None = None
     max_acceleration: float | None = None
+    style: str | None = None
 
 
 @dataclass

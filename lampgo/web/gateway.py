@@ -334,7 +334,12 @@ class WebGateway:
                     await ws.send_json({"ok": False, "error": "invalid json"})
                     continue
                 msg_type = msg.get("type", "")
-                if msg_type in ("text", "audio"):
+                # Long-running messages must not block the receive loop; otherwise
+                # urgent commands like `estop` cannot be processed until completion.
+                run_async = msg_type in ("text", "audio", "recording_save") or (
+                    msg_type == "invoke" and bool(msg.get("wait", True))
+                )
+                if run_async:
                     task = asyncio.create_task(self._handle_ws_message(ws, msg))
                     self._active_request_tasks[ws] = task
                     task.add_done_callback(lambda _t: self._active_request_tasks.pop(ws, None))
@@ -429,6 +434,37 @@ class WebGateway:
                     "request_id": request_id,
                 }
             )
+
+        elif msg_type == "recording_start":
+            result = await self.server.start_recording_session(fps=int(msg.get("fps", 30) or 30))
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "recording_stop":
+            result = await self.server.stop_recording_session()
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "recording_save":
+            result = await self.server.save_recording_session(
+                str(msg.get("name", "")),
+                overwrite=bool(msg.get("overwrite", False)),
+            )
+            result["request_id"] = request_id
+            await ws.send_json(result)
+            if result.get("ok"):
+                await ws.send_json(
+                    {
+                        "ok": True,
+                        "result": {"recordings": self._list_recordings()},
+                        "request_id": request_id,
+                    }
+                )
+
+        elif msg_type == "recording_discard":
+            result = await self.server.discard_recording_session()
+            result["request_id"] = request_id
+            await ws.send_json(result)
 
         elif msg_type == "expressions":
             await ws.send_json(
