@@ -11,6 +11,8 @@
   const connDot = document.getElementById("conn-dot");
   const connText = document.getElementById("conn-text");
   const btnEstop = document.getElementById("btn-estop");
+  const btnRecordMotion = document.getElementById("btn-record-motion");
+  const btnRecordMotionPanel = document.getElementById("btn-record-motion-panel");
   const btnOpenEvents = document.getElementById("btn-open-events");
   const btnCloseDrawer = document.getElementById("btn-close-drawer");
   const eventDrawer = document.getElementById("event-drawer");
@@ -31,6 +33,20 @@
   const voiceWave = document.getElementById("voice-wave");
   const voiceCanvas = document.getElementById("voice-canvas");
   const groupToggles = document.querySelectorAll("[data-toggle-group]");
+  const recordNameDialog = document.getElementById("record-name-dialog");
+  const recordNameForm = document.getElementById("record-name-form");
+  const recordNameInput = document.getElementById("record-name-input");
+  const recordNameError = document.getElementById("record-name-error");
+  const btnRecordDiscard = document.getElementById("btn-record-discard");
+  const btnRecordRerecord = document.getElementById("btn-record-rerecord");
+  const btnRecordSave = document.getElementById("btn-record-save");
+  const recordStartDialog = document.getElementById("record-start-dialog");
+  const recordStartForm = document.getElementById("record-start-form");
+  const btnRecordStartCancel = document.getElementById("btn-record-start-cancel");
+  const btnRecordStartConfirm = document.getElementById("btn-record-start-confirm");
+  const recordStartDesc = document.getElementById("record-start-desc");
+  const recordTimer = document.getElementById("record-timer");
+  const recordMetrics = document.getElementById("record-metrics");
 
   const RECORDING_EXPRESSIONS = Object.freeze({
     angry_jerk: "angry",
@@ -80,6 +96,59 @@
   const streamingState = new Map();
   let isResizing = false;
   let activeAgentRequestId = null;
+  let isMotionRecording = false;
+  let hasPendingMotionRecording = false;
+  let pendingOverwriteSave = false;
+  let recordingStartTs = 0;
+  let recordTimerTask = null;
+  let recordingFps = 30;
+  let recordingFrames = 0;
+
+  function eachRecordButton(fn) {
+    [btnRecordMotion, btnRecordMotionPanel].forEach((btn) => {
+      if (btn) fn(btn);
+    });
+  }
+
+  function resetRecordStartDialogUI() {
+    if (btnRecordStartConfirm) {
+      btnRecordStartConfirm.textContent = "开始录制";
+    }
+    if (btnRecordStartCancel) {
+      btnRecordStartCancel.classList.remove("hidden");
+    }
+    if (recordStartDesc) {
+      recordStartDesc.textContent = "点击“开始录制”后将自动关闭电机力矩，你可以手动掰动关节进行录制。";
+    }
+    if (recordTimer) {
+      recordTimer.textContent = "已录制 0.0s";
+    }
+    if (recordMetrics) {
+      recordMetrics.textContent = "采样：-- FPS · 0 帧";
+    }
+  }
+
+  function startRecordTimer() {
+    stopRecordTimer();
+    if (!recordTimer) {
+      return;
+    }
+    recordTimerTask = setInterval(() => {
+      const elapsed = Math.max(0, (Date.now() / 1000) - recordingStartTs);
+      recordTimer.textContent = `已录制 ${elapsed.toFixed(1)}s`;
+      if (recordMetrics) {
+        const estimatedFrames = Math.max(recordingFrames, Math.round(elapsed * recordingFps));
+        recordMetrics.textContent = `采样：${recordingFps} FPS · ${estimatedFrames} 帧`;
+      }
+    }, 100);
+  }
+
+  function stopRecordTimer() {
+    if (recordTimerTask) {
+      clearInterval(recordTimerTask);
+      recordTimerTask = null;
+    }
+  }
 
   const SIDEBAR_WIDTH_KEY = "lampgo.sidebarWidth";
   const SIDEBAR_MIN = 220;
@@ -161,8 +230,88 @@
       upsertOpenClawTask(msg.result.openclaw_task);
     }
 
+    if (msg.result && msg.result.status === "recording") {
+      isMotionRecording = true;
+      hasPendingMotionRecording = false;
+      recordingFps = Number(msg.result.fps || 30);
+      recordingFrames = 0;
+      recordingStartTs = Date.now() / 1000;
+      updateRecordButtonState();
+      if (btnRecordStartConfirm) {
+        btnRecordStartConfirm.textContent = "结束录制";
+      }
+      if (btnRecordStartCancel) {
+        btnRecordStartCancel.classList.add("hidden");
+      }
+      if (recordStartDesc) {
+        recordStartDesc.textContent = "录制进行中。按“结束录制”完成采集。";
+      }
+      if (recordMetrics) {
+        recordMetrics.textContent = `采样：${recordingFps} FPS · 0 帧`;
+      }
+      startRecordTimer();
+      if (recordStartDialog && !recordStartDialog.open) {
+        recordStartDialog.showModal();
+      }
+      addSystemMessage(`开始录制（${msg.result.fps} FPS）`);
+      return;
+    }
+
+    if (msg.result && msg.result.status === "stopped") {
+      isMotionRecording = false;
+      hasPendingMotionRecording = true;
+      recordingFrames = Number(msg.result.frames || recordingFrames || 0);
+      stopRecordTimer();
+      closeRecordStartDialog();
+      resetRecordStartDialogUI();
+      updateRecordButtonState();
+      addSystemMessage(`录制结束：${msg.result.frames} 帧，等待保存`);
+      openRecordNameDialog();
+      return;
+    }
+
+    if (msg.result && msg.result.status === "saved") {
+      hasPendingMotionRecording = false;
+      pendingOverwriteSave = false;
+      stopRecordTimer();
+      closeRecordStartDialog();
+      resetRecordStartDialogUI();
+      updateRecordButtonState();
+      closeRecordNameDialog();
+      addSystemMessage(`录制已保存：${msg.result.name}`);
+      return;
+    }
+
+    if (msg.result && msg.result.status === "discarded") {
+      hasPendingMotionRecording = false;
+      pendingOverwriteSave = false;
+      stopRecordTimer();
+      closeRecordStartDialog();
+      resetRecordStartDialogUI();
+      updateRecordButtonState();
+      closeRecordNameDialog();
+      addSystemMessage("录制已放弃");
+      return;
+    }
+
+    if (msg.result && msg.result.status === "name_conflict") {
+      pendingOverwriteSave = true;
+      if (recordNameError) {
+        recordNameError.textContent = "同名动作已存在，再次点击保存将覆盖";
+      }
+      if (btnRecordSave) {
+        btnRecordSave.textContent = "确认覆盖";
+      }
+      return;
+    }
+
     if (msg.request_id && pendingMessages.has(msg.request_id)) {
       finishPending(msg);
+      return;
+    }
+
+    if (!msg.ok && msg.error) {
+      addSystemMessage(`操作失败：${msg.error}`);
     }
   }
 
@@ -341,6 +490,16 @@
         return `<div class="joint-row"><span>${esc(k)}</span><span class="joint-value">${esc(value)}</span></div>`;
       })
       .join("");
+
+    const rec = data.recording || {};
+    isMotionRecording = Boolean(rec.active);
+    hasPendingMotionRecording = Boolean(rec.has_buffer) && !isMotionRecording;
+    recordingFps = Number(rec.fps || recordingFps || 30);
+    recordingFrames = Number(rec.frames || 0);
+    if (isMotionRecording && recordMetrics) {
+      recordMetrics.textContent = `采样：${recordingFps} FPS · ${recordingFrames} 帧`;
+    }
+    updateRecordButtonState();
   }
 
   function formatIntentResolved(data) {
@@ -588,6 +747,102 @@
       params: { expression: name },
       wait: true,
       request_id: requestId,
+    });
+  }
+
+  function updateRecordButtonState() {
+    if (!btnRecordMotion && !btnRecordMotionPanel) {
+      return;
+    }
+    if (isMotionRecording) {
+      eachRecordButton((btn) => {
+        btn.textContent = "结束录制";
+        btn.classList.add("is-recording");
+      });
+      return;
+    }
+    if (hasPendingMotionRecording) {
+      eachRecordButton((btn) => {
+        btn.textContent = "等待保存";
+        btn.classList.remove("is-recording");
+      });
+      return;
+    }
+    eachRecordButton((btn) => {
+      btn.textContent = "录制动作";
+      btn.classList.remove("is-recording");
+    });
+  }
+
+  function startMotionRecording() {
+    send({
+      type: "recording_start",
+      fps: 30,
+      request_id: nextId(),
+    });
+  }
+
+  function openRecordStartDialog() {
+    if (!recordStartDialog) {
+      startMotionRecording();
+      return;
+    }
+    resetRecordStartDialogUI();
+    recordStartDialog.showModal();
+  }
+
+  function closeRecordStartDialog() {
+    if (!recordStartDialog || !recordStartDialog.open) {
+      return;
+    }
+    recordStartDialog.close();
+  }
+
+  function stopMotionRecording() {
+    send({
+      type: "recording_stop",
+      request_id: nextId(),
+    });
+  }
+
+  function openRecordNameDialog() {
+    if (!recordNameDialog) {
+      return;
+    }
+    pendingOverwriteSave = false;
+    recordNameError.textContent = "";
+    recordNameInput.value = "";
+    if (btnRecordSave) {
+      btnRecordSave.textContent = "保存";
+    }
+    recordNameDialog.showModal();
+    recordNameInput.focus();
+  }
+
+  function closeRecordNameDialog() {
+    if (!recordNameDialog || !recordNameDialog.open) {
+      return;
+    }
+    pendingOverwriteSave = false;
+    if (btnRecordSave) {
+      btnRecordSave.textContent = "保存";
+    }
+    recordNameDialog.close();
+  }
+
+  function saveMotionRecording(name, overwrite = false) {
+    send({
+      type: "recording_save",
+      name,
+      overwrite,
+      request_id: nextId(),
+    });
+  }
+
+  function discardMotionRecording() {
+    send({
+      type: "recording_discard",
+      request_id: nextId(),
     });
   }
 
@@ -877,6 +1132,95 @@
       send({ type: "estop" });
       addSystemMessage("已发送 E-STOP 命令");
     }
+  });
+
+  eachRecordButton((btn) => {
+    btn.addEventListener("click", () => {
+      if (isMotionRecording) {
+        stopMotionRecording();
+      } else if (hasPendingMotionRecording) {
+        openRecordNameDialog();
+      } else {
+        openRecordStartDialog();
+      }
+    });
+  });
+
+  if (recordStartForm) {
+    recordStartForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (isMotionRecording) {
+        stopMotionRecording();
+      } else {
+        startMotionRecording();
+      }
+    });
+  }
+
+  if (btnRecordStartCancel) {
+    btnRecordStartCancel.addEventListener("click", () => {
+      stopRecordTimer();
+      closeRecordStartDialog();
+      resetRecordStartDialogUI();
+    });
+  }
+
+  if (recordNameForm) {
+    recordNameForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = (recordNameInput.value || "").trim();
+      if (!name) {
+        recordNameError.textContent = "请输入动作名称";
+        return;
+      }
+      if (!/^[\w-]+$/.test(name)) {
+        recordNameError.textContent = "名称仅支持字母、数字、下划线、短横线";
+        return;
+      }
+      recordNameError.textContent = "";
+      saveMotionRecording(name, pendingOverwriteSave);
+    });
+  }
+
+  if (btnRecordDiscard) {
+    btnRecordDiscard.addEventListener("click", () => {
+      discardMotionRecording();
+    });
+  }
+
+  if (btnRecordRerecord) {
+    btnRecordRerecord.addEventListener("click", () => {
+      discardMotionRecording();
+      setTimeout(() => {
+        openRecordStartDialog();
+      }, 80);
+    });
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") {
+      return;
+    }
+    if (recordStartDialog && recordStartDialog.open) {
+      e.preventDefault();
+      if (btnRecordStartConfirm) {
+        btnRecordStartConfirm.click();
+      }
+      return;
+    }
+    if (recordNameDialog && recordNameDialog.open) {
+      return;
+    }
+    const tag = (e.target && e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select" || e.isComposing) {
+      return;
+    }
+    if (!btnRecordMotion && !btnRecordMotionPanel) {
+      return;
+    }
+    e.preventDefault();
+    const primary = btnRecordMotionPanel || btnRecordMotion;
+    primary.click();
   });
 
   [btnOpenEvents].forEach((btn) => {
@@ -1501,5 +1845,6 @@
     }
   }
 
+  updateRecordButtonState();
   connect();
 })();

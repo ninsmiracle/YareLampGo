@@ -130,6 +130,40 @@ class HardwareAbstraction:
             return DeviceHealth.DEGRADED
         return DeviceHealth.OK
 
+    def disable_torque(self) -> None:
+        """Disable motor torque so joints can be moved by hand.
+
+        This is primarily used by teach-recording workflows (`lampgo record`).
+        In stub mode this is a no-op.
+        """
+        if not self._connected:
+            raise RuntimeError("HAL not connected")
+        if self._bus is None:
+            logger.info("hal.disable_torque: stub mode")
+            return
+        # Prefer per-motor explicit register writes first (more observable and
+        # robust across mixed firmware), then call bus-level helper as fallback.
+        for motor in self._bus.motors:
+            self._safe_bus_write("Lock", motor, 0)
+            self._safe_bus_write("Torque_Enable", motor, 0)
+        try:
+            self._bus.disable_torque()
+        except Exception:
+            logger.warning("hal.disable_torque_bus_call_failed", exc_info=True)
+        logger.info("hal.torque_disabled")
+
+    def enable_torque(self) -> None:
+        """Enable motor torque so joints hold current pose."""
+        if not self._connected:
+            raise RuntimeError("HAL not connected")
+        if self._bus is None:
+            logger.info("hal.enable_torque: stub mode")
+            return
+        for motor in self._bus.motors:
+            self._safe_bus_write("Lock", motor, 1)
+            self._safe_bus_write("Torque_Enable", motor, 1)
+        logger.info("hal.torque_enabled")
+
     def get_calibration_home(self) -> dict[str, float] | None:
         """Compute the degree-mode value that corresponds to the physical calibration midpoint.
 

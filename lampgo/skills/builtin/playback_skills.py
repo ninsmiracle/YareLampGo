@@ -1,4 +1,15 @@
-"""Playback skill — play pre-recorded CSV action files."""
+"""Playback skill — play pre-recorded CSV action files.
+
+Motion paradigm: TRAJECTORY-BASED (stream_frames).
+
+CSV recordings are complete joint trajectories captured from human teleoperation.
+They must be played back via ``stream_frames`` so the control thread executes each
+frame at the original FPS with no trajectory replanning.  Using ``move_to``
+waypoints would reset joint velocities ~10 times per second and destroy the
+natural acceleration/deceleration in the recorded motion.
+
+See docs/architecture.md § Motion Paradigms for the full paradigm guide.
+"""
 
 from __future__ import annotations
 
@@ -84,10 +95,13 @@ class PlayRecordingSkill(Skill):
         ),
     }
 
+    _motion = None
+
     def __init__(self, recordings_dir: Path) -> None:
         self._recordings_dir = recordings_dir
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        self._motion = ctx.motion
         name = params.get("name", "")
         if not name:
             return SkillResult(status="error", message="Recording name required")
@@ -122,11 +136,19 @@ class PlayRecordingSkill(Skill):
             else:
                 logger.warning("playback.expression_skipped_led_disconnected", name=name, expression=expression)
 
-        done_event = ctx.motion.stream_frames(frames, fps=fps)
-        if not await _await_done(done_event, timeout=max(30.0, len(frames) / max(fps, 1) + 5.0)):
-            logger.warning("playback.timeout", name=name)
-            return SkillResult(status="error", message=f"Playback '{name}' did not complete within timeout")
+        try:
+            # Trajectory-based: stream the full frame sequence at original FPS.
+            # The recorded human motion already contains natural acceleration/deceleration;
+            # no style easing is applied on top.
+            done = ctx.motion.stream_frames(frames, fps=fps)
+            timeout = len(frames) / max(fps, 1) + 5.0
+            if not await _await_done(done, timeout=timeout):
+                logger.warning("playback.timeout", name=name, frames=len(frames), fps=fps)
+                return SkillResult(status="error", message=f"Playback '{name}' timed out")
+        finally:
+            self._motion = None
 
+        # Return to safe: goal-based (only the target pose is known).
         safe = get_safe_position()
         logger.info("playback.return_safe_start", name=name, target=safe)
         return_done = ctx.motion.move_to(MotionTarget(joints=dict(safe), max_velocity=60.0))
@@ -145,3 +167,7 @@ class PlayRecordingSkill(Skill):
                 "returned_safe": True,
             },
         )
+
+    async def cancel(self) -> None:
+        if self._motion is not None:
+            self._motion.stop_immediate()

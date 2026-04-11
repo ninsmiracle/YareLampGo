@@ -10,6 +10,7 @@ The server owns:
 from __future__ import annotations
 
 import asyncio
+import re
 import signal
 import time
 import uuid
@@ -52,6 +53,7 @@ from lampgo.skills.builtin.parametric_skills import (
     NodSkill,
 )
 from lampgo.skills.builtin.playback_skills import PlayRecordingSkill
+from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.fsm import StateMachine
 from lampgo.skills.registry import SkillRegistry
@@ -86,6 +88,12 @@ class LampgoServer:
         self._openclaw_asks: dict[str, asyncio.Future[str]] = {}
         self._openclaw_asks_lock = asyncio.Lock()
         self._tts_tasks: set[asyncio.Task] = set()
+        self._record_lock = asyncio.Lock()
+        self._record_recorder: TeachRecorder | None = None
+        self._record_task: asyncio.Task | None = None
+        self._record_started_at: float = 0.0
+        self._record_fps: int = 30
+        self._record_motion_was_running: bool = False
 
     def _register_builtin_skills(self) -> None:
         recordings_dir = Path(self.config.recordings_dir)
@@ -141,6 +149,21 @@ class LampgoServer:
             self.motion.stop_immediate()
             return {"ok": True, "result": {"status": "estopped"}}
 
+        if cmd == "recording_start":
+            return await self.start_recording_session(fps=int(data.get("fps", 30) or 30))
+
+        if cmd == "recording_stop":
+            return await self.stop_recording_session()
+
+        if cmd == "recording_save":
+            return await self.save_recording_session(
+                str(data.get("name", "")),
+                overwrite=bool(data.get("overwrite", False)),
+            )
+
+        if cmd == "recording_discard":
+            return await self.discard_recording_session()
+
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
     async def openclaw_ask_user(
@@ -184,6 +207,12 @@ class LampgoServer:
         skill_id = data.get("skill_id", "")
         params = data.get("params", {})
 
+        if self._record_recorder is not None:
+            return {
+                "ok": False,
+                "error": "recording session active; save/discard recording first",
+            }
+
         skill = self.registry.get(skill_id)
         if skill is None:
             return {"ok": False, "error": f"Skill '{skill_id}' not registered"}
@@ -208,6 +237,167 @@ class LampgoServer:
 
         asyncio.ensure_future(_bg())
         return {"ok": True, "result": {"status": "accepted", "skill_id": skill_id}}
+
+    async def start_recording_session(self, fps: int = 30) -> dict[str, Any]:
+        """Start a teach-recording session in run mode.
+
+        The session samples HAL joint positions at a fixed FPS and buffers frames
+        in memory until the caller stops + saves (or discards).
+        """
+        async with self._record_lock:
+            if self.config.no_hw or not self.hal.is_connected:
+                return {"ok": False, "error": "hardware not connected"}
+            if self._record_recorder is not None:
+                return {"ok": False, "error": "recording session already active"}
+
+            fps = max(1, min(120, int(fps or 30)))
+            logger.info("server.recording_start_requested", fps=fps)
+            await self.executor.cancel_current()
+            self._record_motion_was_running = bool(getattr(self.motion, "is_running", False))
+            if self._record_motion_was_running:
+                self.motion.stop()
+            self.hal.disable_torque()
+
+            recordings_dir = Path(self.config.recordings_dir) / "user"
+            recordings_dir.mkdir(parents=True, exist_ok=True)
+            rec = TeachRecorder(self.hal, recordings_dir, fps=fps)
+            rec.start()
+            self._record_recorder = rec
+            self._record_started_at = time.monotonic()
+            self._record_fps = fps
+            self._record_task = asyncio.create_task(self._record_loop())
+            logger.info("server.recording_started", fps=fps)
+
+            return {
+                "ok": True,
+                "result": {
+                    "status": "recording",
+                    "fps": fps,
+                    "started_at": self._record_started_at,
+                },
+            }
+
+    async def stop_recording_session(self) -> dict[str, Any]:
+        """Stop sampling but keep buffered frames for save/discard."""
+        async with self._record_lock:
+            rec = self._record_recorder
+            if rec is None:
+                return {"ok": False, "error": "no active recording session"}
+            rec.stop()
+            if self._record_task is not None:
+                await self._record_task
+                self._record_task = None
+            # Product requirement: after recording ends, re-enable torque so the
+            # arm holds its current pose and does not slump under gravity.
+            self.hal.enable_torque()
+            if self._record_motion_was_running:
+                self.motion.start()
+            self._record_motion_was_running = False
+            elapsed = max(0.0, time.monotonic() - self._record_started_at)
+            logger.info("server.recording_stopped", frames=rec.frame_count, duration_s=round(elapsed, 3))
+            return {
+                "ok": True,
+                "result": {
+                    "status": "stopped",
+                    "frames": rec.frame_count,
+                    "duration_s": round(elapsed, 3),
+                },
+            }
+
+    async def save_recording_session(self, name: str, *, overwrite: bool = False) -> dict[str, Any]:
+        """Persist buffered recording frames to <recordings_dir>/user/<name>.csv."""
+        async with self._record_lock:
+            rec = self._record_recorder
+            if rec is None:
+                return {"ok": False, "error": "no recording session to save"}
+            if rec.is_recording:
+                return {"ok": False, "error": "recording still active; stop first"}
+
+            name = name.strip()
+            if not name or not re.match(r"^[\w\-]+$", name):
+                return {"ok": False, "error": "invalid name: use letters/numbers/_/-"}
+
+            target_path = Path(self.config.recordings_dir) / "user" / f"{name}.csv"
+            if target_path.exists() and not overwrite:
+                return {
+                    "ok": False,
+                    "error": "recording already exists",
+                    "result": {
+                        "status": "name_conflict",
+                        "name": name,
+                        "path": str(target_path),
+                        "requires_overwrite": True,
+                    },
+                }
+
+            path = rec.save(name)
+            frames = rec.frame_count
+            self._record_recorder = None
+            self._record_started_at = 0.0
+            self._record_fps = 30
+            self._record_motion_was_running = False
+            return {
+                "ok": True,
+                "result": {
+                    "status": "saved",
+                    "name": name,
+                    "path": str(path),
+                    "frames": frames,
+                    "record_playback_notes": {
+                        "record": "samples HAL joint positions only (no style interpolation)",
+                        "play": "uses move_to waypoint playback (style-aware planned interpolation)",
+                        "safety": "playback follows move_to safety path via validate_frame",
+                    },
+                },
+            }
+
+    async def discard_recording_session(self) -> dict[str, Any]:
+        """Discard current recording session (active or stopped)."""
+        async with self._record_lock:
+            rec = self._record_recorder
+            if rec is None:
+                return {"ok": False, "error": "no recording session to discard"}
+            if rec.is_recording:
+                rec.stop()
+            if self._record_task is not None:
+                await self._record_task
+                self._record_task = None
+            frames = rec.frame_count
+            self._record_recorder = None
+            self._record_started_at = 0.0
+            self._record_fps = 30
+            if self._record_motion_was_running:
+                self.motion.start()
+            self._record_motion_was_running = False
+            return {"ok": True, "result": {"status": "discarded", "frames": frames}}
+
+    async def _record_loop(self) -> None:
+        """Background sampling loop for run-mode recording sessions."""
+        rec = self._record_recorder
+        if rec is None:
+            return
+        interval = 1.0 / max(1, self._record_fps)
+        try:
+            while rec.is_recording:
+                rec.tick()
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            # Normal shutdown/cancel path.
+            pass
+        except Exception:
+            logger.exception("server.record_loop_failed")
+
+    def _record_status(self) -> dict[str, Any]:
+        rec = self._record_recorder
+        if rec is None:
+            return {"active": False, "has_buffer": False, "frames": 0}
+        return {
+            "active": rec.is_recording,
+            "has_buffer": rec.frame_count > 0,
+            "fps": self._record_fps,
+            "frames": rec.frame_count,
+            "started_at": self._record_started_at,
+        }
 
     def _extract_response_text(self, result: dict) -> str | None:
         r = result.get("result", {})
@@ -237,6 +427,11 @@ class LampgoServer:
         text = data.get("input", "").strip()
         if not text:
             return {"ok": False, "error": "empty input"}
+        if self._record_recorder is not None:
+            return {
+                "ok": False,
+                "error": "recording session active; save/discard recording first",
+            }
 
         request_id = data.get("request_id", "")
 
@@ -643,6 +838,7 @@ class LampgoServer:
                 "device_health": health,
                 "estopped": self.safety.is_estopped(),
                 "estop_reason": self.safety.last_estop_reason,
+                "recording": self._record_status(),
             },
         }
 
@@ -751,6 +947,17 @@ class LampgoServer:
 
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
+        async with self._record_lock:
+            if self._record_recorder is not None and self._record_recorder.is_recording:
+                self._record_recorder.stop()
+            if self._record_task is not None and not self._record_task.done():
+                self._record_task.cancel()
+                try:
+                    await self._record_task
+                except asyncio.CancelledError:
+                    pass
+            self._record_task = None
+            self._record_recorder = None
         await self._state_writer.stop()
         if self._voice_task is not None:
             self._voice_task.cancel()

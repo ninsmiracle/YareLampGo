@@ -64,6 +64,9 @@
             <span class="group-arrow">▾</span>
           </button>
           <div class="group-body" data-group-body="recordings">
+            <div class="record-action-bar">
+              <button id="btn-record-motion-panel" class="ghost-button" type="button">录制动作</button>
+            </div>
             <div id="recording-grid" class="skill-grid"></div>
           </div>
         </div>
@@ -100,6 +103,7 @@
             <span class="connection-dot is-offline" id="conn-dot"></span>
             <span id="conn-text">未连接</span>
           </div>
+          <button id="btn-record-motion" class="ghost-button" type="button">录制动作</button>
           <button id="btn-estop" class="danger-button" type="button">E-STOP</button>
         </div>
       </header>
@@ -155,6 +159,40 @@
     </div>
     <div id="event-log" class="event-log"></div>
   </aside>
+
+  <dialog id="record-name-dialog" class="record-dialog">
+    <form id="record-name-form" method="dialog" class="record-dialog-card">
+      <div class="record-dialog-title">保存录制动作</div>
+      <div class="record-dialog-desc">请输入动作名称，或放弃并重新录制。</div>
+      <input
+        id="record-name-input"
+        class="record-dialog-input"
+        type="text"
+        maxlength="64"
+        placeholder="例如：my_wave_action"
+        autocomplete="off"
+      >
+      <div id="record-name-error" class="record-dialog-error"></div>
+      <div class="record-dialog-actions">
+        <button id="btn-record-discard" class="ghost-button" type="button">放弃</button>
+        <button id="btn-record-rerecord" class="ghost-button" type="button">重新录制</button>
+        <button id="btn-record-save" class="send-button" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="record-start-dialog" class="record-dialog">
+    <form id="record-start-form" class="record-dialog-card">
+      <div class="record-dialog-title">开始录制动作</div>
+      <div id="record-start-desc" class="record-dialog-desc">点击“开始录制”后将自动关闭电机力矩，你可以手动掰动关节进行录制。</div>
+      <div id="record-timer" class="record-dialog-timer">已录制 0.0s</div>
+      <div id="record-metrics" class="record-dialog-metrics">采样：-- FPS · 0 帧</div>
+      <div class="record-dialog-actions">
+        <button id="btn-record-start-cancel" class="ghost-button" type="button">取消</button>
+        <button id="btn-record-start-confirm" class="send-button" type="submit">开始录制</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>
