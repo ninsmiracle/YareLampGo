@@ -11,9 +11,7 @@ from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.playback_skills import (
-    FIRST_SEGMENT_MIN_TIMEOUT_S,
     PlayRecordingSkill,
-    _segment_timeout_s,
     load_recording,
 )
 from lampgo.skills.builtin.motion_skills import get_safe_position
@@ -87,7 +85,12 @@ async def test_play_recording_returns_to_safe_position(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_play_recording_uses_move_to_path_not_stream_frames(tmp_path, monkeypatch):
+async def test_play_recording_uses_stream_frames_not_move_to_waypoints(tmp_path, monkeypatch):
+    """PlayRecordingSkill must use stream_frames (trajectory-based paradigm).
+
+    move_to waypoints reset joint velocities on every call and destroy the
+    natural acceleration/deceleration captured in the recording.
+    """
     path = tmp_path / "wave.csv"
     path.write_text(
         "\n".join(
@@ -105,10 +108,14 @@ async def test_play_recording_uses_move_to_path_not_stream_frames(tmp_path, monk
     motion = MotionRuntime(hal, SafetyKernel(SafetyConfig()), MotionConfig(tick_rate_hz=100))
     motion.start()
 
-    def _fail_stream(*args, **kwargs):
-        raise AssertionError("stream_frames should not be called by PlayRecordingSkill")
+    stream_calls: list = []
+    original_stream = motion.stream_frames
 
-    monkeypatch.setattr(motion, "stream_frames", _fail_stream)
+    def _capture_stream(frames, fps=30):
+        stream_calls.append((len(frames), fps))
+        return original_stream(frames, fps)
+
+    monkeypatch.setattr(motion, "stream_frames", _capture_stream)
 
     try:
         skill = PlayRecordingSkill(tmp_path)
@@ -118,10 +125,12 @@ async def test_play_recording_uses_move_to_path_not_stream_frames(tmp_path, monk
             events=EventBus(),
             state=hal.read_positions(),
         )
-        result = await skill.execute(ctx, name="wave", style="gentle", velocity=80)
+        result = await skill.execute(ctx, name="wave")
         assert result.status == "ok"
-        assert result.data["style"] == "gentle"
-        assert result.data["safety_path"] == "validate_frame"
+        assert result.data["returned_safe"] is True
+        # stream_frames must be called exactly once with all 3 frames
+        assert len(stream_calls) == 1
+        assert stream_calls[0][0] == 3
     finally:
         motion.stop()
 
@@ -145,13 +154,30 @@ def test_safe_position_constant():
     }
 
 
-def test_segment_timeout_first_segment_has_extra_budget():
-    start = {"base_yaw": 0.0}
-    end = {"base_yaw": 180.0}
-    velocity = 80.0
+def test_play_recording_result_has_no_style_field(tmp_path):
+    """Result data must not contain 'style' or 'safety_path' — those belonged to the
+    old move_to-based implementation and are no longer meaningful."""
+    import asyncio
+    from lampgo.core.config import MotionConfig, SafetyConfig
+    from lampgo.core.events import EventBus
+    from lampgo.core.led import LEDConfig, LEDController
+    from lampgo.core.motion import MotionRuntime
+    from lampgo.core.safety import SafetyKernel
+    from lampgo.skills.base import SkillContext
+    from tests.conftest import MockHAL
 
-    first = _segment_timeout_s(start, end, velocity, is_first_segment=True)
-    later = _segment_timeout_s(start, end, velocity, is_first_segment=False)
+    path = tmp_path / "sample.csv"
+    path.write_text("timestamp,base_yaw.pos\n0.0,0.0\n0.1,5.0\n")
 
-    assert first >= FIRST_SEGMENT_MIN_TIMEOUT_S
-    assert first >= later
+    hal = MockHAL()
+    hal.connect()
+    motion = MotionRuntime(hal, SafetyKernel(SafetyConfig()), MotionConfig(tick_rate_hz=100))
+    motion.start()
+    try:
+        skill = PlayRecordingSkill(tmp_path)
+        ctx = SkillContext(motion=motion, led=LEDController(LEDConfig()), events=EventBus(), state=hal.read_positions())
+        result = asyncio.get_event_loop().run_until_complete(skill.execute(ctx, name="sample"))
+        assert "style" not in (result.data or {})
+        assert "safety_path" not in (result.data or {})
+    finally:
+        motion.stop()
