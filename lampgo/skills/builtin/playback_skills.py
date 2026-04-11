@@ -1,4 +1,15 @@
-"""Playback skill — play pre-recorded CSV action files."""
+"""Playback skill — play pre-recorded CSV action files.
+
+Motion paradigm: TRAJECTORY-BASED (stream_frames).
+
+CSV recordings are complete joint trajectories captured from human teleoperation.
+They must be played back via ``stream_frames`` so the control thread executes each
+frame at the original FPS with no trajectory replanning.  Using ``move_to``
+waypoints would reset joint velocities ~10 times per second and destroy the
+natural acceleration/deceleration in the recorded motion.
+
+See docs/architecture.md § Motion Paradigms for the full paradigm guide.
+"""
 
 from __future__ import annotations
 
@@ -19,11 +30,6 @@ RETURN_SAFE_TIMEOUT_S = 60.0
 DEFAULT_RECORDING_FPS_OVERRIDES = {
     "celebrate": 9,
 }
-MAX_WAYPOINT_RATE_HZ = 10
-MIN_SEGMENT_TIMEOUT_S = 2.0
-FIRST_SEGMENT_MIN_TIMEOUT_S = 6.0
-SEGMENT_TIMEOUT_MARGIN_S = 0.8
-SEGMENT_TIMEOUT_SCALE = 2.5
 
 
 async def _await_done(done_event, timeout: float) -> bool:
@@ -75,52 +81,12 @@ def load_recording(path: Path) -> tuple[list[dict[str, float]], int]:
     return frames, fps
 
 
-def _sample_waypoints(frames: list[dict[str, float]], fps: int, max_rate_hz: int = MAX_WAYPOINT_RATE_HZ) -> list[dict[str, float]]:
-    """Downsample raw recording frames into move_to waypoints.
-
-    Replaying every CSV row through move_to would trigger excessive micro-replans.
-    We sample to a bounded keyframe rate and let MotionRuntime interpolate each
-    segment using its planned motion path (style / linear profile).
-    """
-    if not frames:
-        return []
-    stride = max(1, int(round(max(fps, 1) / max(max_rate_hz, 1))))
-    sampled = [frames[i] for i in range(0, len(frames), stride)]
-    if sampled[-1] is not frames[-1]:
-        sampled.append(frames[-1])
-    return sampled
-
-
-def _segment_timeout_s(
-    start: dict[str, float],
-    end: dict[str, float],
-    velocity: float,
-    *,
-    is_first_segment: bool,
-) -> float:
-    """Estimate a safe timeout for one ``move_to`` segment.
-
-    ``move_to`` drives joints concurrently, so we use the maximum joint delta as
-    the dominant time term and add conservative buffer for style easing.
-    """
-    max_delta = max((abs(end.get(j, start.get(j, 0.0)) - start.get(j, 0.0)) for j in JOINT_NAMES), default=0.0)
-    effective_velocity = max(abs(float(velocity)), 1.0)
-    estimated_motion_s = max_delta / effective_velocity
-    timeout_s = estimated_motion_s * SEGMENT_TIMEOUT_SCALE + SEGMENT_TIMEOUT_MARGIN_S
-    if is_first_segment:
-        # First segment often starts far from the recording's first waypoint.
-        timeout_s = max(timeout_s, FIRST_SEGMENT_MIN_TIMEOUT_S)
-    return max(timeout_s, MIN_SEGMENT_TIMEOUT_S)
-
-
 class PlayRecordingSkill(Skill):
     skill_id = "play_recording"
     description = "Play a pre-recorded CSV action file."
     parameters = {
         "name": ParameterSpec(name="name", type="str", description="Recording name (without .csv)"),
         "fps": ParameterSpec(name="fps", type="int", required=False, description="Override playback fps"),
-        "style": ParameterSpec(name="style", type="str", required=False, description="Playback move style"),
-        "velocity": ParameterSpec(name="velocity", type="float", required=False, description="Playback max velocity"),
         "expression": ParameterSpec(
             name="expression",
             type="str",
@@ -129,10 +95,13 @@ class PlayRecordingSkill(Skill):
         ),
     }
 
+    _motion = None
+
     def __init__(self, recordings_dir: Path) -> None:
         self._recordings_dir = recordings_dir
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        self._motion = ctx.motion
         name = params.get("name", "")
         if not name:
             return SkillResult(status="error", message="Recording name required")
@@ -157,10 +126,7 @@ class PlayRecordingSkill(Skill):
             return SkillResult(status="error", message=f"Recording '{name}' has no valid frames")
 
         fps = int(params.get("fps", 0)) or DEFAULT_RECORDING_FPS_OVERRIDES.get(name, detected_fps)
-        style = str(params.get("style", "gentle") or "gentle")
-        velocity_raw = params.get("velocity")
-        velocity = float(velocity_raw) if velocity_raw is not None else 80.0
-        logger.info("playback.start", name=name, frames=len(frames), fps=fps, style=style, velocity=velocity)
+        logger.info("playback.start", name=name, frames=len(frames), fps=fps)
 
         if expression:
             if ctx.led.is_connected:
@@ -170,27 +136,19 @@ class PlayRecordingSkill(Skill):
             else:
                 logger.warning("playback.expression_skipped_led_disconnected", name=name, expression=expression)
 
-        waypoints = _sample_waypoints(frames, fps=fps)
-        start_pose = dict(ctx.motion.current_state.positions)
-        for idx, joints in enumerate(waypoints):
-            seg_timeout = _segment_timeout_s(
-                start_pose,
-                joints,
-                velocity=velocity,
-                is_first_segment=(idx == 0),
-            )
-            done_event = ctx.motion.move_to(MotionTarget(joints=joints, max_velocity=velocity, style=style))
-            if not await _await_done(done_event, timeout=seg_timeout):
-                logger.warning(
-                    "playback.timeout",
-                    name=name,
-                    segment=idx,
-                    segments=len(waypoints),
-                    timeout_s=round(seg_timeout, 2),
-                )
-                return SkillResult(status="error", message=f"Playback '{name}' timed out on segment {idx + 1}")
-            start_pose = joints
+        try:
+            # Trajectory-based: stream the full frame sequence at original FPS.
+            # The recorded human motion already contains natural acceleration/deceleration;
+            # no style easing is applied on top.
+            done = ctx.motion.stream_frames(frames, fps=fps)
+            timeout = len(frames) / max(fps, 1) + 5.0
+            if not await _await_done(done, timeout=timeout):
+                logger.warning("playback.timeout", name=name, frames=len(frames), fps=fps)
+                return SkillResult(status="error", message=f"Playback '{name}' timed out")
+        finally:
+            self._motion = None
 
+        # Return to safe: goal-based (only the target pose is known).
         safe = get_safe_position()
         logger.info("playback.return_safe_start", name=name, target=safe)
         return_done = ctx.motion.move_to(MotionTarget(joints=dict(safe), max_velocity=60.0))
@@ -207,7 +165,9 @@ class PlayRecordingSkill(Skill):
                 "fps": fps,
                 "expression": expression or None,
                 "returned_safe": True,
-                "style": style,
-                "safety_path": "validate_frame",
             },
         )
+
+    async def cancel(self) -> None:
+        if self._motion is not None:
+            self._motion.stop_immediate()
