@@ -3,6 +3,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.motion
+
 from lampgo.core.config import MotionConfig, SafetyConfig
 from lampgo.core.events import EventBus
 from lampgo.core.led import LEDConfig, LEDController

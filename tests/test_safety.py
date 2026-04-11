@@ -1,6 +1,10 @@
 """Tests for SafetyKernel."""
 
+import pytest
+
 from lampgo.core.config import SafetyConfig
+
+pytestmark = pytest.mark.motion
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.types import JointState, MotionTarget, SafetyRejection
 
