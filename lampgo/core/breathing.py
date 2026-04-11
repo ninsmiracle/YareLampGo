@@ -1,83 +1,109 @@
-"""BreathingGenerator — low-frequency idle micro-motion for biological presence.
+"""BreathingGenerator — intermittent postural micro-shifts for biological presence.
 
-When the arm is idle (no active MOVE_TO or STREAM_FRAMES command) the
-breathing generator provides slowly-oscillating target positions for the
-spring bank.  Each joint oscillates at a slightly different frequency with a
-unique phase offset so the combined motion looks organic rather than mechanical.
+Alternates between two phases:
 
-Typical usage
--------------
-    gen = BreathingGenerator(amplitude=0.8)
-    gen.set_rest(current_joint_positions)   # call when entering idle
-    while idle:
-        targets = gen.sample(dt)            # dict[joint, float] absolute targets
-        # feed targets into spring bank …
+1. **Hold** (5–8 s, random) — complete stillness.  The servo PID rests at zero
+   error, producing no audible noise.
+
+2. **Shift** (5–6 s, random) — cosine-eased transition to a new micro-posture.
+   Duration chosen so peak velocity < 1 °/s (same regime as a ``return_safe``
+   final approach), keeping the motion completely inaudible.
+
+   Peak velocity formula: v_peak = π × A × scale / (2 × T_shift)
+   At amplitude=3.0° and T_shift=5 s, base_pitch peaks at ~0.94 °/s.
+
+The visual result is "person occasionally shifting weight in a chair" —
+organic presence without continuous servo noise.
 """
 
 from __future__ import annotations
 
-from math import pi, sin
+import random
+from math import cos, pi
 
 
 class BreathingGenerator:
-    """Generates organic idle micro-motion for all resting joints.
+    """Generates organic idle micro-motion via intermittent postural shifts.
 
     Parameters
     ----------
     amplitude : float
-        Peak oscillation amplitude in degrees.  0.8° is subtle but
-        noticeable; reduce to 0.3° for near-imperceptible presence.
+        Peak shift magnitude in degrees (before per-joint scaling).
     """
 
-    # Per-joint natural breathing frequencies (Hz).
-    # Slight mismatches between joints create a Lissajous-like organic feel.
-    _FREQS: dict[str, float] = {
-        "base_yaw":    0.08,
-        "base_pitch":  0.11,
-        "elbow_pitch": 0.09,
-        "wrist_roll":  0.07,
-        "wrist_pitch": 0.10,
+    _AMP_SCALE: dict[str, float] = {
+        "base_yaw":    0.35,
+        "base_pitch":  1.00,
+        "elbow_pitch": 0.80,
+        "wrist_roll":  0.25,
+        "wrist_pitch": 0.45,
     }
 
-    # Phase offsets (radians) so joints start at different points in
-    # their cycle — avoids all joints moving in lockstep.
-    _PHASES: dict[str, float] = {
-        "base_yaw":    0.00,
-        "base_pitch":  1.26,   # ≈ 72°
-        "elbow_pitch": 2.51,   # ≈ 144°
-        "wrist_roll":  0.63,   # ≈ 36°
-        "wrist_pitch": 1.88,   # ≈ 108°
-    }
+    # Hold: pure stillness. Shift: slow cosine-eased glide.
+    _HOLD_RANGE: tuple[float, float] = (5.0, 8.0)
+    _SHIFT_RANGE: tuple[float, float] = (5.0, 6.0)
 
-    def __init__(self, amplitude: float = 0.8) -> None:
+    def __init__(self, amplitude: float = 3.0) -> None:
         self._amplitude = amplitude
         self._rest: dict[str, float] = {}
-        self._t = 0.0
+        self._current_offsets: dict[str, float] = {}
+        self._shift_start: dict[str, float] = {}
+        self._shift_target: dict[str, float] = {}
+        self._holding = True
+        self._timer = 0.0
+        self._phase_dur = random.uniform(*self._HOLD_RANGE)
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
     def set_rest(self, positions: dict[str, float]) -> None:
-        """Set the base (rest) positions around which breathing oscillates.
-
-        Should be called whenever the arm enters the idle state so that
-        breathing starts from wherever the arm currently is.  The
-        internal time is preserved so the motion has no discontinuity.
-        """
+        """Set rest positions; resets to a hold phase with zero offset."""
         self._rest = dict(positions)
+        self._current_offsets = {j: 0.0 for j in positions}
+        self._shift_start = dict(self._current_offsets)
+        self._shift_target = dict(self._current_offsets)
+        self._holding = True
+        self._timer = 0.0
+        self._phase_dur = random.uniform(*self._HOLD_RANGE)
 
     def sample(self, dt: float) -> dict[str, float]:
-        """Advance by *dt* seconds and return absolute target positions.
+        """Advance by *dt* seconds and return absolute target positions."""
+        self._timer += dt
 
-        Returns a dict mapping each resting joint to its current
-        breathing target (rest position + sinusoidal offset).
-        """
-        self._t += dt
-        result: dict[str, float] = {}
-        for joint, rest in self._rest.items():
-            freq = self._FREQS.get(joint, 0.1)
-            phase = self._PHASES.get(joint, 0.0)
-            offset = self._amplitude * sin(2.0 * pi * freq * self._t + phase)
-            result[joint] = rest + offset
-        return result
+        if self._holding:
+            if self._timer >= self._phase_dur:
+                self._holding = False
+                self._timer = 0.0
+                self._phase_dur = random.uniform(*self._SHIFT_RANGE)
+                self._shift_start = dict(self._current_offsets)
+                self._shift_target = self._random_offsets()
+        else:
+            t = min(1.0, self._timer / self._phase_dur)
+            smooth = 0.5 * (1.0 - cos(pi * t))
+            for joint in self._current_offsets:
+                a = self._shift_start.get(joint, 0.0)
+                b = self._shift_target.get(joint, 0.0)
+                self._current_offsets[joint] = a + (b - a) * smooth
+            if t >= 1.0:
+                self._holding = True
+                self._timer = 0.0
+                self._phase_dur = random.uniform(*self._HOLD_RANGE)
+
+        return {
+            joint: rest + self._current_offsets.get(joint, 0.0)
+            for joint, rest in self._rest.items()
+        }
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _random_offsets(self) -> dict[str, float]:
+        """Pick a new random micro-posture within amplitude bounds."""
+        return {
+            joint: random.uniform(-1.0, 1.0)
+                   * self._amplitude
+                   * self._AMP_SCALE.get(joint, 0.5)
+            for joint in self._rest
+        }

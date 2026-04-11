@@ -245,6 +245,12 @@ class MotionRuntime:
         _stall_ticks = 0
         _prev_hw_remaining = -1.0
 
+        # --- Anticipation state ---
+        # Holds the REAL final target while the spring briefly windup-moves
+        # to the opposite direction.  None means no anticipation in progress.
+        _anticipation_final_target: MotionTarget | None = None
+        _anticipation_ticks_remaining: int = 0
+
         # LAMPGO_DIAG=1 enables per-tick diagnostics
         _diag_mode: bool = os.environ.get("LAMPGO_DIAG", "0").strip() == "1"
         _diag_counter = 0
@@ -269,6 +275,8 @@ class MotionRuntime:
                     self._current_target = None
                     _stream_frames = []
                     _current_stream_target = {}
+                    _anticipation_final_target = None
+                    _anticipation_ticks_remaining = 0
                     if _active_done:
                         _active_done.set()
                         _active_done = None
@@ -281,6 +289,8 @@ class MotionRuntime:
                     self._current_target = None
                     _stream_frames = []
                     _current_stream_target = {}
+                    _anticipation_final_target = None
+                    _anticipation_ticks_remaining = 0
                     # Springs decelerate naturally — no hard stop
                     _breathing.set_rest(
                         {j: s.position for j, s in _springs.items()}
@@ -291,7 +301,6 @@ class MotionRuntime:
                         self._current_state, cmd.target
                     )
                     if isinstance(validated, MotionTarget):
-                        self._current_target = validated
                         _stream_frames = []
                         _current_stream_target = {}
 
@@ -340,6 +349,60 @@ class MotionRuntime:
                         )
                         _stall_ticks = 0
                         _prev_hw_remaining = -1.0
+
+                        # --- Anticipation: windup in the opposite direction ---
+                        # Only for large moves and when not already in motion.
+                        ant_cfg = self._config
+                        if (
+                            ant_cfg.anticipation_enabled
+                            and max_dist >= ant_cfg.anticipation_threshold
+                            and all(
+                                abs(_springs[j].velocity) < 5.0
+                                for j in validated.joints
+                                if j in _springs
+                            )
+                        ):
+                            ratio = ant_cfg.anticipation_ratio
+                            windup_joints: dict[str, float] = {}
+                            for joint, goal in validated.joints.items():
+                                current = self._current_state.get(joint, goal)
+                                direction = goal - current
+                                windup_joints[joint] = current - direction * ratio
+                            # Clamp windup joints through safety (position limits)
+                            windup_target = MotionTarget(
+                                joints=windup_joints,
+                                max_velocity=validated.max_velocity,
+                                style=validated.style,
+                            )
+                            windup_validated = self._safety.validate_target(
+                                self._current_state, windup_target
+                            )
+                            if isinstance(windup_validated, MotionTarget):
+                                _anticipation_final_target = validated
+                                _anticipation_ticks_remaining = max(
+                                    1,
+                                    round(
+                                        ant_cfg.anticipation_duration_ms
+                                        / 1000.0
+                                        / self._tick_interval
+                                    ),
+                                )
+                                self._current_target = windup_validated
+                                logger.debug(
+                                    "motion.anticipation_start",
+                                    windup=windup_joints,
+                                    ticks=_anticipation_ticks_remaining,
+                                )
+                            else:
+                                # Windup out of range — skip anticipation
+                                _anticipation_final_target = None
+                                _anticipation_ticks_remaining = 0
+                                self._current_target = validated
+                        else:
+                            _anticipation_final_target = None
+                            _anticipation_ticks_remaining = 0
+                            self._current_target = validated
+
                         self._status = MotionStatus(
                             target=validated, progress=0.0, is_done=False
                         )
@@ -350,6 +413,7 @@ class MotionRuntime:
                             style=style_key,
                             effective_f=round(effective_f, 2),
                             z=style.z,
+                            anticipation=_anticipation_ticks_remaining > 0,
                         )
                     else:
                         logger.warning(
@@ -368,6 +432,8 @@ class MotionRuntime:
                         dict(_stream_frames[0]) if _stream_frames else {}
                     )
                     self._current_target = None
+                    _anticipation_final_target = None
+                    _anticipation_ticks_remaining = 0
 
                     # Switch springs to playback mode
                     pf = self._config.spring_playback_f
@@ -405,6 +471,17 @@ class MotionRuntime:
             if self._safety.is_estopped():
                 self._tick_sleep(t0)
                 continue
+
+            # --- Anticipation countdown ---
+            # While _anticipation_ticks_remaining > 0, the spring holds the
+            # windup (opposite-direction) target.  Once the countdown expires,
+            # switch to the real target stored in _anticipation_final_target.
+            if _anticipation_ticks_remaining > 0:
+                _anticipation_ticks_remaining -= 1
+                if _anticipation_ticks_remaining == 0 and _anticipation_final_target is not None:
+                    self._current_target = _anticipation_final_target
+                    _anticipation_final_target = None
+                    logger.debug("motion.anticipation_done_switching_to_final")
 
             # --- Build per-joint targets ---
             # Start with each spring holding its own current position
@@ -599,11 +676,16 @@ class MotionRuntime:
 
     _OVERLAP_COUPLINGS: list[tuple[str, str, float, int]] = [
         # (primary_joint, secondary_joint, ratio, lag_ticks)
-        # When the lamp pitches, yaw and elbow subtly follow with a delay.
-        ("base_pitch",  "base_yaw",    0.04, 3),
-        ("base_pitch",  "elbow_pitch", 0.06, 4),
-        # When the lamp yaws, the wrist roll subtly follows.
-        ("base_yaw",    "wrist_roll",  0.03, 2),
+        # Ratios raised 3-4x from original (0.04/0.06/0.03) so the coupling
+        # is actually visible; lag increased for more organic follow-through.
+        # When the lamp pitches, yaw and elbow follow with a delay.
+        ("base_pitch",  "base_yaw",    0.12, 5),
+        ("base_pitch",  "elbow_pitch", 0.18, 6),
+        # When the lamp yaws, wrist roll and elbow follow.
+        ("base_yaw",    "wrist_roll",  0.10, 4),
+        ("base_yaw",    "elbow_pitch", 0.08, 5),
+        # When the elbow moves, the wrist pitch follows (energy transfer down the chain).
+        ("elbow_pitch", "wrist_pitch", 0.15, 5),
     ]
 
     @staticmethod

@@ -49,10 +49,10 @@ class NodSkill(Skill):
     description = "Nod up and down (agreement gesture)."
     parameters = {
         "amplitude": ParameterSpec(
-            name="amplitude", type="float", required=False, default=15.0, description="Degrees"
+            name="amplitude", type="float", required=False, default=12.0, description="Degrees"
         ),
         "speed": ParameterSpec(
-            name="speed", type="float", required=False, default=80.0, description="Deg/s"
+            name="speed", type="float", required=False, default=55.0, description="Deg/s"
         ),
         "count": ParameterSpec(
             name="count", type="int", required=False, default=3, description="Number of nods"
@@ -63,8 +63,8 @@ class NodSkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        amplitude = float(params.get("amplitude", 15.0))
-        speed = float(params.get("speed", 80.0))
+        amplitude = float(params.get("amplitude", 12.0))
+        speed = float(params.get("speed", 55.0))
         count = int(params.get("count", 3))
         base_pitch = ctx.state.get("base_pitch", 0.0)
 
@@ -116,10 +116,10 @@ class HeadShakeSkill(Skill):
     description = "Shake head side to side (disagreement gesture)."
     parameters = {
         "amplitude": ParameterSpec(
-            name="amplitude", type="float", required=False, default=20.0, description="Degrees"
+            name="amplitude", type="float", required=False, default=15.0, description="Degrees"
         ),
         "speed": ParameterSpec(
-            name="speed", type="float", required=False, default=100.0, description="Deg/s"
+            name="speed", type="float", required=False, default=65.0, description="Deg/s"
         ),
         "count": ParameterSpec(
             name="count", type="int", required=False, default=3, description="Number of shakes"
@@ -130,8 +130,8 @@ class HeadShakeSkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        amplitude = float(params.get("amplitude", 20.0))
-        speed = float(params.get("speed", 100.0))
+        amplitude = float(params.get("amplitude", 15.0))
+        speed = float(params.get("speed", 65.0))
         count = int(params.get("count", 3))
         base_yaw = ctx.state.get("base_yaw", 0.0)
 
@@ -298,7 +298,7 @@ class DanceSkill(Skill):
     description = "A simple rhythmic dance pattern."
     parameters = {
         "speed": ParameterSpec(
-            name="speed", type="float", required=False, default=120.0, description="Deg/s"
+            name="speed", type="float", required=False, default=70.0, description="Deg/s"
         ),
         "cycles": ParameterSpec(
             name="cycles", type="int", required=False, default=4, description="Dance cycles"
@@ -315,7 +315,7 @@ class DanceSkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        speed = float(params.get("speed", 120.0))
+        speed = float(params.get("speed", 70.0))
         cycles = int(params.get("cycles", 4))
         raw_base = {j: ctx.state.get(j, 0.0) for j in ["base_yaw", "base_pitch", "wrist_roll"]}
 
