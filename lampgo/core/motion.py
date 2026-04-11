@@ -130,7 +130,13 @@ class MotionRuntime:
         return done
 
     def stream_frames(self, frames: list[dict[str, float]], fps: int = 30) -> threading.Event:
-        """Queue frame-by-frame playback (CSV recordings). Returns done event."""
+        """Queue frame-by-frame playback (CSV recordings). Returns done event.
+
+        Notes:
+        - This path does NOT use style/TrajectoryPlan easing.
+        - Safety enforcement uses ``SafetyKernel.clamp_positions`` (position limits)
+          instead of per-tick velocity limiting.
+        """
         done = threading.Event()
         cmd = _Command(type=_CommandType.STREAM_FRAMES, frames=frames, fps=fps, done_event=done)
         self._command_queue.put(cmd)
@@ -149,6 +155,10 @@ class MotionRuntime:
     @property
     def current_state(self) -> JointState:
         return self._current_state
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     # ------------------------------------------------------------------
     # Control thread
