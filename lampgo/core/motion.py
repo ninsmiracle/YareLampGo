@@ -68,6 +68,7 @@ class _Command:
     target: MotionTarget | None = None
     frames: list[dict[str, float]] | None = None
     fps: int = 30
+    playback_mode: str = "cleaned"
     done_event: threading.Event | None = None
 
 
@@ -150,7 +151,7 @@ class MotionRuntime:
         return done
 
     def stream_frames(
-        self, frames: list[dict[str, float]], fps: int = 30
+        self, frames: list[dict[str, float]], fps: int = 30, playback_mode: str = "cleaned"
     ) -> threading.Event:
         """Queue frame-by-frame playback.  Returns a done Event.
 
@@ -160,8 +161,16 @@ class MotionRuntime:
         All safety enforcement uses validate_frame (unified path).
         """
         done = threading.Event()
+        mode = (playback_mode or "cleaned").strip().lower()
+        if mode not in {"raw", "cleaned", "expressive"}:
+            logger.warning("motion.stream_invalid_mode_fallback", requested=mode, fallback="cleaned")
+            mode = "cleaned"
         cmd = _Command(
-            type=_CommandType.STREAM_FRAMES, frames=frames, fps=fps, done_event=done
+            type=_CommandType.STREAM_FRAMES,
+            frames=frames,
+            fps=fps,
+            playback_mode=mode,
+            done_event=done,
         )
         self._command_queue.put(cmd)
         return done
@@ -239,6 +248,8 @@ class MotionRuntime:
         # the spring has settled before signalling done.
         _stream_settling = False
         _stream_settle_timeout = 0.0
+        _stream_passthrough = False
+        _stream_enable_overlap = self._config.overlapping_action
 
         # --- Move-to completion tracking ---
         _initial_distance = 0.0
@@ -275,6 +286,8 @@ class MotionRuntime:
                     self._current_target = None
                     _stream_frames = []
                     _current_stream_target = {}
+                    _stream_passthrough = False
+                    _stream_enable_overlap = self._config.overlapping_action
                     _anticipation_final_target = None
                     _anticipation_ticks_remaining = 0
                     if _active_done:
@@ -289,6 +302,8 @@ class MotionRuntime:
                     self._current_target = None
                     _stream_frames = []
                     _current_stream_target = {}
+                    _stream_passthrough = False
+                    _stream_enable_overlap = self._config.overlapping_action
                     _anticipation_final_target = None
                     _anticipation_ticks_remaining = 0
                     # Springs decelerate naturally — no hard stop
@@ -428,6 +443,11 @@ class MotionRuntime:
                     _stream_idx = 0
                     _stream_accumulator = 0.0
                     _stream_fps = cmd.fps or 30
+                    cmd_mode = cmd.playback_mode or "cleaned"
+                    _stream_passthrough = cmd_mode == "raw"
+                    _stream_enable_overlap = (
+                        self._config.overlapping_action and cmd_mode == "expressive"
+                    )
                     _current_stream_target = (
                         dict(_stream_frames[0]) if _stream_frames else {}
                     )
@@ -435,7 +455,9 @@ class MotionRuntime:
                     _anticipation_final_target = None
                     _anticipation_ticks_remaining = 0
 
-                    # Switch springs to playback mode
+                    # Switch springs to playback mode for cleaned / expressive.
+                    # Raw mode preserves CSV frames and bypasses spring tracking
+                    # on streaming joints.
                     pf = self._config.spring_playback_f
                     pz = self._config.spring_playback_z
                     _spring_f = pf
@@ -444,14 +466,14 @@ class MotionRuntime:
                     for frame in _stream_frames:
                         all_frame_joints.update(frame.keys())
                     for joint in all_frame_joints:
-                        if joint in _springs:
-                            _springs[joint].set_params(pf, pz)
-                        else:
+                        if joint not in _springs:
                             _springs[joint] = SecondOrderDynamics(
                                 pf,
                                 pz,
                                 initial=self._current_state.get(joint, 0.0),
                             )
+                        if not _stream_passthrough:
+                            _springs[joint].set_params(pf, pz)
 
                     if _active_done:
                         _active_done.set()
@@ -548,6 +570,8 @@ class MotionRuntime:
 
             # --- Apply spring filter to all joints ---
             next_frame: dict[str, float] = {}
+            stream_active = bool(_stream_frames) or _stream_settling
+            passthrough_joints = _current_stream_target.keys() if (stream_active and _stream_passthrough) else ()
             for joint, target_pos in joint_targets.items():
                 if joint not in _springs:
                     _springs[joint] = SecondOrderDynamics(
@@ -555,10 +579,15 @@ class MotionRuntime:
                         _spring_z,
                         initial=self._current_state.get(joint, target_pos),
                     )
+                if joint in passthrough_joints:
+                    _springs[joint].sync_position(target_pos)
+                    next_frame[joint] = target_pos
+                    continue
                 next_frame[joint] = _springs[joint].update(target_pos, dt)
 
             # --- Overlapping Action (P2) ---
-            if self._config.overlapping_action and next_frame:
+            overlap_enabled = _stream_enable_overlap if stream_active else self._config.overlapping_action
+            if overlap_enabled and next_frame:
                 next_frame = self._apply_overlapping_action(
                     next_frame, _overlap_prev, _overlap_buffers
                 )
