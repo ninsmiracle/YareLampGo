@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 from typing import Any
 
 import structlog
@@ -35,6 +36,11 @@ async def _await_done(done_event, timeout: float) -> bool:
             return False
         await asyncio.sleep(0.02)
     return True
+
+
+def _jitter(value: float, ratio: float = 0.15) -> float:
+    """Apply ±ratio uniform random variation so repeated motions aren't identical."""
+    return value * (1.0 + random.uniform(-ratio, ratio))
 
 
 class NodSkill(Skill):
@@ -63,23 +69,22 @@ class NodSkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        amplitude = float(params.get("amplitude", 12.0))
-        speed = float(params.get("speed", 55.0))
+        amplitude = _jitter(float(params.get("amplitude", 12.0)))
+        speed = _jitter(float(params.get("speed", 55.0)))
         count = int(params.get("count", 3))
         base_pitch = ctx.state.get("base_pitch", 0.0)
 
-        # Approximate segment duration from amplitude + speed (safety extension in generator)
         seg_dur = max(0.04, amplitude / max(speed, 1.0))
 
         waypoints: list[tuple[dict[str, float], float]] = [
-            ({"base_pitch": base_pitch}, 0.0),  # start
+            ({"base_pitch": base_pitch}, 0.0),
         ]
-        for _ in range(count):
-            # Dip down
-            waypoints.append(({"base_pitch": base_pitch - amplitude}, seg_dur))
-            # Micro rebound (≈ 30 % upward overshoot for bouncy feel)
-            waypoints.append(({"base_pitch": base_pitch + amplitude * 0.3}, seg_dur * 0.5))
-        # Return to centre
+        for i in range(count):
+            nod_amp = amplitude * (1.0 + random.uniform(-0.1, 0.1))
+            rebound = random.uniform(0.2, 0.4)
+            nod_dur = seg_dur * (1.0 + random.uniform(-0.08, 0.08))
+            waypoints.append(({"base_pitch": base_pitch - nod_amp}, nod_dur))
+            waypoints.append(({"base_pitch": base_pitch + nod_amp * rebound}, nod_dur * 0.5))
         waypoints.append(({"base_pitch": base_pitch}, seg_dur))
 
         frames = generate_waypoint_frames(
@@ -130,18 +135,26 @@ class HeadShakeSkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        amplitude = float(params.get("amplitude", 15.0))
-        speed = float(params.get("speed", 65.0))
+        amplitude = _jitter(float(params.get("amplitude", 15.0)))
+        speed = _jitter(float(params.get("speed", 65.0)))
         count = int(params.get("count", 3))
         base_yaw = ctx.state.get("base_yaw", 0.0)
+        base_pitch = ctx.state.get("base_pitch", 0.0)
 
-        # Period from peak-velocity spec: 2π·A / T = speed → T = 2π·A / speed
         period = (2.0 * math.pi * amplitude) / max(speed, 1.0)
         duration = count * period
 
+        pitch_wobble = amplitude * random.uniform(0.06, 0.12)
         frames = generate_sine_frames(
-            base={"base_yaw": base_yaw},
-            axes={"base_yaw": {"amplitude": amplitude, "period": period, "phase": 0.0}},
+            base={"base_yaw": base_yaw, "base_pitch": base_pitch},
+            axes={
+                "base_yaw": {"amplitude": amplitude, "period": period, "phase": 0.0},
+                "base_pitch": {
+                    "amplitude": pitch_wobble,
+                    "period": period * 0.5,
+                    "phase": random.uniform(0.0, math.pi),
+                },
+            },
             duration=duration,
             fps=_FPS,
         )
@@ -315,11 +328,10 @@ class DanceSkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        speed = float(params.get("speed", 70.0))
+        speed = _jitter(float(params.get("speed", 70.0)))
         cycles = int(params.get("cycles", 4))
         raw_base = {j: ctx.state.get(j, 0.0) for j in ["base_yaw", "base_pitch", "wrist_roll"]}
 
-        # Clamp base position so offsets stay within joint limits
         base: dict[str, float] = {}
         for j, cur in raw_base.items():
             limits = DEFAULT_JOINT_LIMITS.get(j)
@@ -335,17 +347,17 @@ class DanceSkill(Skill):
         seg_dur = max(0.06, max_offset / max(speed, 1.0))
 
         waypoints: list[tuple[dict[str, float], float]] = [
-            (dict(base), 0.0),  # start
+            (dict(base), 0.0),
         ]
         for _ in range(cycles):
             for yaw_off, pitch_off, roll_off in self._STEPS:
                 waypoints.append((
                     {
-                        "base_yaw": base["base_yaw"] + yaw_off,
-                        "base_pitch": base["base_pitch"] + pitch_off,
-                        "wrist_roll": base["wrist_roll"] + roll_off,
+                        "base_yaw": base["base_yaw"] + _jitter(yaw_off, 0.12),
+                        "base_pitch": base["base_pitch"] + _jitter(pitch_off, 0.12),
+                        "wrist_roll": base["wrist_roll"] + _jitter(roll_off, 0.12),
                     },
-                    seg_dur,
+                    seg_dur * (1.0 + random.uniform(-0.08, 0.08)),
                 ))
         waypoints.append((dict(base), seg_dur))
 
