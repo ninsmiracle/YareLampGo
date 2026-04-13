@@ -105,16 +105,24 @@ MotionRuntime 对外暴露两种范式，选错会直接导致运动质量问题
 
 ### 范式二：Trajectory-based（轨迹驱动）
 
-**场景**：完整帧序列已知，系统直接逐帧执行，不做任何轨迹规划。
+**场景**：完整帧序列已知，系统不重建宏观轨迹，按帧目标驱动运行时执行。
 
 ```
-调用方  →  stream_frames(frames, fps)  →  SafetyKernel.clamp_positions（仅位置边界）  →  HAL
+调用方  →  stream_frames(frames, fps, playback_mode)
+       →  MotionRuntime（playback tracking / expressive modulation）
+       →  SafetyKernel.validate_frame
+       →  HAL（Goal_Position + Goal_Time）
 ```
 
 | API | 用途 |
 |-----|------|
-| `ctx.motion.stream_frames(frames, fps)` | 底层接口，返回 done_event |
+| `ctx.motion.stream_frames(frames, fps, playback_mode="cleaned")` | 底层接口，返回 done_event |
 | `ctx.play_frames(frames, fps)` | 封装了等待逻辑的高层接口（推荐） |
+
+**CSV 回放模式**（`play_recording.playback_mode`）：
+- `raw`：保留原始 CSV 帧目标，不启用 playback spring 与表达层；仍经过安全与 HAL
+- `cleaned`（默认）：启用 playback spring，关闭表达层；用于产品默认的平滑回放
+- `expressive`：启用 playback spring + 表达层（如 overlapping action）；用于演示
 
 **适用**：
 - CSV 录制回放（`play_recording`）——人手遥操作轨迹本身已含自然加减速，无需额外规划
