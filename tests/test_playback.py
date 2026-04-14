@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.motion
+
 from lampgo.core.config import LampgoConfig, MotionConfig, SafetyConfig
 from lampgo.core.events import EventBus
 from lampgo.core.led import LEDConfig, LEDController
@@ -111,9 +113,9 @@ async def test_play_recording_uses_stream_frames_not_move_to_waypoints(tmp_path,
     stream_calls: list = []
     original_stream = motion.stream_frames
 
-    def _capture_stream(frames, fps=30):
-        stream_calls.append((len(frames), fps))
-        return original_stream(frames, fps)
+    def _capture_stream(frames, fps=30, playback_mode="cleaned"):
+        stream_calls.append((len(frames), fps, playback_mode))
+        return original_stream(frames, fps, playback_mode=playback_mode)
 
     monkeypatch.setattr(motion, "stream_frames", _capture_stream)
 
@@ -128,9 +130,54 @@ async def test_play_recording_uses_stream_frames_not_move_to_waypoints(tmp_path,
         result = await skill.execute(ctx, name="wave")
         assert result.status == "ok"
         assert result.data["returned_safe"] is True
+        assert result.data["playback_mode"] == "cleaned"
         # stream_frames must be called exactly once with all 3 frames
         assert len(stream_calls) == 1
         assert stream_calls[0][0] == 3
+        assert stream_calls[0][2] == "cleaned"
+    finally:
+        motion.stop()
+
+
+@pytest.mark.asyncio
+async def test_play_recording_honors_playback_mode(tmp_path, monkeypatch):
+    path = tmp_path / "mode.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "timestamp,base_yaw.pos",
+                "0.0,0.0",
+                "0.1,3.0",
+            ]
+        )
+    )
+
+    hal = MockHAL()
+    hal.connect()
+    motion = MotionRuntime(hal, SafetyKernel(SafetyConfig()), MotionConfig(tick_rate_hz=100))
+    motion.start()
+
+    calls: list[str] = []
+    original_stream = motion.stream_frames
+
+    def _capture_stream(frames, fps=30, playback_mode="cleaned"):
+        calls.append(playback_mode)
+        return original_stream(frames, fps, playback_mode=playback_mode)
+
+    monkeypatch.setattr(motion, "stream_frames", _capture_stream)
+
+    try:
+        skill = PlayRecordingSkill(tmp_path)
+        ctx = SkillContext(
+            motion=motion,
+            led=LEDController(LEDConfig()),
+            events=EventBus(),
+            state=hal.read_positions(),
+        )
+        result = await skill.execute(ctx, name="mode", playback_mode="raw")
+        assert result.status == "ok"
+        assert result.data["playback_mode"] == "raw"
+        assert calls == ["raw"]
     finally:
         motion.stop()
 

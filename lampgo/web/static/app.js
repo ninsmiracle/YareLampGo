@@ -47,6 +47,7 @@
   const recordStartDesc = document.getElementById("record-start-desc");
   const recordTimer = document.getElementById("record-timer");
   const recordMetrics = document.getElementById("record-metrics");
+  const playbackModeButtons = Array.from(document.querySelectorAll("[data-playback-mode]"));
 
   const RECORDING_EXPRESSIONS = Object.freeze({
     angry_jerk: "angry",
@@ -151,8 +152,20 @@
   }
 
   const SIDEBAR_WIDTH_KEY = "lampgo.sidebarWidth";
+  const PLAYBACK_MODE_KEY = "lampgo.playbackMode";
   const SIDEBAR_MIN = 220;
   const SIDEBAR_DEFAULT = 284;
+  const PLAYBACK_MODES = new Set(["raw", "cleaned", "expressive"]);
+  let playbackMode = "cleaned";
+
+  function setPlaybackMode(mode) {
+    const nextMode = PLAYBACK_MODES.has(mode) ? mode : "cleaned";
+    playbackMode = nextMode;
+    playbackModeButtons.forEach((btn) => {
+      btn.classList.toggle("is-active", btn.dataset.playbackMode === nextMode);
+    });
+    localStorage.setItem(PLAYBACK_MODE_KEY, nextMode);
+  }
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -726,11 +739,15 @@
     const requestId = nextId();
     const bubble = addAssistantBubble(requestId);
     const expression = getRecordingExpression(name);
-    addStep(bubble.querySelector(".steps"), `播放录制动作 ${name} · 表情 ${expression}`, "active");
+    addStep(
+      bubble.querySelector(".steps"),
+      `播放录制动作 ${name} · 模式 ${playbackMode} · 表情 ${expression}`,
+      "active"
+    );
     send({
       type: "invoke",
       skill_id: "play_recording",
-      params: { name, expression },
+      params: { name, expression, playback_mode: playbackMode },
       wait: true,
       request_id: requestId,
     });
@@ -1274,6 +1291,14 @@
       appShell.classList.remove("is-resizing");
     });
   }
+
+  const savedPlaybackMode = localStorage.getItem(PLAYBACK_MODE_KEY) || "cleaned";
+  setPlaybackMode(savedPlaybackMode);
+  playbackModeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setPlaybackMode(btn.dataset.playbackMode || "cleaned");
+    });
+  });
 
   groupToggles.forEach((btn) => {
     btn.addEventListener("click", () => {

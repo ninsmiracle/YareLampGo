@@ -114,13 +114,65 @@ class HardwareAbstraction:
         raw = self._bus.sync_read("Present_Position")
         return JointState(positions=dict(raw), timestamp=time.monotonic())
 
-    def write_positions(self, positions: dict[str, float]) -> None:
+    def write_positions(self, positions: dict[str, float], move_time_ms: int = 0) -> None:
         if not self._connected:
             raise RuntimeError("HAL not connected")
         if self._bus is None:
             return
 
+        if move_time_ms > 0:
+            try:
+                self._sync_write_position_time(positions, move_time_ms)
+                return
+            except Exception:
+                logger.warning("hal.sync_write_position_time_failed", exc_info=True)
+
         self._bus.sync_write("Goal_Position", positions)
+
+    # Set to True after the first successful Goal_Position+Goal_Time sync write.
+    _goal_time_confirmed: bool = False
+
+    def _sync_write_position_time(self, positions: dict[str, float], move_time_ms: int) -> None:
+        """Write Goal_Position (addr 42, 2 B) + Goal_Time (addr 44, 2 B) in one sync-write packet.
+
+        Goal_Time tells the STS3215 internal interpolator to reach the target within
+        `move_time_ms` milliseconds, producing smooth motion instead of the default
+        "full-speed dash then hard stop" behaviour.
+        """
+        # degrees → raw counts (handles calibration, drive_mode, DEGREES norm mode)
+        raw_ids: dict[int, float] = self._bus._get_ids_values_dict(positions)
+        raw_pos: dict[int, int] = self._bus._unnormalize(raw_ids)
+        raw_pos = self._bus._encode_sign("Goal_Position", raw_pos)
+
+        time_val = max(0, min(int(move_time_ms), 0xFFFF))
+        time_bytes: list[int] = self._bus._serialize_data(time_val, 2)
+
+        sw = self._bus.sync_writer
+        sw.clearParam()
+        sw.start_address = 42   # Goal_Position register address
+        sw.data_length = 4      # 2 B position + 2 B time (consecutive registers)
+
+        for id_, raw in raw_pos.items():
+            pos_bytes: list[int] = self._bus._serialize_data(raw, 2)
+            sw.addParam(id_, pos_bytes + time_bytes)
+
+        comm = sw.txPacket()
+
+        if not HardwareAbstraction._goal_time_confirmed:
+            success = self._bus._is_comm_success(comm)
+            HardwareAbstraction._goal_time_confirmed = True
+            if success:
+                logger.info(
+                    "hal.goal_time_active",
+                    move_time_ms=time_val,
+                    motors=list(positions.keys()),
+                )
+            else:
+                logger.warning(
+                    "hal.goal_time_failed",
+                    comm_result=self._bus.packet_handler.getTxRxResult(comm),
+                    move_time_ms=time_val,
+                )
 
     def read_health(self) -> DeviceHealth:
         if not self._connected:
@@ -349,8 +401,8 @@ class HardwareAbstraction:
             self._safe_bus_write("Lock", motor, 0)
             self._safe_bus_write("Return_Delay_Time", motor, 0)
             if getattr(self._bus, "protocol_version", None) == 0:
-                self._safe_bus_write("Maximum_Acceleration", motor, 254)
-            self._safe_bus_write("Acceleration", motor, 254)
+                self._safe_bus_write("Maximum_Acceleration", motor, 50)
+            self._safe_bus_write("Acceleration", motor, 50)
             self._safe_bus_write("Operating_Mode", motor, OperatingMode.POSITION.value)
             self._safe_bus_write("P_Coefficient", motor, 16)
             self._safe_bus_write("I_Coefficient", motor, 0)

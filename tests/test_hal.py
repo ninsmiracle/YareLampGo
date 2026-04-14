@@ -1,6 +1,10 @@
 """Tests for HAL calibration-home derivation safeguards and motor checks."""
 from types import SimpleNamespace
 
+import pytest
+
+pytestmark = pytest.mark.motion
+
 from lampgo.core.config import DeviceConfig
 from lampgo.core.hal import HardwareAbstraction
 

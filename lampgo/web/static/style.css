@@ -296,6 +296,42 @@ button {
   margin-bottom: 10px;
 }
 
+.playback-mode-bar {
+  margin-bottom: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playback-mode-hint {
+  margin: -2px 0 10px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mode-chip {
+  border: 1px solid var(--border);
+  background: #fffaf7;
+  color: var(--text-soft);
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.mode-chip:hover {
+  background: #f7ece8;
+  color: #9b5d57;
+}
+
+.mode-chip.is-active {
+  background: #f0d9cc;
+  color: #7f413b;
+  border-color: #d9b8a4;
+}
+
 #btn-record-motion-panel {
   width: 100%;
 }

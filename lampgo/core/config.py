@@ -73,12 +73,64 @@ class MotionConfig(BaseModel):
         description="Biomimetic style preset when MotionTarget.style is unset (gentle|confident|curious|bouncy|hesitant|linear)",
     )
 
+    # --- Spring-damper playback settings (stream_frames path) ---
+    spring_playback_f: float = Field(
+        default=5.0,
+        gt=0,
+        description="Spring natural frequency (Hz) used during stream_frames playback. "
+        "Higher = tighter tracking; lower = more elastic feel.",
+    )
+    spring_playback_z: float = Field(
+        default=0.7,
+        gt=0,
+        description="Spring damping ratio during stream_frames. "
+        "0.7 = slight underdamp (micro-elasticity); 1.0 = critical (no overshoot).",
+    )
+
+    # --- Idle breathing ---
+    breathing_enabled: bool = Field(
+        default=True,
+        description="Enable slow sinusoidal micro-motion when arm is idle.",
+    )
+    breathing_amplitude: float = Field(
+        default=3.0,
+        ge=0,
+        description="Peak breathing oscillation amplitude in degrees (before per-joint scaling).",
+    )
+
+    # --- Overlapping Action (secondary joint coupling) ---
+    overlapping_action: bool = Field(
+        default=True,
+        description="Enable secondary joints to echo primary joint motion with a delay and reduced amplitude.",
+    )
+
+    # --- Anticipation (pre-motion windup) ---
+    anticipation_enabled: bool = Field(
+        default=True,
+        description="Before a large move, briefly move in the opposite direction (windup) for biological readability.",
+    )
+    anticipation_threshold: float = Field(
+        default=10.0,
+        gt=0,
+        description="Minimum move distance (degrees, max across joints) to trigger anticipation.",
+    )
+    anticipation_ratio: float = Field(
+        default=0.08,
+        gt=0,
+        description="Windup offset = move_distance * ratio (opposite direction).",
+    )
+    anticipation_duration_ms: int = Field(
+        default=120,
+        gt=0,
+        description="How long to hold the windup position before starting the main move (ms).",
+    )
+
 
 class SafetyConfig(BaseModel):
     """Safety kernel limits."""
 
     joint_limits: dict[str, JointLimits] = Field(default_factory=lambda: dict(DEFAULT_JOINT_LIMITS))
-    max_velocity: float = Field(default=180.0, gt=0, description="Hard velocity cap (deg/s)")
+    max_velocity: float = Field(default=120.0, gt=0, description="Hard velocity cap (deg/s)")
     max_acceleration: float = Field(default=900.0, gt=0, description="Hard acceleration cap (deg/s^2)")
 
 

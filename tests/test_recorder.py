@@ -3,6 +3,10 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.motion
+
 from lampgo.skills.recorder import TeachRecorder, compress_trajectory, smooth_trajectory
 from tests.conftest import MockHAL
 
