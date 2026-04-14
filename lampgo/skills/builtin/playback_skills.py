@@ -27,6 +27,7 @@ from lampgo.skills.builtin.motion_skills import get_safe_position
 logger = structlog.get_logger(__name__)
 
 RETURN_SAFE_TIMEOUT_S = 60.0
+PLAYBACK_MODES = {"raw", "cleaned", "expressive"}
 DEFAULT_RECORDING_FPS_OVERRIDES = {
     "celebrate": 9,
 }
@@ -93,6 +94,13 @@ class PlayRecordingSkill(Skill):
             required=False,
             description="Optional LED expression to apply before playback",
         ),
+        "playback_mode": ParameterSpec(
+            name="playback_mode",
+            type="str",
+            required=False,
+            default="cleaned",
+            description="Playback mode: raw / cleaned / expressive",
+        ),
     }
 
     _motion = None
@@ -106,6 +114,10 @@ class PlayRecordingSkill(Skill):
         if not name:
             return SkillResult(status="error", message="Recording name required")
         expression = str(params.get("expression", "")).strip()
+        playback_mode = str(params.get("playback_mode", "cleaned")).strip().lower() or "cleaned"
+        if playback_mode not in PLAYBACK_MODES:
+            logger.warning("playback.invalid_mode_fallback", requested=playback_mode, fallback="cleaned")
+            playback_mode = "cleaned"
 
         # User-created recordings (user/) shadow built-ins of the same name.
         user_path = self._recordings_dir / "user" / f"{name}.csv"
@@ -126,7 +138,7 @@ class PlayRecordingSkill(Skill):
             return SkillResult(status="error", message=f"Recording '{name}' has no valid frames")
 
         fps = int(params.get("fps", 0)) or DEFAULT_RECORDING_FPS_OVERRIDES.get(name, detected_fps)
-        logger.info("playback.start", name=name, frames=len(frames), fps=fps)
+        logger.info("playback.start", name=name, frames=len(frames), fps=fps, playback_mode=playback_mode)
 
         if expression:
             if ctx.led.is_connected:
@@ -140,7 +152,7 @@ class PlayRecordingSkill(Skill):
             # Trajectory-based: stream the full frame sequence at original FPS.
             # The recorded human motion already contains natural acceleration/deceleration;
             # no style easing is applied on top.
-            done = ctx.motion.stream_frames(frames, fps=fps)
+            done = ctx.motion.stream_frames(frames, fps=fps, playback_mode=playback_mode)
             timeout = len(frames) / max(fps, 1) + 5.0
             if not await _await_done(done, timeout=timeout):
                 logger.warning("playback.timeout", name=name, frames=len(frames), fps=fps)
@@ -163,6 +175,7 @@ class PlayRecordingSkill(Skill):
                 "name": name,
                 "frames": len(frames),
                 "fps": fps,
+                "playback_mode": playback_mode,
                 "expression": expression or None,
                 "returned_safe": True,
             },

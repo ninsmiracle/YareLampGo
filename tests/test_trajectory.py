@@ -6,6 +6,8 @@ import math
 
 import pytest
 
+pytestmark = pytest.mark.motion
+
 from lampgo.core.trajectory import (
     _safe_period,
     _sine_peak_velocity,

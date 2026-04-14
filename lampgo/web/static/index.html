@@ -67,6 +67,12 @@
             <div class="record-action-bar">
               <button id="btn-record-motion-panel" class="ghost-button" type="button">录制动作</button>
             </div>
+            <div class="playback-mode-bar" role="group" aria-label="录制回放模式">
+              <button class="mode-chip is-active" type="button" data-playback-mode="cleaned">cleaned</button>
+              <button class="mode-chip" type="button" data-playback-mode="raw">raw</button>
+              <button class="mode-chip" type="button" data-playback-mode="expressive">expressive</button>
+            </div>
+            <div class="playback-mode-hint">推荐使用 cleaned（默认）：保留动作节奏并做轻量平滑；expressive 额外叠加表现层。</div>
             <div id="recording-grid" class="skill-grid"></div>
           </div>
         </div>
