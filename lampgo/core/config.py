@@ -270,6 +270,8 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
         "LAMPGO_MOTOR_PORT": ("device", "motor_port"),
         "LAMPGO_LED_PORT": ("device", "led_port"),
         "LAMPGO_LAMP_ID": ("device", "lamp_id"),
+        "LAMPGO_MOTION_DEFAULT_MAX_VELOCITY": ("motion", "default_max_velocity"),
+        "LAMPGO_SAFETY_MAX_VELOCITY": ("safety", "max_velocity"),
         "LAMPGO_LLM_API_KEY": ("llm", "api_key"),
         "LAMPGO_LLM_API_BASE": ("llm", "api_base"),
         "LAMPGO_LLM_PROVIDER": ("llm", "provider"),

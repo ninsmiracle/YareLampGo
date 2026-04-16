@@ -98,6 +98,7 @@ class SafetyKernel:
         current: JointState,
         next_frame: dict[str, float],
         dt: float,
+        clip_events: list[dict[str, float | str]] | None = None,
     ) -> dict[str, float]:
         """Clamp a single interpolation frame in-place. Always returns a safe
         frame — never raises, never skips. Called from the control thread."""
@@ -115,12 +116,37 @@ class SafetyKernel:
 
             if dt > 0:
                 prev = current.get(joint, value)
-                velocity = abs(value - prev) / dt
-                if velocity > self._config.max_velocity:
+                raw_velocity = abs(value - prev) / dt
+                if raw_velocity > self._config.max_velocity:
+                    requested = value
                     direction = 1.0 if value > prev else -1.0
                     value = prev + direction * self._config.max_velocity * dt
                     value = max(limits.min, min(limits.max, value))
-                    logger.debug("safety.velocity_clamped", joint=joint, vel=velocity)
+                    clamped_velocity = abs(value - prev) / dt
+                    retained_ratio = (
+                        clamped_velocity / raw_velocity if raw_velocity > 1e-9 else 1.0
+                    )
+                    clip_ratio = 1.0 - retained_ratio
+                    if clip_events is not None:
+                        clip_events.append(
+                            {
+                                "joint": joint,
+                                "requested_velocity": raw_velocity,
+                                "allowed_velocity": clamped_velocity,
+                                "retained_ratio": retained_ratio,
+                                "clip_ratio": clip_ratio,
+                                "requested_value": requested,
+                                "clamped_value": value,
+                            }
+                        )
+                    logger.debug(
+                        "safety.velocity_clamped",
+                        joint=joint,
+                        requested_velocity=raw_velocity,
+                        allowed_velocity=clamped_velocity,
+                        retained_ratio=retained_ratio,
+                        clip_ratio=clip_ratio,
+                    )
 
             safe[joint] = value
 
