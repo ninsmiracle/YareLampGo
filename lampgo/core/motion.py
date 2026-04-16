@@ -250,6 +250,9 @@ class MotionRuntime:
         _stream_settle_timeout = 0.0
         _stream_passthrough = False
         _stream_enable_overlap = self._config.overlapping_action
+        _stream_clip_window_start = time.monotonic()
+        _stream_clipped_joints_in_window: set[str] = set()
+        _stream_clip_events_in_window = 0
 
         # --- Move-to completion tracking ---
         _initial_distance = 0.0
@@ -594,9 +597,33 @@ class MotionRuntime:
             _overlap_prev = dict(next_frame)
 
             # --- Safety validate and write (unified path for all sources) ---
+            clip_events: list[dict[str, float | str]] = []
             safe_frame = self._safety.validate_frame(
-                self._current_state, next_frame, dt
+                self._current_state, next_frame, dt, clip_events=clip_events
             )
+            if stream_active and clip_events:
+                _stream_clip_events_in_window += len(clip_events)
+                _stream_clipped_joints_in_window.update(
+                    str(event["joint"]) for event in clip_events
+                )
+            now = time.monotonic()
+            window_elapsed = now - _stream_clip_window_start
+            should_flush_stream_clip_log = (
+                window_elapsed >= 1.0
+                or (not stream_active and _stream_clip_events_in_window > 0)
+            )
+            if should_flush_stream_clip_log:
+                if _stream_clip_events_in_window > 0:
+                    logger.warning(
+                        "motion.stream_velocity_clipped_summary",
+                        window_seconds=round(window_elapsed, 3),
+                        clipped_joint_count=len(_stream_clipped_joints_in_window),
+                        clipped_joints=sorted(_stream_clipped_joints_in_window),
+                        clip_event_count=_stream_clip_events_in_window,
+                    )
+                _stream_clip_window_start = now
+                _stream_clipped_joints_in_window.clear()
+                _stream_clip_events_in_window = 0
 
             # Sync spring positions when safety clamped significantly,
             # so the filter does not race ahead of the real arm.
