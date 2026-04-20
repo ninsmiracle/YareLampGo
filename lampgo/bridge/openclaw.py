@@ -28,6 +28,31 @@ logger = structlog.get_logger(__name__)
 INNOVATION_MARKERS = ("创新", "新动作", "表演", "编一个", "设计一个", "原创", "即兴", "新舞", "动作")
 LOGIC_MARKERS = ("技能", "逻辑", "自动", "模式", "工作流", "代码")
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_NOISE_PREFIXES = ("[plugins]", "[debug]", "[info]", "[agent]", "[provider]")
+
+
+def _clean_openclaw_output(text: str, *, tail_limit: int = 1200) -> str:
+    """Strip ANSI escape codes and drop common plugin/debug noise lines."""
+    if not text:
+        return ""
+    cleaned = _ANSI_RE.sub("", text)
+    lines: list[str] = []
+    for raw in cleaned.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        stripped = line.lstrip()
+        if any(stripped.startswith(prefix) for prefix in _NOISE_PREFIXES):
+            continue
+        lines.append(line)
+    if not lines:
+        return cleaned.strip()
+    joined = "\n".join(lines).strip()
+    if len(joined) > tail_limit:
+        joined = "…\n" + joined[-tail_limit:]
+    return joined
+
 
 @dataclass
 class PromotionProposal:
@@ -237,10 +262,12 @@ class OpenClawAdapter:
                 return
             if result.ok:
                 task.status = "completed"
-                task.detail = f"OpenClaw 执行完成。{result.stdout[:200] if result.stdout else ''}"
+                cleaned = _clean_openclaw_output(result.stdout)
+                task.detail = f"OpenClaw 执行完成。\n{cleaned}".strip()
             else:
                 task.status = "failed"
-                task.detail = f"OpenClaw 执行失败: {result.stderr[:200] or result.stdout[:200]}"
+                cleaned = _clean_openclaw_output(result.stderr or result.stdout)
+                task.detail = f"OpenClaw 执行失败\n{cleaned}".strip()
             task.updated_at = time.time()
         await self._publish_task_update(task)
 
@@ -256,6 +283,8 @@ class OpenClawAdapter:
         await self._publish_task_update(task)
         task_snapshot: dict[str, Any] | None = None
         proposal_snapshot: dict[str, Any] | None = None
+        run_direct = False
+        direct_user_text = ""
 
         async with self._lock:
             task = self._tasks.get(task_id)
@@ -263,9 +292,11 @@ class OpenClawAdapter:
                 return
             proposal = self._build_proposal(task, payload)
             if proposal is None:
-                task.status = "queued"
-                task.detail = "已提交给 OpenClaw 外部编排器，等待进一步执行。"
+                task.status = "executing_with_existing_tools"
+                task.detail = "未命中沉淀规则，直接交给 OpenClaw Agent 处理..."
                 task.updated_at = time.time()
+                run_direct = True
+                direct_user_text = task.user_text
             else:
                 task.proposals.append(proposal)
                 task.status = "awaiting_promotion_confirmation"
@@ -276,15 +307,57 @@ class OpenClawAdapter:
 
         await self._publish_task_update(task)
 
-        await self._events.publish(
-            OpenClawPromotionRequested(
-                request_id=payload.get("request_id", ""),
-                task_id=task_id,
-                proposal=proposal_snapshot or {},
-                task=task_snapshot or {},
+        if proposal is not None:
+            await self._events.publish(
+                OpenClawPromotionRequested(
+                    request_id=payload.get("request_id", ""),
+                    task_id=task_id,
+                    proposal=proposal_snapshot or {},
+                    task=task_snapshot or {},
+                )
             )
-        )
+
+        if run_direct and direct_user_text:
+            asyncio.create_task(self._execute_direct(task_id, direct_user_text))
         return
+
+    async def _execute_direct(self, task_id: str, user_text: str) -> None:
+        """Run OpenClaw agent directly when no promotion proposal is required."""
+        message = (
+            f"用户任务：{user_text}\n"
+            "指令：请直接完成该任务。如果需要操作 lampgo 机器人（动作/表情/状态/录制），"
+            "请使用 lampgo plugin tools（lampgo_status / lampgo_move / lampgo_expression / "
+            "lampgo_save_recording 等）。如需用户澄清，请调用 lampgo_ask_user。"
+        )
+        logger.info("openclaw.executing_direct", task_id=task_id, message_preview=message[:120])
+        try:
+            result = await run_openclaw_agent(message, thinking="high")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("openclaw.execute_direct_failed", task_id=task_id)
+            async with self._lock:
+                task = self._tasks.get(task_id)
+                if task is None:
+                    return
+                task.status = "failed"
+                task.detail = f"OpenClaw 调用异常：{exc}"
+                task.updated_at = time.time()
+            await self._publish_task_update(task)
+            return
+
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            if result.ok:
+                task.status = "completed"
+                cleaned = _clean_openclaw_output(result.stdout)
+                task.detail = cleaned or "OpenClaw 已执行完成。"
+            else:
+                task.status = "failed"
+                cleaned = _clean_openclaw_output(result.stderr or result.stdout)
+                task.detail = f"OpenClaw 执行失败 (exit={result.exit_code})\n{cleaned}".strip()
+            task.updated_at = time.time()
+        await self._publish_task_update(task)
 
     async def _publish_task_update(self, task: OpenClawTask) -> None:
         snapshot = task.to_dict()
