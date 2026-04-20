@@ -4,167 +4,282 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>lampgo 控制台</title>
-  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="left-rail">
-      <div class="brand-card">
-        <div class="brand-mark">
-          <img src="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg" alt="lampgo 头像" class="brand-avatar">
+  <div class="app-shell" data-view="chat">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="sidebar-brand-left">
+          <div class="brand-mark">
+            <img src="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg" alt="lampgo 头像" class="brand-avatar">
+          </div>
+          <div>
+            <div class="brand-title">lampgo</div>
+            <div class="brand-subtitle">v1.0</div>
+          </div>
         </div>
-        <div>
-          <div class="brand-title">lampgo</div>
-          <div class="brand-subtitle">Robot console</div>
+        <div id="conn-badge" class="connection-chip is-offline" title="与 lampgo 服务的连接状态">
+          <span class="connection-dot is-offline" id="conn-dot"></span>
+          <span id="conn-text">未连接</span>
         </div>
       </div>
 
-      <div class="nav-card">
-        <button class="nav-item nav-item-active" type="button">聊天</button>
-        <button class="nav-item" id="btn-open-events" type="button">活动流</button>
+      <div class="sidebar-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input id="history-search" type="text" placeholder="搜索会话" autocomplete="off">
       </div>
 
-      <section class="panel-card">
-        <div class="panel-title">设备状态</div>
-        <div id="status-panel" class="status-list">
-          <div>健康 <span id="st-health" class="status-value status-neutral">--</span></div>
-          <div>忙碌 <span id="st-busy" class="status-value status-neutral">--</span></div>
-          <div>当前技能 <span id="st-skill" class="status-value status-neutral">--</span></div>
-          <div>急停 <span id="st-estop" class="status-value status-neutral">--</span></div>
+      <nav class="sidebar-nav">
+        <button class="nav-item is-active" type="button" data-view="chat" data-action="new-chat">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          </span>
+          <span class="nav-label">新建聊天</span>
+        </button>
+        <button class="nav-item" type="button" data-view="skills">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 14.8 7.2 16.9l.9-5.4L4.2 7.7l5.4-.8L12 2z"/></svg>
+          </span>
+          <span class="nav-label">技能</span>
+        </button>
+        <button class="nav-item" type="button" data-view="openclaw">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </span>
+          <span class="nav-label">OpenClaw</span>
+        </button>
+        <button class="nav-item" type="button" data-view="events">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+          </span>
+          <span class="nav-label">活动流</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">
+          <span>历史会话</span>
+          <button id="btn-history-clear" class="sidebar-mini-btn" type="button" title="清空历史">清空</button>
+        </div>
+        <div id="history-list" class="history-list">
+          <div class="history-empty">暂无历史记录</div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-user">
+          <div class="sidebar-user-avatar">T</div>
+          <div class="sidebar-user-name">test_user</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="chip-joint" class="device-chip is-offline" type="button" title="点击查看各关节实时角度">
+            <span class="device-chip-icon" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4M8 12a4 4 0 1 0 8 0 4 4 0 0 0-8 0zm8 0h4"/></svg>
+            </span>
+            <span class="device-chip-label">关节角度</span>
+            <span class="device-chip-dot is-offline" id="chip-joint-dot"></span>
+          </button>
+          <div id="chip-camera" class="device-chip is-offline" title="摄像头状态">
+            <span class="device-chip-icon" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </span>
+            <span class="device-chip-label">摄像头</span>
+            <span class="device-chip-dot is-offline" id="chip-camera-dot"></span>
+          </div>
+          <div id="chip-mic" class="device-chip is-offline" title="麦克风状态">
+            <span class="device-chip-icon" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+            </span>
+            <span class="device-chip-label">麦克风</span>
+            <span class="device-chip-dot is-offline" id="chip-mic-dot"></span>
+          </div>
+          <div id="chip-led" class="device-chip is-offline" title="LED 灯光状态">
+            <span class="device-chip-icon" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+            </span>
+            <span class="device-chip-label">LED 灯光</span>
+            <span class="device-chip-dot is-offline" id="chip-led-dot"></span>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <button id="btn-estop" class="danger-button" type="button">E-STOP</button>
+        </div>
+      </header>
+
+      <section class="view" data-view="chat">
+        <div class="chat-card">
+          <div id="chat-messages" class="chat-messages">
+            <div id="empty-state" class="empty-state">
+              <div class="empty-state-emoji">
+                <img src="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg" alt="lampgo" class="empty-state-avatar">
+              </div>
+              <div class="empty-state-title">Hi，我是 lampgo</div>
+              <div class="empty-state-body">告诉我做点什么吧，比如「点个头」「看看我」或者直接说出复杂任务。</div>
+              <div class="empty-state-hints">
+                <button class="hint-chip" type="button" data-prompt="做一个点头的动作">做个点头</button>
+                <button class="hint-chip" type="button" data-prompt="切换到开心的表情">切换表情</button>
+                <button class="hint-chip" type="button" data-prompt="帮我分析下桌面上有什么">分析现场</button>
+                <button class="hint-chip" type="button" data-prompt="回到安全位置">回到安全位</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="composer-wrap">
+            <form id="chat-form" class="composer">
+              <div class="mic-group">
+                <button id="btn-mic" class="mic-button" type="button" title="语音输入">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                </button>
+                <select id="mic-select" class="mic-select" title="选择麦克风">
+                  <option value="">默认麦克风</option>
+                </select>
+              </div>
+              <input
+                id="chat-input"
+                type="text"
+                placeholder="输入指令，例如：做个点头的动作"
+                autocomplete="off"
+                class="composer-input"
+              >
+              <div id="voice-wave" class="voice-wave hidden">
+                <canvas id="voice-canvas" class="voice-canvas"></canvas>
+                <span class="voice-hint">聆听中…</span>
+              </div>
+              <button id="btn-voice-cancel" class="voice-cancel-button hidden" type="button" title="取消录音">取消</button>
+              <button id="btn-stop" class="stop-button hidden" type="button" title="停止当前任务">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                停止
+              </button>
+              <button class="send-button" type="submit">发送</button>
+            </form>
+          </div>
         </div>
       </section>
 
-      <section class="panel-card">
-        <div class="panel-title">关节角度</div>
-        <div id="joint-panel" class="joint-panel"></div>
+      <section class="view hidden" data-view="skills">
+        <div class="view-header">
+          <div>
+            <div class="view-title">技能</div>
+            <div class="view-subtitle">内置技能、录制动作与灯光表情</div>
+          </div>
+          <div class="view-header-actions">
+            <div class="playback-mode-bar" role="group" aria-label="录制回放模式">
+              <span class="playback-mode-label">回放模式</span>
+              <button class="mode-chip is-active" type="button" data-playback-mode="cleaned">cleaned</button>
+              <button class="mode-chip" type="button" data-playback-mode="raw">raw</button>
+              <button class="mode-chip" type="button" data-playback-mode="expressive">expressive</button>
+            </div>
+            <button id="btn-record-motion-panel" class="ghost-button" type="button">录制动作</button>
+          </div>
+        </div>
+
+        <div class="skills-scroll">
+          <div class="skill-section">
+            <div class="skill-section-head">
+              <div>
+                <div class="skill-section-title">内置技能</div>
+                <div class="skill-section-desc">服务端注册的确定性技能，可直接调用。</div>
+              </div>
+              <div class="skill-section-count" id="skill-count">0</div>
+            </div>
+            <div class="skill-section-search">
+              <input id="skill-search" type="search" class="skill-search-input" placeholder="搜索技能（名称 / 描述）" autocomplete="off" />
+              <button type="button" class="skill-search-clear" data-target="skill-search" aria-label="清空搜索">×</button>
+            </div>
+            <div id="skill-grid" class="skill-card-grid"></div>
+          </div>
+
+          <div class="skill-section">
+            <div class="skill-section-head">
+              <div>
+                <div class="skill-section-title">录制动作</div>
+                <div class="skill-section-desc">
+                  关闭电机力矩后手动掰动关节采集的动作。推荐 cleaned：保留节奏并轻量平滑；expressive 额外叠加表现层。
+                </div>
+              </div>
+              <div class="skill-section-count" id="recording-count">0</div>
+            </div>
+            <div class="skill-section-search">
+              <input id="recording-search" type="search" class="skill-search-input" placeholder="搜索录制动作（名称 / 表情）" autocomplete="off" />
+              <button type="button" class="skill-search-clear" data-target="recording-search" aria-label="清空搜索">×</button>
+            </div>
+            <div id="recording-grid" class="skill-card-grid"></div>
+          </div>
+
+          <div class="skill-section">
+            <div class="skill-section-head">
+              <div>
+                <div class="skill-section-title">灯光表情</div>
+                <div class="skill-section-desc">通过 LED 灯阵呈现的情绪表达。</div>
+              </div>
+              <div class="skill-section-count" id="expression-count">0</div>
+            </div>
+            <div class="skill-section-search">
+              <input id="expression-search" type="search" class="skill-search-input" placeholder="搜索灯光表情" autocomplete="off" />
+              <button type="button" class="skill-search-clear" data-target="expression-search" aria-label="清空搜索">×</button>
+            </div>
+            <div id="expression-grid" class="skill-card-grid"></div>
+          </div>
+        </div>
       </section>
 
-      <section class="panel-card">
-        <div class="panel-title">OpenClaw 任务</div>
+      <section class="view hidden" data-view="openclaw">
+        <div class="view-header">
+          <div>
+            <div class="view-title">OpenClaw</div>
+            <div class="view-subtitle">复杂任务的规划、沉淀与执行历史</div>
+          </div>
+          <button id="btn-refresh-openclaw" class="ghost-button" type="button">刷新</button>
+        </div>
+
+        <div class="openclaw-summary">
+          <div class="summary-card">
+            <div class="summary-label">排队中</div>
+            <div class="summary-value" id="oc-count-queued">0</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">进行中</div>
+            <div class="summary-value" id="oc-count-running">0</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">待确认</div>
+            <div class="summary-value" id="oc-count-awaiting">0</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">已沉淀</div>
+            <div class="summary-value" id="oc-count-promoted">0</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">失败</div>
+            <div class="summary-value" id="oc-count-failed">0</div>
+          </div>
+        </div>
+
         <div id="openclaw-task-list" class="openclaw-task-list">
           <div class="openclaw-empty">暂无复杂任务</div>
         </div>
       </section>
 
-      <section class="panel-card panel-grow">
-        <div class="panel-title">动作面板</div>
-        <div class="action-group" data-group="skills">
-          <button class="group-header" type="button" data-toggle-group="skills" aria-expanded="true">
-            <span class="group-title">内置技能</span>
-            <span class="group-arrow">▾</span>
-          </button>
-          <div class="group-body" data-group-body="skills">
-            <div id="skill-grid" class="skill-grid"></div>
+      <section class="view hidden" data-view="events">
+        <div class="view-header">
+          <div>
+            <div class="view-title">活动流</div>
+            <div class="view-subtitle">实时事件与执行记录</div>
           </div>
-        </div>
-        <div class="action-group" data-group="recordings">
-          <button class="group-header" type="button" data-toggle-group="recordings" aria-expanded="true">
-            <span class="group-title">录制动作</span>
-            <span class="group-arrow">▾</span>
-          </button>
-          <div class="group-body" data-group-body="recordings">
-            <div class="record-action-bar">
-              <button id="btn-record-motion-panel" class="ghost-button" type="button">录制动作</button>
-            </div>
-            <div class="playback-mode-bar" role="group" aria-label="录制回放模式">
-              <button class="mode-chip is-active" type="button" data-playback-mode="cleaned">cleaned</button>
-              <button class="mode-chip" type="button" data-playback-mode="raw">raw</button>
-              <button class="mode-chip" type="button" data-playback-mode="expressive">expressive</button>
-            </div>
-            <div class="playback-mode-hint">推荐使用 cleaned（默认）：保留动作节奏并做轻量平滑；expressive 额外叠加表现层。</div>
-            <div id="recording-grid" class="skill-grid"></div>
-          </div>
-        </div>
-        <div class="action-group" data-group="expressions">
-          <button class="group-header" type="button" data-toggle-group="expressions" aria-expanded="false">
-            <span class="group-title">灯光表情</span>
-            <span class="group-arrow">▾</span>
-          </button>
-          <div class="group-body group-collapsed" data-group-body="expressions">
-            <div id="expression-grid" class="skill-grid"></div>
-          </div>
-        </div>
-      </section>
-    </aside>
-
-    <div
-      id="pane-resizer"
-      class="pane-resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="调整侧栏宽度"
-      title="拖动调整左侧区域宽度"
-    ></div>
-
-    <main class="workspace">
-      <header class="workspace-header">
-        <div>
-          <div class="workspace-title">聊天</div>
-          <div class="workspace-subtitle">发送自然语言指令，查看每一步执行状态</div>
+          <button id="btn-clear-events" class="ghost-button" type="button">清空</button>
         </div>
 
-        <div class="workspace-actions">
-          <div id="conn-badge" class="connection-chip">
-            <span class="connection-dot is-offline" id="conn-dot"></span>
-            <span id="conn-text">未连接</span>
-          </div>
-          <button id="btn-record-motion" class="ghost-button" type="button">录制动作</button>
-          <button id="btn-estop" class="danger-button" type="button">E-STOP</button>
-        </div>
-      </header>
-
-      <section class="chat-card">
-        <div id="chat-messages" class="chat-messages">
-          <div id="empty-state" class="empty-state">
-            <div class="empty-state-title">开始一次对话</div>
-            <div class="empty-state-body">例如输入“做个点头的动作”或“回到安全位置”。</div>
-          </div>
-        </div>
-
-        <div class="composer-wrap">
-          <form id="chat-form" class="composer">
-            <div class="mic-group">
-              <button id="btn-mic" class="mic-button" type="button" title="语音输入">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-              </button>
-              <select id="mic-select" class="mic-select" title="选择麦克风">
-                <option value="">默认麦克风</option>
-              </select>
-            </div>
-            <input
-              id="chat-input"
-              type="text"
-              placeholder="输入指令，例如：做个点头的动作"
-              autocomplete="off"
-              class="composer-input"
-            >
-            <div id="voice-wave" class="voice-wave hidden">
-              <canvas id="voice-canvas" class="voice-canvas"></canvas>
-              <span class="voice-hint">聆听中…</span>
-            </div>
-            <button id="btn-voice-cancel" class="voice-cancel-button hidden" type="button" title="取消录音">取消</button>
-            <button id="btn-stop" class="stop-button hidden" type="button" title="停止当前任务">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-              停止
-            </button>
-            <button class="send-button" type="submit">发送</button>
-          </form>
-        </div>
+        <div id="event-log" class="event-log"></div>
       </section>
     </main>
   </div>
-
-  <aside id="event-drawer" class="event-drawer hidden">
-    <div class="event-drawer-header">
-      <div>
-        <div class="drawer-title">活动流</div>
-        <div class="drawer-subtitle">实时事件与执行记录</div>
-      </div>
-      <button id="btn-close-drawer" class="drawer-close" type="button">&times;</button>
-    </div>
-    <div id="event-log" class="event-log"></div>
-  </aside>
 
   <dialog id="record-name-dialog" class="record-dialog">
     <form id="record-name-form" method="dialog" class="record-dialog-card">

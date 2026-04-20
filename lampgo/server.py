@@ -164,6 +164,12 @@ class LampgoServer:
         if cmd == "recording_discard":
             return await self.discard_recording_session()
 
+        if cmd == "list_cameras":
+            return self._handle_list_cameras()
+
+        if cmd == "set_camera":
+            return self._handle_set_camera(str(data.get("port", "")))
+
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
     async def openclaw_ask_user(
@@ -485,6 +491,11 @@ class LampgoServer:
                 ),
                 on_progress=_publish_intent_progress,
                 joint_state=self.motion.current_state.positions,
+                publish_tool_event=lambda phase, **kwargs: self._publish_inline_tool_event(
+                    request_id=request_id,
+                    phase=phase,
+                    **kwargs,
+                ),
             )
             if agent_result.intent_type == "complex":
                 await self.events.publish(
@@ -709,6 +720,68 @@ class LampgoServer:
         )
         return tool_payload
 
+    async def _publish_inline_tool_event(
+        self,
+        *,
+        request_id: str,
+        phase: str,
+        turn_index: int,
+        tool_index: int,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        status: str = "",
+        error: str | None = None,
+    ) -> None:
+        """Emit ToolCallPlanned/Finished for inline tools handled inside the LLM client.
+
+        Tools like ``web_search`` / ``capture_image`` short-circuit inside
+        :class:`LlmClient` and never touch ``_execute_agent_tool``; without this
+        bridge the frontend would never see a tool chip for them.
+        """
+        if phase == "planned":
+            await self.events.publish(
+                ToolCallPlanned(
+                    request_id=request_id,
+                    turn_index=turn_index,
+                    tool_index=tool_index,
+                    tool_name=tool_name,
+                    arguments=arguments or {},
+                )
+            )
+            logger.info(
+                "server.agent_inline_tool_planned",
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+            )
+            return
+
+        if phase == "finished":
+            summary = f"{tool_name} -> {status or 'ok'}"
+            if error:
+                summary = f"{summary}: {error}"
+            await self.events.publish(
+                ToolCallFinished(
+                    request_id=request_id,
+                    turn_index=turn_index,
+                    tool_index=tool_index,
+                    tool_name=tool_name,
+                    status=status or "ok",
+                    invocation_id=None,
+                    summary=summary,
+                    error=error,
+                )
+            )
+            logger.info(
+                "server.agent_inline_tool_finished",
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+                status=status or "ok",
+            )
+
     async def _handoff_to_openclaw(
         self,
         request_id: str,
@@ -839,6 +912,73 @@ class LampgoServer:
                 "estopped": self.safety.is_estopped(),
                 "estop_reason": self.safety.last_estop_reason,
                 "recording": self._record_status(),
+                "hal_connected": bool(self.hal.is_connected),
+                "led_ready": bool(self.led.is_connected),
+                "camera_ready": bool(self.config.camera.port.strip()),
+            },
+        }
+
+    def _handle_list_cameras(self) -> dict:
+        """Probe camera indices 0..3 and return availability + names.
+
+        Returns active port based on the in-memory config so the UI can highlight it.
+        """
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            return {
+                "ok": True,
+                "result": {
+                    "cameras": [],
+                    "active": self.config.camera.port,
+                    "available": False,
+                    "reason": "opencv-python not installed",
+                },
+            }
+
+        try:
+            from lampgo.autodetect import _list_camera_names  # type: ignore
+            names = _list_camera_names()
+        except Exception:
+            names = {}
+
+        import os
+        import cv2
+        cameras: list[dict[str, str]] = []
+        for idx in range(4):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            old_stderr = os.dup(2)
+            os.dup2(devnull, 2)
+            try:
+                cap = cv2.VideoCapture(idx)
+                opened = cap.isOpened()
+                cap.release()
+            finally:
+                os.dup2(old_stderr, 2)
+                os.close(devnull)
+                os.close(old_stderr)
+            if opened:
+                cameras.append({"port": str(idx), "name": names.get(idx, "") or f"camera_{idx}"})
+
+        return {
+            "ok": True,
+            "result": {
+                "cameras": cameras,
+                "active": self.config.camera.port,
+                "available": True,
+            },
+        }
+
+    def _handle_set_camera(self, port: str) -> dict:
+        """Update the active camera port in the in-memory config (runtime switch)."""
+        value = (port or "").strip()
+        self.config.camera.port = value
+        logger.info("camera.port_updated", port=value or "<disabled>")
+        return {
+            "ok": True,
+            "result": {
+                "active": self.config.camera.port,
+                "camera_ready": bool(value),
             },
         }
 
