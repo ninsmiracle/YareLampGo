@@ -421,6 +421,18 @@ class WebGateway:
             result["request_id"] = request_id
             await ws.send_json(result)
 
+        elif msg_type == "list_cameras":
+            result = self.server._handle_list_cameras()
+            result["type"] = "list_cameras"
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "set_camera":
+            result = self.server._handle_set_camera(str(msg.get("port", "")))
+            result["type"] = "set_camera"
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
         elif msg_type == "skills":
             result = self.server._handle_skills()
             result["request_id"] = request_id

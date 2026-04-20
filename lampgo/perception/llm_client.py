@@ -49,7 +49,22 @@ Rules:
 - For look_at, yaw and pitch are ABSOLUTE angles for base_yaw and base_pitch. To adjust camera tilt, use move_to with wrist_pitch.
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.
-- When the task is complete, call finish_response. Its message is a closing remark — do NOT repeat information you already said via say tool. Instead, give a brief wrap-up and then ask a follow-up question naturally related to what just happened, guiding the user toward something they might care about next. For example: if you checked weather and danced, say "跳完啦！今天天气这么好，要不要我帮你看看窗外？"; if you did a shy pose, say "害羞完啦～要不要看看我还会什么表情？"; if you scanned and found objects, say "都看完啦！要我凑近看看那个杯子吗？".
+- When the task is complete, call finish_response. Its message is ONLY a short conversational closer — NEVER a summary or restatement of facts.
+
+Finish_response anti-repetition rules (VERY IMPORTANT):
+- The user has ALREADY heard everything you spoke via the say tool (it was played as TTS). The final response text appears AFTER the voice, so repeating the same content is redundant and annoying.
+- NEVER restate factual content that already appeared in a say narration or a tool result you just narrated — this includes numbers, temperatures, names, weather conditions, object lists, query results, status values, distances, counts, identifiers, etc. Assume the user retained what you said aloud.
+- The finish_response message should be: (a) ≤ 20 Chinese characters (or ~12 English words) of a lightweight closer/emotive wrap-up with NO factual data, followed optionally by (b) one short follow-up question guiding the user to a next action.
+- Bad finish (repeats facts already said aloud):
+  say: "查到啦！今天北京是大晴天，最高24.7度，最低7.7度，西南风微风。"
+  finish: "今天北京是晴天，气温7.7~24.7℃，西南风微风，适合出门哦！要不要我帮你看看穿什么衣服？"  ← WRONG, repeats every fact.
+- Good finish (no repetition, just closer + forward-looking question):
+  finish: "天气挺好的呢～要不要我帮你看看穿什么衣服？"  ← correct.
+- More good examples:
+  - (after dance) "跳完啦！要不要再来一段？"
+  - (after scan) "扫完啦～要我凑近看看那个杯子吗？"
+  - (after shy pose) "害羞完啦～要看看我还会什么表情吗？"
+  - (after info lookup) "查好啦！还想知道别的吗？"
 - If the request is impossible or outside lampgo's abilities, call escalate_to_openclaw with a short reason.
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
@@ -185,10 +200,17 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
     tools.append(
         _build_function_tool(
             "finish_response",
-            "Finish the task and send a concise user-facing response",
+            "Finish the task and send a brief user-facing closer. This is spoken AFTER the say narrations — the user has already heard the facts you said aloud.",
             {
-                "message": {"type": "string", "description": "Final user-facing response"},
-                "summary": {"type": "string", "description": "Short summary of what was completed"},
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "Short closer only. MUST NOT restate facts (numbers, weather, names, query results, "
+                        "object lists, etc.) that already appeared in an earlier say call. Keep ≤ 20 Chinese chars "
+                        "of lightweight wrap-up plus one optional follow-up question."
+                    ),
+                },
+                "summary": {"type": "string", "description": "Short summary of what was completed (not shown to the user)"},
             },
             ["message"],
         )
@@ -248,6 +270,7 @@ class LLMClient:
         on_progress: Callable[[str, str, str], Awaitable[Any]] | None = None,
         joint_state: dict[str, float] | None = None,
         audio_data: str | None = None,
+        publish_tool_event: Callable[..., Awaitable[None]] | None = None,
     ) -> AgentLoopResult:
         """Run a bounded tool-calling loop until the model finishes or escalates.
 
@@ -474,10 +497,44 @@ class LLMClient:
                     tool_result = {"status": "ok", "result": {"spoken": True}}
                 elif tool_name == "web_search":
                     query = str(arguments.get("query", text)).strip()
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "planned",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                        )
                     tool_result = await self._handle_web_search(query)
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "finished",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            status=str(tool_result.get("status", "ok" if tool_result.get("ok") else "error")),
+                            error=tool_result.get("error"),
+                        )
                 elif tool_name == "capture_image":
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "planned",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                        )
                     tool_result = self._handle_capture_image(messages)
                     logger.info("llm_client.capture_image", has_image=tool_result.get("ok", False))
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "finished",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            status=str(tool_result.get("status", "ok" if tool_result.get("ok") else "error")),
+                            error=tool_result.get("error"),
+                        )
                 elif tool_name == "scan_and_capture":
                     tool_result = await self._handle_scan_and_capture(
                         arguments,
