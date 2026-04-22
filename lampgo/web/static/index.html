@@ -53,7 +53,13 @@
           <span class="nav-icon">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
           </span>
-          <span class="nav-label">活动流</span>
+          <span class="nav-label">日志</span>
+        </button>
+        <button class="nav-item" type="button" data-view="settings">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </span>
+          <span class="nav-label">配置</span>
         </button>
       </nav>
 
@@ -67,13 +73,19 @@
         </div>
       </div>
 
-      <div class="sidebar-footer">
-        <div class="sidebar-user">
-          <div class="sidebar-user-avatar">T</div>
-          <div class="sidebar-user-name">test_user</div>
-        </div>
-      </div>
     </aside>
+    <div
+      id="sidebar-resizer"
+      class="sidebar-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整侧边栏宽度"
+      aria-valuemin="200"
+      aria-valuemax="420"
+      aria-valuenow="232"
+      tabindex="0"
+      title="左右拖动调整侧边栏宽度"
+    ></div>
 
     <main class="main">
       <header class="topbar">
@@ -109,7 +121,7 @@
         </div>
 
         <div class="topbar-right">
-          <button id="btn-estop" class="danger-button" type="button">E-STOP</button>
+          <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">强行停止</button>
         </div>
       </header>
 
@@ -169,15 +181,6 @@
             <div class="view-title">技能</div>
             <div class="view-subtitle">内置技能、录制动作与灯光表情</div>
           </div>
-          <div class="view-header-actions">
-            <div class="playback-mode-bar" role="group" aria-label="录制回放模式">
-              <span class="playback-mode-label">回放模式</span>
-              <button class="mode-chip is-active" type="button" data-playback-mode="cleaned">cleaned</button>
-              <button class="mode-chip" type="button" data-playback-mode="raw">raw</button>
-              <button class="mode-chip" type="button" data-playback-mode="expressive">expressive</button>
-            </div>
-            <button id="btn-record-motion-panel" class="ghost-button" type="button">录制动作</button>
-          </div>
         </div>
 
         <div class="skills-scroll">
@@ -204,7 +207,16 @@
                   关闭电机力矩后手动掰动关节采集的动作。推荐 cleaned：保留节奏并轻量平滑；expressive 额外叠加表现层。
                 </div>
               </div>
-              <div class="skill-section-count" id="recording-count">0</div>
+              <div class="skill-section-actions">
+                <div class="playback-mode-bar" role="group" aria-label="录制回放模式">
+                  <span class="playback-mode-label">回放模式</span>
+                  <button class="mode-chip is-active" type="button" data-playback-mode="cleaned" title="平滑：对录制轨迹做平滑处理后回放（默认）">平滑</button>
+                  <button class="mode-chip" type="button" data-playback-mode="raw" title="原始：直接透传原始录制帧，不做处理">原始</button>
+                  <button class="mode-chip" type="button" data-playback-mode="expressive" title="表现力：允许动作重叠，回放更富表现力">表现力</button>
+                </div>
+                <button id="btn-record-motion-panel" class="ghost-button" type="button">录制动作</button>
+                <div class="skill-section-count" id="recording-count">0</div>
+              </div>
             </div>
             <div class="skill-section-search">
               <input id="recording-search" type="search" class="skill-search-input" placeholder="搜索录制动作（名称 / 表情）" autocomplete="off" />
@@ -236,8 +248,16 @@
             <div class="view-title">OpenClaw</div>
             <div class="view-subtitle">复杂任务的规划、沉淀与执行历史</div>
           </div>
-          <button id="btn-refresh-openclaw" class="ghost-button" type="button">刷新</button>
+          <div class="view-header-actions">
+            <button id="btn-openclaw-health-details" class="device-chip is-clickable" type="button" title="查看连接详情">
+              <span class="device-chip-dot" id="oc-health-dot"></span>
+              <span class="device-chip-label">检测中…</span>
+            </button>
+            <button id="btn-refresh-openclaw" class="ghost-button" type="button">刷新</button>
+          </div>
         </div>
+
+        <div id="openclaw-health-card" class="oc-health-card hidden"></div>
 
         <div class="openclaw-summary">
           <div class="summary-card">
@@ -270,13 +290,192 @@
       <section class="view hidden" data-view="events">
         <div class="view-header">
           <div>
-            <div class="view-title">活动流</div>
+            <div class="view-title">日志</div>
             <div class="view-subtitle">实时事件与执行记录</div>
           </div>
           <button id="btn-clear-events" class="ghost-button" type="button">清空</button>
         </div>
 
         <div id="event-log" class="event-log"></div>
+      </section>
+
+      <section class="view hidden" data-view="settings">
+        <div class="view-header">
+          <div>
+            <div class="view-title">配置</div>
+            <div class="view-subtitle">模型、人设与记忆。改完即时生效，不必重启。</div>
+          </div>
+          <div class="settings-tabs" role="tablist" aria-label="配置分类">
+            <button class="settings-tab is-active" type="button" data-settings-tab="model" role="tab">模型</button>
+            <button class="settings-tab" type="button" data-settings-tab="persona" role="tab">人设</button>
+            <button class="settings-tab" type="button" data-settings-tab="memory" role="tab">记忆</button>
+          </div>
+        </div>
+
+        <div class="settings-body">
+          <div class="settings-pane" data-settings-pane="model">
+            <div class="settings-card">
+              <div class="settings-card-title">LLM 模型</div>
+              <div class="settings-card-desc">选择 Provider 并填写 API 密钥；保存前会发一条 ping 校验连通性。</div>
+
+              <div class="settings-form">
+                <label class="settings-field">
+                  <span class="settings-field-label">Provider</span>
+                  <select id="cfg-llm-provider" class="settings-input">
+                    <option value="mimo">MiMo（小米）</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="google">Google</option>
+                    <option value="ollama">Ollama（本地）</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">Base URL</span>
+                  <input id="cfg-llm-base-url" class="settings-input" type="text" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off">
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">API Key</span>
+                  <input id="cfg-llm-api-key" class="settings-input" type="password" placeholder="sk-..." autocomplete="new-password">
+                  <span class="settings-field-hint">密钥保存在 <code>~/.lampgo/credentials.json</code>（权限 0600），不会写进 config。</span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">主模型（Model）</span>
+                  <input id="cfg-llm-model" class="settings-input" type="text" placeholder="mimo-v2-omni" autocomplete="off">
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">快速模型（Fast Model）</span>
+                  <input id="cfg-llm-fast-model" class="settings-input" type="text" placeholder="mimo-v2-omni" autocomplete="off">
+                  <span class="settings-field-hint">用于记忆总结等轻量任务，降低时延与成本。</span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">消息格式（Message Type）</span>
+                  <select id="cfg-llm-message-type" class="settings-input">
+                    <option value="openai">OpenAI 兼容（chat.completions）</option>
+                    <option value="anthropic">Anthropic Messages</option>
+                  </select>
+                  <span class="settings-field-hint">多数 Provider 选 OpenAI 兼容即可。</span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-llm-status" class="settings-status" aria-live="polite"></span>
+                <button id="btn-cfg-llm-test" class="ghost-button" type="button">测试连接</button>
+                <button id="btn-cfg-llm-save" class="send-button" type="button">保存并生效</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-pane hidden" data-settings-pane="persona">
+            <div class="settings-persona">
+              <aside class="settings-persona-list" role="tablist" aria-label="人设文件">
+                <div class="settings-persona-list-head">
+                  <div class="settings-persona-list-title">人设文件</div>
+                  <div class="settings-persona-list-head-actions">
+                    <button id="btn-persona-import" class="sidebar-mini-btn" type="button" title="从 OpenClaw 导入：只覆盖 PROFILE.md（关于主人的信息），保留台灯自己的 SOUL/AGENTS。记忆请在「记忆」页单独导入。">从 OpenClaw 导入</button>
+                    <button id="btn-persona-reset" class="sidebar-mini-btn is-ghost" type="button" title="恢复为出厂默认模板（会先自动备份）">恢复默认</button>
+                  </div>
+                </div>
+                <button class="persona-file is-active" type="button" data-persona-file="SOUL" role="tab">
+                  <span class="persona-file-name">SOUL.md</span>
+                  <span class="persona-file-desc">身份与核心原则</span>
+                </button>
+                <button class="persona-file" type="button" data-persona-file="AGENTS" role="tab">
+                  <span class="persona-file-name">AGENTS.md</span>
+                  <span class="persona-file-desc">工作流程和行为指南</span>
+                </button>
+                <button class="persona-file" type="button" data-persona-file="PROFILE" role="tab">
+                  <span class="persona-file-name">PROFILE.md</span>
+                  <span class="persona-file-desc">关于主人</span>
+                </button>
+              </aside>
+
+              <div class="settings-persona-editor">
+                <div class="settings-persona-editor-head">
+                  <span id="persona-editor-title" class="settings-persona-editor-title">SOUL.md</span>
+                  <button id="btn-persona-reload" class="sidebar-mini-btn is-ghost" type="button" title="从磁盘重新加载（如果你有未保存编辑会被冲掉）">刷新</button>
+                </div>
+                <textarea id="persona-editor" class="settings-textarea" spellcheck="false" placeholder="在这里编辑 Markdown 内容…"></textarea>
+                <div class="settings-actions">
+                  <span id="persona-editor-status" class="settings-status" aria-live="polite"></span>
+                  <button id="btn-persona-save" class="send-button" type="button">保存</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-pane hidden" data-settings-pane="memory">
+            <div class="settings-persona">
+              <aside class="settings-persona-list" role="tablist" aria-label="记忆分类">
+                <div class="settings-persona-list-head">
+                  <div class="settings-persona-list-title">记忆</div>
+                  <label class="settings-toggle" title="每次组 prompt 时额外读取 OpenClaw 的 MEMORY.md 与近 3 天日记">
+                    <input id="cfg-share-openclaw-memory" type="checkbox">
+                    <span>共享 OpenClaw</span>
+                  </label>
+                </div>
+                <button class="memory-section-item is-active" type="button" data-memory-section="core" role="tab">
+                  <span class="persona-file-name">核心记忆</span>
+                  <span class="persona-file-desc">长期关键事实，全量注入 prompt</span>
+                </button>
+                <button class="memory-section-item" type="button" data-memory-section="daily" role="tab">
+                  <span class="persona-file-name">每日记忆</span>
+                  <span class="persona-file-desc">按天归档摘要，近 3 天注入</span>
+                </button>
+              </aside>
+
+              <div class="settings-persona-editor">
+                <div data-memory-view="core" class="settings-memory-view">
+                  <div class="settings-persona-editor-head">
+                    <span class="settings-persona-editor-title">核心记忆 · MEMORY.md</span>
+                    <button id="btn-memory-core-reload" class="sidebar-mini-btn is-ghost" type="button" title="从磁盘重新加载（如果你有未保存编辑会被冲掉）">刷新</button>
+                  </div>
+                  <div class="settings-card-desc">永远全量注入 prompt 的结构化核心事实。写得尽量精炼。</div>
+                  <textarea id="memory-core-editor" class="settings-textarea" spellcheck="false" placeholder="# MEMORY.md — 长期记忆"></textarea>
+                  <div class="settings-actions">
+                    <span id="memory-core-status" class="settings-status" aria-live="polite"></span>
+                    <button id="btn-memory-core-import" class="ghost-button" type="button" title="从 ~/.openclaw/MEMORY.md 拷过来覆盖当前核心记忆（会先自动备份）">从 OpenClaw 导入</button>
+                    <button id="btn-memory-core-reset" class="ghost-button" type="button" title="恢复为出厂默认模板（会先自动备份）">恢复默认</button>
+                    <button id="btn-memory-core-save" class="send-button" type="button">保存</button>
+                  </div>
+                </div>
+
+                <div data-memory-view="daily" class="settings-memory-view hidden">
+                  <div class="settings-persona-editor-head">
+                    <span class="settings-persona-editor-title">每日记忆</span>
+                    <button id="btn-memory-daily-reload" class="sidebar-mini-btn is-ghost" type="button" title="从磁盘重新加载日期列表与当前内容">刷新</button>
+                  </div>
+                  <div class="settings-card-desc">按天归档的对话摘要，空闲 3 分钟后会话自动总结。近 3 天会注入 prompt。</div>
+                  <div class="settings-memory-daily">
+                    <div class="memory-daily-col">
+                      <div class="memory-daily-col-head">
+                        <span class="memory-daily-col-label">日期</span>
+                        <span id="memory-daily-count" class="memory-daily-col-meta"></span>
+                      </div>
+                      <div id="memory-daily-list" class="memory-daily-list">
+                        <div class="memory-daily-empty">暂无日记</div>
+                      </div>
+                    </div>
+                    <div class="memory-daily-col">
+                      <div class="memory-daily-col-head">
+                        <span id="memory-daily-title" class="memory-daily-col-label">选择日期查看</span>
+                        <span id="memory-daily-source" class="memory-daily-col-meta"></span>
+                      </div>
+                      <pre id="memory-daily-content" class="memory-daily-content">空闲 3 分钟后，今天的对话会被自动总结到这里。也可以让 OpenClaw 通过 lampgo_save_memory 写入。</pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
   </div>

@@ -86,6 +86,15 @@ class WsBridge:
 
     async def _on_event(self, event: Event) -> None:
         msg = self._serialize(event)
+        # Persist first — if the broadcast dies or the process crashes, the
+        # reconnecting client can still replay through /api/events.
+        try:
+            from lampgo import eventstore
+
+            seq = await eventstore.get_store().append(msg)
+            msg["seq"] = seq
+        except Exception:
+            logger.exception("ws_bridge.eventstore_append_failed", event=msg.get("event"))
         await self.broadcast(msg)
 
     async def broadcast(self, msg: dict[str, Any]) -> None:
@@ -104,7 +113,11 @@ class WsBridge:
                     self._clients.discard(ws)
 
     async def broadcast_status(self, status: dict[str, Any]) -> None:
-        """Push a periodic status snapshot to all clients."""
+        """Push a periodic status snapshot to all clients.
+
+        Status frames are not persisted — they are lightweight heartbeats and
+        would otherwise dominate the event log without adding history value.
+        """
         await self.broadcast({"type": "status", "data": status, "ts": time.time()})
 
     @staticmethod

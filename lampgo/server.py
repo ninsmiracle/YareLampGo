@@ -1076,6 +1076,35 @@ class LampgoServer:
         except Exception:
             logger.exception("server.llm_router_setup_failed")
 
+    def reload_llm_client(self) -> bool:
+        """Rebuild the LLMClient from the current config (called after live config edits)."""
+        try:
+            from lampgo.perception.llm_client import LLMClient
+        except Exception:
+            logger.exception("server.reload_llm_client_import_failed")
+            return False
+        if not self.config.llm.api_key:
+            logger.info("server.reload_llm_client_skipped (no API key)")
+            try:
+                self.router.set_llm_client(None)
+            except Exception:
+                pass
+            return False
+        try:
+            skill_specs = self._handle_skills()["result"]["skills"]
+            client = LLMClient(self.config.llm, skill_specs, camera_config=self.config.camera)
+            self.router.set_llm_client(client)
+            logger.info(
+                "server.llm_router_reloaded",
+                provider=self.config.llm.provider,
+                model=self.config.llm.model,
+                fast_model=self.config.llm.fast_model,
+            )
+            return True
+        except Exception:
+            logger.exception("server.reload_llm_client_failed")
+            return False
+
     async def _run_blocking_shutdown_step(self, name: str, fn, timeout_s: float = 2.0) -> None:
         """Run a potentially blocking shutdown step with timeout guard."""
         try:
@@ -1144,14 +1173,55 @@ class LampgoServer:
             )
             uvi_server = uvicorn.Server(uvi_config)
             self._web_serve_task = asyncio.create_task(uvi_server.serve())
+            local_url = f"http://localhost:{self.config.web.port}"
             logger.info(
                 "server.web_started",
-                url=f"http://localhost:{self.config.web.port}",
+                url=local_url,
             )
+            self._print_connection_banner(local_url)
         except ImportError:
             logger.error("server.web_missing_deps (pip install starlette uvicorn websockets)")
         except Exception:
             logger.exception("server.web_start_failed")
+
+    @staticmethod
+    def _print_connection_banner(local_url: str) -> None:
+        """Print a clear banner so users know how to wire up OpenClaw when port changes."""
+        try:
+            from lampgo.bridge.openclaw_installer import detect_openclaw_integration
+
+            status = detect_openclaw_integration()
+            overall = status.overall
+            def _mark(ok: bool) -> str:
+                return "✓" if ok else "✗"
+            integration_lines = [
+                f"openclaw CLI     : {_mark(status.binary.ok)} {status.binary.detail}",
+                f"lampgo plugin    : {_mark(status.plugin.ok)} {'已安装' if status.plugin.ok else '未安装（运行 `lampgo install-openclaw --yes` 一键安装）'}",
+                f"lampgo skill     : {_mark(status.skill.ok)} {'已注册' if status.skill.ok else '未注册（关键词触发不可用）'}",
+                f"plugin 启用      : {_mark(status.trusted.ok)} {'已启用' if status.trusted.ok else '未启用（OpenClaw 会拒绝加载）'}",
+                f"gateway 在线     : {_mark(status.gateway.ok)} {status.gateway.detail}",
+            ]
+            overall_line = f"集成状态         : {overall}"
+        except Exception:
+            integration_lines = ["openclaw 集成检测失败（忽略）"]
+            overall_line = ""
+
+        lines = [
+            "",
+            "──────── lampgo ready ────────",
+            f"Web UI           : {local_url}",
+            f"OpenClaw plugin  : set lampgoApiBase = {local_url}",
+            f"Env override     : export LAMPGO_API_BASE={local_url}",
+            *integration_lines,
+        ]
+        if overall_line:
+            lines.append(overall_line)
+        lines += [
+            "一键修复集成     : uv run lampgo install-openclaw --yes",
+            "──────────────────────────────",
+            "",
+        ]
+        print("\n".join(lines), flush=True)
 
     def _start_voice_loop(self) -> None:
         try:

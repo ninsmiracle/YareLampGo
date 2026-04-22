@@ -15,7 +15,7 @@ import tomllib
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class JointLimits(BaseModel):
@@ -149,6 +149,26 @@ class LLMConfig(BaseModel):
     """
 
     provider: str = Field(default="openai", description="LLM provider: openai, anthropic, gemini, local")
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _normalize_provider_alias(cls, v: Any) -> Any:
+        """Normalize legacy / vendor-name aliases to canonical preset keys.
+
+        The Settings UI dropdown is keyed by preset id (mimo / openrouter / ...).
+        Older configs and the .env file may use vendor names like "xiaomi" — map
+        them so the runtime value matches what the UI/preset table expects.
+        """
+        if not isinstance(v, str):
+            return v
+        s = v.strip().lower()
+        aliases = {
+            "xiaomi": "mimo",
+            "mi": "mimo",
+            "gemini": "google",
+        }
+        return aliases.get(s, s)
+    message_type: str = Field(default="openai", description="Message envelope: 'openai' (chat.completions) or 'anthropic' (messages)")
     model: str = Field(default="gpt-4o-mini", description="Model name for complex reasoning tasks")
     fast_model: str = Field(default="gpt-4o-mini", description="Model for simple/fast intent classification")
     api_key: str = Field(default="", description="Set via LAMPGO_LLM_API_KEY env var, NOT in config file")
@@ -212,6 +232,10 @@ class LampgoConfig(BaseModel):
     web_enabled: bool = Field(default=False, description="Enable web UI on startup")
     home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
     no_hw: bool = Field(default=False, description="Skip hardware connections (motors/LED)")
+    share_openclaw_memory: bool = Field(
+        default=True,
+        description="When true, inject OpenClaw MEMORY.md + recent daily notes into lampgo prompts.",
+    )
 
 
 def _find_project_root() -> Path:
@@ -253,6 +277,23 @@ def load_config(
 
     # 3. Build config from TOML
     config = LampgoConfig(**toml_data) if toml_data else LampgoConfig()
+
+    # 3b. Merge user overrides from ~/.lampgo/config.toml and credentials.json
+    try:
+        from lampgo.personastore import get_credentials, get_overrides_toml
+
+        user_overrides = get_overrides_toml()
+        if user_overrides:
+            merged = _deep_merge_dict(config.model_dump(), user_overrides)
+            config = LampgoConfig(**merged)
+        creds = get_credentials()
+        if creds:
+            llm_key = str(creds.get("llm_api_key") or creds.get("api_key") or "").strip()
+            if llm_key:
+                config.llm.api_key = llm_key
+    except Exception:
+        # Never let a bad user file block startup.
+        pass
 
     # 4. Apply environment variable overrides
     _apply_env_overrides(config)
@@ -297,6 +338,8 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
         "LAMPGO_VOICE_MIC_DEVICE": ("voice", "mic_device"),
         "LAMPGO_RECORDINGS_DIR": (None, "recordings_dir"),
         "LAMPGO_SOCKET": (None, "socket_path"),
+        "LAMPGO_WEB_HOST": ("web", "host"),
+        "LAMPGO_WEB_PORT": ("web", "port"),
     }
     for env_key, (section, field) in env_map.items():
         value = os.environ.get(env_key)
@@ -310,6 +353,38 @@ def _apply_env_overrides(config: LampgoConfig) -> None:
             current = getattr(sub, field)
             setattr(sub, field, _coerce_env_value(current, value))
 
+    # LAMPGO_API_BASE acts as a convenience for OpenClaw plugin alignment:
+    # a single URL (e.g. http://127.0.0.1:18790) determines BOTH where lampgo
+    # listens and where the OpenClaw plugin calls back. Individual LAMPGO_WEB_*
+    # vars still win if set, to allow split host/port override.
+    api_base = os.environ.get("LAMPGO_API_BASE", "").strip()
+    if api_base:
+        parsed = _parse_api_base(api_base)
+        if parsed is not None:
+            host, port = parsed
+            if "LAMPGO_WEB_HOST" not in os.environ and host:
+                config.web.host = host
+            if "LAMPGO_WEB_PORT" not in os.environ and port:
+                config.web.port = port
+
+
+def _parse_api_base(url: str) -> tuple[str, int] | None:
+    """Parse a full URL or bare host:port into (host, port). Returns None on failure."""
+    from urllib.parse import urlparse
+
+    candidate = url if "://" in url else f"http://{url}"
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
+    host = parsed.hostname or ""
+    port = parsed.port or 0
+    if not port:
+        return None
+    # "127.0.0.1" binding shouldn't force lampgo to only-localhost listen;
+    # leave host empty so the default 0.0.0.0 remains.
+    return (host if host not in {"127.0.0.1", "localhost", "0.0.0.0"} else "", port)
+
 
 def _coerce_env_value(current: object, raw: str) -> object:
     """Best-effort env var coercion based on the target field's current type."""
@@ -322,6 +397,16 @@ def _coerce_env_value(current: object, raw: str) -> object:
     if isinstance(current, Path):
         return Path(raw)
     return raw
+
+
+def _deep_merge_dict(base: dict, patch: dict) -> dict:
+    out = dict(base)
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge_dict(out[k], v)
+        else:
+            out[k] = v
+    return out
 
 
 def _apply_cli_overrides(config: LampgoConfig, overrides: dict) -> None:

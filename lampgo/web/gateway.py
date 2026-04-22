@@ -62,8 +62,27 @@ class WebGateway:
             Route("/api/openclaw/callback", self.api_openclaw_callback, methods=["POST"]),
             Route("/api/openclaw/tasks", self.api_openclaw_tasks),
             Route("/api/openclaw/tasks/{task_id:str}/confirm", self.api_openclaw_confirm, methods=["POST"]),
+            Route("/api/openclaw/health", self.api_openclaw_health),
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
             Route("/api/estop", self.api_estop, methods=["POST"]),
+            # ---- user-editable config / persona / memory ----
+            Route("/api/config/llm", self.api_config_llm, methods=["GET", "POST"]),
+            Route("/api/persona", self.api_persona_all, methods=["GET"]),
+            Route("/api/persona/import-openclaw", self.api_persona_import, methods=["POST"]),
+            Route("/api/persona/reset", self.api_persona_reset, methods=["POST"]),
+            Route("/api/persona/{name:str}", self.api_persona_single, methods=["GET", "PUT"]),
+            Route("/api/memory/core", self.api_memory_core, methods=["GET", "PUT"]),
+            Route("/api/memory/core/reset", self.api_memory_core_reset, methods=["POST"]),
+            Route("/api/memory/core/import", self.api_memory_core_import, methods=["POST"]),
+            Route("/api/memory/daily", self.api_memory_daily, methods=["GET", "POST"]),
+            Route("/api/memory/summarize", self.api_memory_summarize, methods=["POST"]),
+            Route("/api/memory/openclaw", self.api_memory_openclaw, methods=["GET"]),
+            Route("/api/debug/system-prompt", self.api_debug_system_prompt, methods=["GET"]),
+            # ---- server-side persistent cache for chat sessions ----
+            Route("/api/sessions", self.api_sessions, methods=["GET", "PUT", "DELETE"]),
+            Route("/api/sessions/{session_id:str}", self.api_session_single, methods=["DELETE"]),
+            # ---- event replay (so newly-connected browsers see historical events) ----
+            Route("/api/events", self.api_events_replay, methods=["GET"]),
             WebSocketRoute("/ws", self.ws_endpoint),
         ]
         if STATIC_DIR.is_dir():
@@ -299,6 +318,43 @@ class WebGateway:
     async def api_openclaw_tasks(self, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "result": {"openclaw_tasks": self.server.openclaw.list_tasks()}})
 
+    async def api_openclaw_health(self, request: Request) -> JSONResponse:
+        from lampgo.bridge.openclaw_installer import detect_openclaw_integration
+
+        status = detect_openclaw_integration()
+        tasks = self.server.openclaw.list_tasks()
+        running_statuses = {
+            "queued",
+            "planning",
+            "executing",
+            "executing_after_promotion",
+            "executing_with_existing_tools",
+            "awaiting_confirmation",
+        }
+        running = sum(1 for t in tasks if str(t.get("status", "")) in running_statuses)
+
+        if not status.binary.ok or status.overall == "missing":
+            connection = "not_installed"
+        elif status.overall == "degraded":
+            connection = "degraded"
+        elif running > 0:
+            connection = "running"
+        else:
+            connection = "idle"
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "connection": connection,
+                    "integration": status.as_dict(),
+                    "gateway_running": bool(status.gateway.ok),
+                    "running_tasks": running,
+                    "total_tasks": len(tasks),
+                },
+            }
+        )
+
     async def api_openclaw_confirm(self, request: Request) -> JSONResponse:
         body = await request.json()
         task_id = request.path_params["task_id"]
@@ -311,6 +367,644 @@ class WebGateway:
         except KeyError:
             return JSONResponse({"ok": False, "error": "task or proposal not found"}, status_code=404)
         return JSONResponse({"ok": True, "result": {"openclaw_task": task}})
+
+    # ---- user-editable config / persona / memory ----
+
+    _PROVIDER_PRESETS = {
+        "mimo": {
+            "label": "MiMo（小米）",
+            "base_url": "https://api.xiaomimimo.com/v1",
+            "default_model": "mimo-v2-omni",
+            "default_fast_model": "mimo-v2-omni",
+            "message_type": "openai",
+        },
+        "openrouter": {
+            "label": "OpenRouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "default_model": "anthropic/claude-3.5-sonnet",
+            "default_fast_model": "anthropic/claude-3.5-haiku",
+            "message_type": "openai",
+        },
+        "anthropic": {
+            "label": "Anthropic",
+            "base_url": "https://api.anthropic.com/v1",
+            "default_model": "claude-sonnet-4-20250514",
+            "default_fast_model": "claude-haiku-4-20250514",
+            "message_type": "anthropic",
+        },
+        "openai": {
+            "label": "OpenAI",
+            "base_url": "https://api.openai.com/v1",
+            "default_model": "gpt-4o-mini",
+            "default_fast_model": "gpt-4o-mini",
+            "message_type": "openai",
+        },
+        "deepseek": {
+            "label": "DeepSeek",
+            "base_url": "https://api.deepseek.com/v1",
+            "default_model": "deepseek-chat",
+            "default_fast_model": "deepseek-chat",
+            "message_type": "openai",
+        },
+        "google": {
+            "label": "Google Gemini",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "default_model": "gemini-2.5-flash",
+            "default_fast_model": "gemini-2.5-flash",
+            "message_type": "openai",
+        },
+        "ollama": {
+            "label": "Ollama（本地）",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "default_model": "qwen2.5:7b-instruct",
+            "default_fast_model": "qwen2.5:7b-instruct",
+            "message_type": "openai",
+        },
+        "custom": {
+            "label": "自定义",
+            "base_url": "",
+            "default_model": "",
+            "default_fast_model": "",
+            "message_type": "openai",
+        },
+    }
+
+    async def api_config_llm(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        if request.method == "GET":
+            cfg = self.server.config.llm
+            overrides = personastore.get_overrides_toml()
+            message_type = (
+                (overrides.get("llm") or {}).get("message_type")
+                if isinstance(overrides, dict)
+                else None
+            ) or "openai"
+            share_memory = bool(getattr(self.server.config, "share_openclaw_memory", True))
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "result": {
+                        "provider": cfg.provider,
+                        "api_base": cfg.api_base,
+                        "api_key_preview": personastore.mask_api_key(cfg.api_key),
+                        "api_key_is_set": bool(cfg.api_key),
+                        "model": cfg.model,
+                        "fast_model": cfg.fast_model,
+                        "message_type": message_type,
+                        "share_openclaw_memory": share_memory,
+                        "provider_presets": self._PROVIDER_PRESETS,
+                    },
+                }
+            )
+
+        body = await request.json()
+        # Quick path: caller only toggles share_openclaw_memory.
+        if (
+            "share_openclaw_memory" in body
+            and not any(k in body for k in ("provider", "api_base", "api_key", "model", "fast_model", "message_type"))
+        ):
+            from lampgo import personastore
+
+            share = bool(body.get("share_openclaw_memory"))
+            personastore.patch_overrides_toml({"share_openclaw_memory": share})
+            self.server.config.share_openclaw_memory = share
+            self._invalidate_persona_cache()
+            return JSONResponse({"ok": True, "result": {"share_openclaw_memory": share}})
+
+        validate = bool(body.get("validate", True))
+        dry_run = bool(body.get("dry_run", False))
+        provider = str(body.get("provider") or "").strip() or self.server.config.llm.provider
+        api_base = str(body.get("api_base") or "").strip()
+        api_key_raw = body.get("api_key")
+        api_key = str(api_key_raw).strip() if api_key_raw is not None else ""
+        model = str(body.get("model") or "").strip() or self.server.config.llm.model
+        fast_model = str(body.get("fast_model") or "").strip() or model
+        message_type = str(body.get("message_type") or "").strip() or "openai"
+        share_memory = body.get("share_openclaw_memory")
+
+        if api_key == "":
+            # empty string is a no-op (keep existing); client sends new key only when rotating.
+            effective_key = self.server.config.llm.api_key
+        elif set(api_key) <= {"•", "*"}:
+            effective_key = self.server.config.llm.api_key
+        else:
+            effective_key = api_key
+
+        if validate:
+            probe_error = await self._probe_llm(
+                provider=provider,
+                api_base=api_base,
+                api_key=effective_key,
+                model=fast_model or model,
+                message_type=message_type,
+            )
+            if probe_error:
+                return JSONResponse({"ok": False, "error": probe_error}, status_code=400)
+            if dry_run:
+                return JSONResponse({"ok": True, "result": {"dry_run": True, "ping": "ok"}})
+
+        patch: dict = {
+            "llm": {
+                "provider": provider,
+                "api_base": api_base,
+                "model": model,
+                "fast_model": fast_model,
+                "message_type": message_type,
+            },
+        }
+        if share_memory is not None:
+            patch["share_openclaw_memory"] = bool(share_memory)
+        personastore.patch_overrides_toml(patch)
+
+        # Persist the effective key into credentials.json so it becomes the
+        # durable source of truth (as the UI hint promises). This is
+        # idempotent and covers three cases:
+        #   1. user typed a brand-new key → store it
+        #   2. user left field blank but a key already came from env → mirror
+        #      it into credentials so users can later remove .env safely
+        #   3. user left field blank and a key was already in credentials →
+        #      no-op write (same value)
+        if effective_key:
+            existing = personastore.get_credentials().get("llm_api_key")
+            if existing != effective_key:
+                personastore.set_credentials({"llm_api_key": effective_key})
+
+        # Apply to running config and hot-reload LLM client.
+        cfg = self.server.config
+        cfg.llm.provider = provider
+        cfg.llm.api_base = api_base
+        cfg.llm.api_key = effective_key
+        cfg.llm.model = model
+        cfg.llm.fast_model = fast_model
+        if share_memory is not None:
+            cfg.share_openclaw_memory = bool(share_memory)
+
+        try:
+            self.server.reload_llm_client()
+        except Exception:
+            logger.exception("web.reload_llm_failed")
+
+        # Invalidate persona/memory cache so the next prompt assembly re-reads
+        try:
+            from lampgo.persona.bundle import invalidate_bundles
+            invalidate_bundles()
+        except Exception:
+            pass
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "provider": provider,
+                    "api_base": api_base,
+                    "model": model,
+                    "fast_model": fast_model,
+                    "message_type": message_type,
+                    "api_key_preview": personastore.mask_api_key(effective_key),
+                    "api_key_is_set": bool(effective_key),
+                    "share_openclaw_memory": bool(cfg.share_openclaw_memory),
+                    "hot_reloaded": True,
+                },
+            }
+        )
+
+    async def _probe_llm(
+        self,
+        *,
+        provider: str,
+        api_base: str,
+        api_key: str,
+        model: str,
+        message_type: str,
+    ) -> str | None:
+        """Send a minimal ping. Return an error string or None on success."""
+        if not api_key:
+            return "API key 为空"
+        if not model:
+            return "未指定 model"
+        base = api_base.rstrip("/") or self._PROVIDER_PRESETS.get(provider, {}).get("base_url") or ""
+        if not base:
+            return "Base URL 未配置"
+        try:
+            import httpx
+        except Exception:
+            return "httpx 未安装，无法执行连接检测"
+
+        if message_type == "anthropic":
+            url = f"{base}/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "max_tokens": 4,
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+        else:
+            url = f"{base}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 4,
+                "temperature": 0,
+            }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            return f"连接失败：{exc}"
+        if resp.status_code >= 400:
+            # best-effort extract provider message
+            try:
+                data = resp.json()
+                err = data.get("error") or data
+                msg = (err.get("message") if isinstance(err, dict) else None) or resp.text[:200]
+            except Exception:
+                msg = resp.text[:200] or f"HTTP {resp.status_code}"
+            return f"Provider 返回 {resp.status_code}: {msg}"
+        return None
+
+    async def api_persona_all(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        return JSONResponse({"ok": True, "result": {"files": personastore.read_all_personas()}})
+
+    async def api_persona_single(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        name = request.path_params["name"].upper()
+        if name not in personastore.PERSONA_FILES:
+            return JSONResponse({"ok": False, "error": f"unknown persona: {name}"}, status_code=404)
+        if request.method == "GET":
+            return JSONResponse({"ok": True, "result": {"name": name, "content": personastore.read_persona(name)}})
+        if not self._check_plugin_token(request):
+            return JSONResponse({"ok": False, "error": "invalid plugin token"}, status_code=403)
+        body = await request.json()
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            return JSONResponse({"ok": False, "error": "content must be a string"}, status_code=400)
+        personastore.write_persona(name, content)
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": {"name": name, "bytes": len(content.encode("utf-8"))}})
+
+    async def api_persona_import(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        which = body.get("which", "safe")
+        report = personastore.import_persona_from_openclaw(which)
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": report})
+
+    async def api_persona_reset(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        body = {}
+        if request.headers.get("content-type", "").startswith("application/json"):
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+        which = body.get("which", "all")
+        try:
+            report = personastore.reset_persona(which)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": report})
+
+    async def api_memory_core(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        if request.method == "GET":
+            return JSONResponse({"ok": True, "result": {"content": personastore.read_memory_core()}})
+        body = await request.json()
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            return JSONResponse({"ok": False, "error": "content must be a string"}, status_code=400)
+        personastore.write_memory_core(content)
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": {"bytes": len(content.encode("utf-8"))}})
+
+    async def api_memory_core_reset(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        report = personastore.reset_memory_core()
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": report})
+
+    async def api_memory_core_import(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        report = personastore.import_memory_core_from_openclaw()
+        if not report.get("source"):
+            return JSONResponse(
+                {"ok": False, "error": "OpenClaw 里没有找到 MEMORY.md（~/.openclaw/MEMORY.md 或 ~/.openclaw/workspace/MEMORY.md）"},
+                status_code=404,
+            )
+        if not report.get("imported"):
+            return JSONResponse({"ok": False, "error": "导入失败，请查看日志"}, status_code=500)
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": report})
+
+    async def api_memory_daily(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        if request.method == "GET":
+            date_param = request.query_params.get("date", "").strip()
+            if not date_param:
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "result": {
+                            "dates": personastore.list_memory_dates(),
+                            "today": personastore.read_memory_daily("today"),
+                        },
+                    }
+                )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "result": {
+                        "date": date_param if date_param != "today" else None,
+                        "content": personastore.read_memory_daily(date_param),
+                    },
+                }
+            )
+        if not self._check_plugin_token(request):
+            return JSONResponse({"ok": False, "error": "invalid plugin token"}, status_code=403)
+        body = await request.json()
+        bullets = body.get("bullets") or []
+        if isinstance(bullets, str):
+            bullets = [line for line in bullets.splitlines() if line.strip()]
+        if not isinstance(bullets, list) or not bullets:
+            return JSONResponse({"ok": False, "error": "bullets must be a non-empty list"}, status_code=400)
+        date_param = str(body.get("date") or "").strip() or None
+        path = personastore.append_memory_daily([str(b) for b in bullets], date_str=date_param)
+        promote = bool(body.get("promote", False))
+        if promote:
+            core = personastore.read_memory_core()
+            joined = "\n".join(f"- {str(b).lstrip('- ').strip()}" for b in bullets)
+            personastore.write_memory_core(core.rstrip() + "\n\n" + joined + "\n")
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": {"path": str(path), "promoted": promote}})
+
+    async def api_memory_summarize(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        messages = body.get("messages") or []
+        session_id = str(body.get("session_id") or "").strip()
+        if not isinstance(messages, list) or not messages:
+            return JSONResponse({"ok": False, "error": "messages required"}, status_code=400)
+
+        bullets = await self._summarize_messages(messages)
+        if not bullets:
+            return JSONResponse({"ok": True, "result": {"bullets": [], "skipped": "no-summary"}})
+
+        from lampgo import personastore
+
+        header = None
+        if session_id:
+            header = f"# {personastore._today_str()} 日记\n\n> session={session_id}\n"
+        path = personastore.append_memory_daily(bullets, header=header)
+        self._invalidate_persona_cache()
+        return JSONResponse({"ok": True, "result": {"bullets": bullets, "path": str(path)}})
+
+    async def _summarize_messages(self, messages: list) -> list[str]:
+        """Use fast_model to extract 1-3 bullet summaries."""
+        cfg = self.server.config.llm
+        if not cfg.api_key:
+            return []
+        transcript_parts: list[str] = []
+        for m in messages[-40:]:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "")
+            text = str(m.get("content") or "").strip()
+            if not text:
+                continue
+            text = text[:400]
+            transcript_parts.append(f"{role}: {text}")
+        transcript = "\n".join(transcript_parts).strip()
+        if not transcript:
+            return []
+
+        system = (
+            "你是 lampgo 的记忆助手。基于下面的对话片段，抽取 1-3 条值得长期记住的要点（事实/偏好/约定），"
+            "每条不超过 40 字，用中文。只输出 bullet 行，每行以 `- ` 开头，不要其他内容。"
+            "如果没有值得记忆的信息，直接输出一个字：无。"
+        )
+        base = (cfg.api_base or self._PROVIDER_PRESETS.get(cfg.provider, {}).get("base_url") or "").rstrip("/")
+        if not base:
+            return []
+        try:
+            import httpx
+        except Exception:
+            return []
+        url = f"{base}/chat/completions"
+        payload = {
+            "model": cfg.fast_model or cfg.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": transcript},
+            ],
+            "max_tokens": 256,
+            "temperature": 0.2,
+        }
+        headers = {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code >= 400:
+                logger.warning("memory.summarize.http_error", status=resp.status_code, body=resp.text[:200])
+                return []
+            data = resp.json()
+            content = ""
+            if isinstance(data, dict):
+                choices = data.get("choices") or []
+                if choices:
+                    content = str(((choices[0] or {}).get("message") or {}).get("content") or "")
+        except Exception:
+            logger.exception("memory.summarize.failed")
+            return []
+        bullets: list[str] = []
+        for line in (content or "").splitlines():
+            norm = line.strip()
+            if not norm:
+                continue
+            if norm in {"无", "None", "-"}:
+                continue
+            body_line = norm.lstrip("-•*· ").strip()
+            if body_line:
+                bullets.append(body_line)
+        return bullets[:3]
+
+    async def api_memory_openclaw(self, request: Request) -> JSONResponse:
+        from lampgo import personastore
+
+        return JSONResponse({"ok": True, "result": personastore.openclaw_memory_preview()})
+
+    async def api_debug_system_prompt(self, request: Request) -> JSONResponse:
+        """Render the system prompt that would currently be sent to the LLM.
+
+        Useful for verifying that SOUL / AGENTS / PROFILE / MEMORY files and
+        today's daily notes are being injected. Returns both the individual
+        blocks (for the Web UI to display them cleanly) and the fully-rendered
+        prompt string.
+        """
+        try:
+            from lampgo.perception.llm_client import (
+                AGENT_SYSTEM_PROMPT_TEMPLATE,
+                _build_agent_system_prompt,
+            )
+            from lampgo.persona.bundle import load_bundles
+        except Exception as exc:  # pragma: no cover - defensive
+            return JSONResponse({"ok": False, "error": f"import failed: {exc}"}, status_code=500)
+
+        persona = None
+        memory = None
+        load_error = ""
+        try:
+            persona, memory = load_bundles(self.server.config)
+        except Exception as exc:
+            load_error = str(exc)
+
+        # We deliberately don't include runtime joint positions here; they change
+        # constantly and aren't what the user wants to verify with this endpoint.
+        joint_state: dict[str, float] | None = None
+
+        rendered_persona = ""
+        rendered_memory = ""
+        try:
+            if persona is not None and hasattr(persona, "render"):
+                rendered_persona = persona.render() or ""
+            if memory is not None and hasattr(memory, "render"):
+                rendered_memory = memory.render() or ""
+        except Exception as exc:
+            load_error = load_error or str(exc)
+
+        full_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "persona_block": rendered_persona,
+                    "memory_block": rendered_memory,
+                    "joint_state": joint_state or {},
+                    "full_prompt": full_prompt,
+                    "template_preview": AGENT_SYSTEM_PROMPT_TEMPLATE[:240] + "…",
+                    "load_error": load_error,
+                },
+            }
+        )
+
+    # ---- persistent session cache ------------------------------------------
+
+    async def api_sessions(self, request: Request) -> JSONResponse:
+        """GET returns the whole snapshot; PUT overwrites it atomically.
+
+        DELETE wipes every stored session (client passes {"confirm": true}).
+        The frontend treats the server as the source of truth across
+        browsers / process restarts, but keeps its own localStorage copy as
+        an offline fallback.
+        """
+        from lampgo import sessionstore
+
+        if request.method == "GET":
+            snap = sessionstore.load_snapshot()
+            return JSONResponse({"ok": True, "result": snap})
+
+        if request.method == "PUT":
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse(
+                    {"ok": False, "error": "invalid JSON body"}, status_code=400
+                )
+            try:
+                stored = sessionstore.save_snapshot(body)
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": True, "result": stored})
+
+        # DELETE all
+        try:
+            body = await request.json() if (request.headers.get("content-type") or "").startswith("application/json") else {}
+        except Exception:
+            body = {}
+        if not (isinstance(body, dict) and body.get("confirm") is True):
+            return JSONResponse(
+                {"ok": False, "error": "DELETE requires {\"confirm\": true}"},
+                status_code=400,
+            )
+        stored = sessionstore.clear_all()
+        return JSONResponse({"ok": True, "result": stored})
+
+    async def api_session_single(self, request: Request) -> JSONResponse:
+        from lampgo import sessionstore
+
+        session_id = request.path_params.get("session_id", "").strip()
+        if not session_id:
+            return JSONResponse(
+                {"ok": False, "error": "session_id required"}, status_code=400
+            )
+        stored = sessionstore.delete_session(session_id)
+        return JSONResponse({"ok": True, "result": stored})
+
+    async def api_events_replay(self, request: Request) -> JSONResponse:
+        """Return events with seq > `since` (default 0), up to `limit`.
+
+        The browser calls this on boot to backfill the event log panel so that
+        after a process restart or when opening the page in a fresh browser,
+        the event history appears continuous.
+        """
+        from lampgo import eventstore
+
+        try:
+            since = int(request.query_params.get("since", "0") or "0")
+        except Exception:
+            since = 0
+        try:
+            limit = int(request.query_params.get("limit", "500") or "500")
+        except Exception:
+            limit = 500
+        result = eventstore.get_store().replay(since=since, limit=limit)
+        return JSONResponse({"ok": True, "result": result})
+
+    def _check_plugin_token(self, request: Request) -> bool:
+        """If the request carries an X-Lampgo-Plugin-Token header, validate it.
+
+        Absence of the header is treated as browser / same-origin UI access and
+        is allowed (the gateway binds to localhost by default). When a token is
+        present, it must match the server's stored value exactly.
+        """
+        supplied = request.headers.get("x-lampgo-plugin-token")
+        if not supplied:
+            return True
+        try:
+            from lampgo import personastore
+
+            expected = personastore.get_plugin_token()
+        except Exception:
+            return False
+        if not expected:
+            return False
+        return supplied.strip() == expected
+
+    def _invalidate_persona_cache(self) -> None:
+        try:
+            from lampgo.persona.bundle import invalidate_bundles
+
+            invalidate_bundles()
+        except Exception:
+            pass
 
     async def api_cancel(self, request: Request) -> JSONResponse:
         await self.server.executor.cancel_current()

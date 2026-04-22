@@ -120,6 +120,18 @@ def main() -> None:
     ping_p = sub.add_parser("ping", help="Ping all motor IDs and report status")
     ping_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
 
+    # --- openclaw integration ---
+    oc_p = sub.add_parser(
+        "install-openclaw",
+        help="Install / repair lampgo ↔ OpenClaw integration (skill + plugin + trust)",
+    )
+    oc_p.add_argument("--yes", "-y", action="store_true", help="Auto-confirm all prompts")
+    oc_p.add_argument(
+        "--check",
+        action="store_true",
+        help="Only print current integration status; do not modify anything",
+    )
+
     # --- help ---
     sub.add_parser("help", help="Show quick manual debugging commands")
 
@@ -142,6 +154,7 @@ def main() -> None:
         "record": _cmd_record,
         "clear": _cmd_clear,
         "ping": _cmd_ping,
+        "install-openclaw": _cmd_install_openclaw,
         "help": _cmd_help,
     }
     handler = dispatch.get(args.command)
@@ -372,6 +385,16 @@ def _cmd_ping(args: argparse.Namespace) -> None:
 
     bus.port_handler.closePort()
     sys.exit(0 if all_ok else 1)
+
+
+def _cmd_install_openclaw(args: argparse.Namespace) -> None:
+    from lampgo.bridge.openclaw_installer import install_openclaw_integration
+
+    report = install_openclaw_integration(
+        auto_confirm=bool(getattr(args, "yes", False)),
+        check_only=bool(getattr(args, "check", False)),
+    )
+    sys.exit(1 if report.errors else 0)
 
 
 def _cmd_help(args: argparse.Namespace) -> None:
