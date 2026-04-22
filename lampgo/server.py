@@ -170,6 +170,9 @@ class LampgoServer:
         if cmd == "set_camera":
             return self._handle_set_camera(str(data.get("port", "")))
 
+        if cmd == "list_mics":
+            return self._handle_list_mics()
+
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
     async def openclaw_ask_user(
@@ -842,6 +845,7 @@ class LampgoServer:
                 api_key=self.config.llm.api_key,
                 api_base=self.config.llm.api_base,
                 voice=self.config.voice.tts_voice,
+                provider=self.config.voice.tts_provider,
             )
             if result:
                 audio_b64, fmt = result
@@ -982,6 +986,68 @@ class LampgoServer:
             },
         }
 
+    def _handle_list_mics(self) -> dict:
+        """Enumerate server-side audio input devices (PyAudio / sounddevice).
+
+        This matches the semantics of ``voice.mic_device`` — a *server-side*
+        device index that the Python voice loop opens via ``sounddevice``.
+        It is intentionally distinct from the browser-side mic list shown in
+        the topbar mic chip popover (which is what the browser streams up
+        over WebRTC).
+        """
+        try:
+            import sounddevice as sd  # type: ignore
+        except ImportError:
+            return {
+                "ok": True,
+                "result": {
+                    "mics": [],
+                    "active": self.config.voice.mic_device,
+                    "available": False,
+                    "reason": "sounddevice not installed",
+                },
+            }
+
+        mics: list[dict[str, object]] = []
+        default_index: int | None = None
+        try:
+            devices = sd.query_devices()
+            try:
+                default_index = int(sd.default.device[0])
+            except Exception:
+                default_index = None
+            for i, dev in enumerate(devices):
+                if int(dev.get("max_input_channels", 0) or 0) <= 0:
+                    continue
+                mics.append(
+                    {
+                        "index": str(i),
+                        "name": str(dev.get("name", "") or ""),
+                        "is_default": (default_index is not None and i == default_index),
+                        "max_input_channels": int(dev.get("max_input_channels", 0) or 0),
+                    }
+                )
+        except Exception as exc:
+            return {
+                "ok": True,
+                "result": {
+                    "mics": [],
+                    "active": self.config.voice.mic_device,
+                    "available": False,
+                    "reason": f"enumeration failed: {exc}",
+                },
+            }
+
+        return {
+            "ok": True,
+            "result": {
+                "mics": mics,
+                "active": self.config.voice.mic_device,
+                "default": str(default_index) if default_index is not None else "",
+                "available": True,
+            },
+        }
+
     def _handle_skills(self) -> dict:
         skills = []
         for skill in self.registry.list_skills():
@@ -1007,13 +1073,35 @@ class LampgoServer:
         if self.config.no_hw:
             logger.info("server.no_hw_mode", msg="Skipping motor and LED connections")
         else:
-            self.hal.connect()
-            self.led.connect()
-            self.motion.start()
-            home = self.hal.get_calibration_home()
-            if home is not None:
-                from lampgo.skills.builtin.motion_skills import set_calibration_home
-                set_calibration_home(home)
+            # Hardware may fail to open (wrong port, permission, device unplugged).
+            # Degrade to no_hw instead of crashing so the Web UI still comes up and
+            # the user can fix the port in the settings page.
+            try:
+                self.hal.connect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "server.hal_connect_failed_degrading_to_no_hw",
+                    motor_port=self.config.device.motor_port,
+                    error=str(exc),
+                )
+                print(
+                    f"[warn] failed to open motor_port={self.config.device.motor_port!r}: {exc}\n"
+                    "       falling back to --no-hw; fix the port in the Web UI (硬件 tab) "
+                    "or via `lampgo onboard`, then restart.",
+                    flush=True,
+                )
+                self.config.no_hw = True
+                self.config.home_on_start = False
+            else:
+                try:
+                    self.led.connect()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("server.led_connect_failed", error=str(exc))
+                self.motion.start()
+                home = self.hal.get_calibration_home()
+                if home is not None:
+                    from lampgo.skills.builtin.motion_skills import set_calibration_home
+                    set_calibration_home(home)
 
         self._register_builtin_skills()
         if self.config.home_on_start:
@@ -1075,6 +1163,35 @@ class LampgoServer:
             )
         except Exception:
             logger.exception("server.llm_router_setup_failed")
+
+    def reload_llm_client(self) -> bool:
+        """Rebuild the LLMClient from the current config (called after live config edits)."""
+        try:
+            from lampgo.perception.llm_client import LLMClient
+        except Exception:
+            logger.exception("server.reload_llm_client_import_failed")
+            return False
+        if not self.config.llm.api_key:
+            logger.info("server.reload_llm_client_skipped (no API key)")
+            try:
+                self.router.set_llm_client(None)
+            except Exception:
+                pass
+            return False
+        try:
+            skill_specs = self._handle_skills()["result"]["skills"]
+            client = LLMClient(self.config.llm, skill_specs, camera_config=self.config.camera)
+            self.router.set_llm_client(client)
+            logger.info(
+                "server.llm_router_reloaded",
+                provider=self.config.llm.provider,
+                model=self.config.llm.model,
+                fast_model=self.config.llm.fast_model,
+            )
+            return True
+        except Exception:
+            logger.exception("server.reload_llm_client_failed")
+            return False
 
     async def _run_blocking_shutdown_step(self, name: str, fn, timeout_s: float = 2.0) -> None:
         """Run a potentially blocking shutdown step with timeout guard."""
@@ -1144,14 +1261,55 @@ class LampgoServer:
             )
             uvi_server = uvicorn.Server(uvi_config)
             self._web_serve_task = asyncio.create_task(uvi_server.serve())
+            local_url = f"http://localhost:{self.config.web.port}"
             logger.info(
                 "server.web_started",
-                url=f"http://localhost:{self.config.web.port}",
+                url=local_url,
             )
+            self._print_connection_banner(local_url)
         except ImportError:
             logger.error("server.web_missing_deps (pip install starlette uvicorn websockets)")
         except Exception:
             logger.exception("server.web_start_failed")
+
+    @staticmethod
+    def _print_connection_banner(local_url: str) -> None:
+        """Print a clear banner so users know how to wire up OpenClaw when port changes."""
+        try:
+            from lampgo.bridge.openclaw_installer import detect_openclaw_integration
+
+            status = detect_openclaw_integration()
+            overall = status.overall
+            def _mark(ok: bool) -> str:
+                return "✓" if ok else "✗"
+            integration_lines = [
+                f"openclaw CLI     : {_mark(status.binary.ok)} {status.binary.detail}",
+                f"lampgo plugin    : {_mark(status.plugin.ok)} {'已安装' if status.plugin.ok else '未安装（运行 `lampgo install-openclaw --yes` 一键安装）'}",
+                f"lampgo skill     : {_mark(status.skill.ok)} {'已注册' if status.skill.ok else '未注册（关键词触发不可用）'}",
+                f"plugin 启用      : {_mark(status.trusted.ok)} {'已启用' if status.trusted.ok else '未启用（OpenClaw 会拒绝加载）'}",
+                f"gateway 在线     : {_mark(status.gateway.ok)} {status.gateway.detail}",
+            ]
+            overall_line = f"集成状态         : {overall}"
+        except Exception:
+            integration_lines = ["openclaw 集成检测失败（忽略）"]
+            overall_line = ""
+
+        lines = [
+            "",
+            "──────── lampgo ready ────────",
+            f"Web UI           : {local_url}",
+            f"OpenClaw plugin  : set lampgoApiBase = {local_url}",
+            f"Env override     : export LAMPGO_API_BASE={local_url}",
+            *integration_lines,
+        ]
+        if overall_line:
+            lines.append(overall_line)
+        lines += [
+            "一键修复集成     : uv run lampgo install-openclaw --yes",
+            "──────────────────────────────",
+            "",
+        ]
+        print("\n".join(lines), flush=True)
 
     def _start_voice_loop(self) -> None:
         try:

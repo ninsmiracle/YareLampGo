@@ -242,7 +242,7 @@ def detect_ports() -> dict:
 def write_env_file(
     motor_port: str | None = None,
     led_port: str | None = None,
-    lamp_id: str = "AL01",
+    lamp_id: str = "AL02",
     env_path: str = "~/.openclaw/.env",
 ) -> str:
     """Write detected ports to an env file (for OpenClaw setup)."""
