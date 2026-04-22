@@ -2551,6 +2551,25 @@ button.device-chip.is-active {
 
 /* ============= Event log view ============= */
 
+.event-log-hint {
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  background: var(--surface-muted, rgba(0, 0, 0, 0.03));
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.event-log-hint code {
+  padding: 1px 5px;
+  font-size: 11.5px;
+  background: var(--surface, #ffffff);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
 .event-log {
   flex: 1;
   min-height: 0;
@@ -2567,7 +2586,7 @@ button.device-chip.is-active {
 }
 
 .event-log:empty::before {
-  content: "暂无事件记录 · 发起一次对话或调用技能后，实时事件会出现在这里";
+  content: "暂无事件 · 刷新页面会从 ~/.lampgo/events.log 回放最近 200 条";
   display: block;
   text-align: center;
   color: var(--text-faint);
@@ -2938,7 +2957,8 @@ section.view[data-view="settings"] .view-header {
 }
 
 .settings-field:has(#cfg-llm-api-key),
-.settings-field:has(#cfg-llm-base-url) {
+.settings-field:has(#cfg-llm-base-url),
+.settings-field:has(#cfg-llm-provider-custom) {
   grid-column: 1 / -1;
 }
 
@@ -3021,6 +3041,81 @@ section.view[data-view="settings"] .view-header {
 
 .settings-status.is-ok { color: #2f8a5f; }
 .settings-status.is-error { color: #c0493b; }
+
+.settings-actions-inline {
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+
+.settings-field-hint-override {
+  color: #c47a1a;
+}
+
+.settings-input.is-override-env,
+.settings-textarea.is-override-env {
+  background: rgba(196, 122, 26, 0.08);
+  color: var(--text-soft);
+  cursor: not-allowed;
+}
+
+.settings-field.is-override-env .settings-field-label {
+  color: var(--text-soft);
+}
+
+.settings-textarea-sm {
+  min-height: 48px;
+  resize: vertical;
+}
+
+.settings-restart-banner {
+  margin: 0 24px 16px 24px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: rgba(222, 147, 136, 0.15);
+  border: 1px solid rgba(222, 147, 136, 0.4);
+  color: #6a3b33;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-restart-banner.hidden {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .settings-tabs {
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .settings-tab {
+    width: auto;
+  }
+}
+
+.settings-restart-banner-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-restart-banner-desc {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settings-restart-banner-desc code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.settings-restart-banner-actions {
+  display: flex;
+  justify-content: flex-end;
+}
 
 .settings-toggle {
   display: inline-flex;

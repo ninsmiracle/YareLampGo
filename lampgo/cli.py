@@ -48,9 +48,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="lampgo",
         description="lampgo — intelligent lamp robot runtime",
-        epilog="Config: lampgo.toml + .env (see lampgo.toml.example and .env.example)",
+        epilog="Config: ~/.lampgo/config.toml (run `lampgo onboard` to configure; Web UI to edit)",
     )
-    parser.add_argument("--config", default=None, help="Path to lampgo.toml (default: auto-detect)")
+    parser.add_argument("--config", default=None, help="[deprecated] Ignored; kept for compatibility")
     sub = parser.add_subparsers(dest="command")
 
     # --- run (start daemon) ---
@@ -132,6 +132,30 @@ def main() -> None:
         help="Only print current integration status; do not modify anything",
     )
 
+    # --- guided onboarding ---
+    # Primary name is `onboard`. We also register `install` as a hidden alias so
+    # any old docs / muscle memory still works for a while.
+    inst_p = sub.add_parser(
+        "onboard",
+        aliases=["install"],
+        help="Guided first-run setup: hardware, LLM, persona, OpenClaw plugin",
+    )
+    inst_p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Take defaults for every prompt (useful for scripts / CI).",
+    )
+    inst_p.add_argument("--yes", "-y", action="store_true", help="Answer yes to confirmations.")
+    inst_p.add_argument(
+        "--skip",
+        default="",
+        help="Comma-separated step names to skip "
+        "(env_check, hardware, llm, persona_memory, openclaw_plugin).",
+    )
+    inst_p.add_argument("--motor-port", default=None, help="Preset motor serial port for the hardware step.")
+    inst_p.add_argument("--llm-provider", default=None, help="Preset LLM provider for the llm step.")
+    inst_p.add_argument("--llm-key", default=None, help="Preset LLM API key for the llm step.")
+
     # --- help ---
     sub.add_parser("help", help="Show quick manual debugging commands")
 
@@ -155,6 +179,8 @@ def main() -> None:
         "clear": _cmd_clear,
         "ping": _cmd_ping,
         "install-openclaw": _cmd_install_openclaw,
+        "onboard": _cmd_onboard,
+        "install": _cmd_onboard,
         "help": _cmd_help,
     }
     handler = dispatch.get(args.command)
@@ -228,6 +254,9 @@ def _build_help_text() -> str:
     return (
         "lampgo 常用手动调试命令\n"
         "========================\n\n"
+        "0) 第一次使用\n"
+        "  uv run lampgo onboard             # 引导式配置 (硬件/LLM/人设/OpenClaw)\n"
+        "  uv run lampgo onboard -y --skip persona_memory,openclaw_plugin\n\n"
         "1) 串口和配置\n"
         "  uv run lampgo detect\n"
         "  uv run lampgo skills\n\n"
@@ -244,7 +273,7 @@ def _build_help_text() -> str:
         "  uv run lampgo move base_yaw=0 --velocity 20\n"
         "  uv run lampgo invoke return_safe\n\n"
         "5) 校准\n"
-        "  uv run lampgo calibrate --port /dev/tty.usbmodemXXXX --id AL01\n\n"
+        "  uv run lampgo calibrate --port /dev/tty.usbmodemXXXX --id AL02\n\n"
         "6) 表情与文本路由\n"
         "  uv run lampgo invoke set_expression expression=heart\n"
         '  uv run lampgo text "做个害羞的表情"\n\n'
@@ -397,6 +426,34 @@ def _cmd_install_openclaw(args: argparse.Namespace) -> None:
     sys.exit(1 if report.errors else 0)
 
 
+def _cmd_onboard(args: argparse.Namespace) -> None:
+    """Guided first-run onboarding (hardware, LLM, persona, OpenClaw plugin)."""
+    # Load config once up front so any ``LAMPGO_*`` env vars / .env overrides
+    # the user already exported show up as the defaults inside the installer
+    # prompts (via ``personastore.get_overrides_toml()`` after ``load_config``).
+    try:
+        from lampgo.core.config import load_config  # noqa: F401
+
+        load_config()
+    except Exception:
+        pass
+
+    from lampgo.installer import run_install
+
+    skip_raw = str(getattr(args, "skip", "") or "")
+    skip_steps = [s for s in (chunk.strip() for chunk in skip_raw.split(",")) if s]
+
+    report = run_install(
+        non_interactive=bool(getattr(args, "non_interactive", False)),
+        assume_yes=bool(getattr(args, "yes", False)),
+        skip_steps=skip_steps,
+        motor_port=getattr(args, "motor_port", None),
+        llm_provider=getattr(args, "llm_provider", None),
+        llm_key=getattr(args, "llm_key", None),
+    )
+    sys.exit(1 if report.errors else 0)
+
+
 def _cmd_help(args: argparse.Namespace) -> None:
     print(_build_help_text())
 
@@ -526,13 +583,16 @@ def _load_config_from_args(args: argparse.Namespace):
     config = load_config(config_path=getattr(args, "config", None), cli_overrides=cli_overrides)
 
     if not config.device.motor_port:
+        # Degrade to no-hardware mode instead of exiting so the Web UI can still boot
+        # and let the user configure a motor port through the settings page.
         print(
-            "Error: motor_port not configured.\n"
-            "Set it via: --motor-port, LAMPGO_MOTOR_PORT env var, .env file, or lampgo.toml\n"
-            "See lampgo.toml.example and .env.example for templates.",
+            "[warn] motor_port not configured — starting in --no-hw mode.\n"
+            "       Configure it via `lampgo onboard`, the Web UI (硬件 tab), "
+            "--motor-port, LAMPGO_MOTOR_PORT env var, or ~/.lampgo/config.toml.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        config.no_hw = True
+        config.home_on_start = False
 
     return config
 

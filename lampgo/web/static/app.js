@@ -476,6 +476,17 @@
     }
   }
 
+  async function waitForSessionSyncIdle(timeoutMs = 3000) {
+    if (sessionPushTimer) {
+      clearTimeout(sessionPushTimer);
+      sessionPushTimer = null;
+    }
+    const start = Date.now();
+    while (sessionPushInFlight && Date.now() - start < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
   async function syncSessionsFromServer() {
     // Boot flow:
     //   1. We already loaded localStorage into `sessions` synchronously.
@@ -501,6 +512,7 @@
             updatedAt: s.updatedAt || Date.now(),
             ...(s.summarized !== undefined ? { summarized: s.summarized } : {}),
             ...(s.lastActivityAt !== undefined ? { lastActivityAt: s.lastActivityAt } : {}),
+            ...(s.summarizeAttemptedAt !== undefined ? { summarizeAttemptedAt: s.summarizeAttemptedAt } : {}),
           }));
           activeSessionId =
             remoteActive && sessions.find((s) => s.id === remoteActive)
@@ -604,6 +616,10 @@
     idleCheckTimer = setInterval(checkIdleSessions, 30000);
   }
 
+  // 冷却窗口：一次 summarize 尝试后，至少隔这么久再试同一会话。
+  // 避免模型偶发失败 / 还没值得记忆的短会话把 LLM 打爆。
+  const SUMMARIZE_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+
   function shouldSummarizeSession(session) {
     if (!session || session.summarized) return false;
     if (!session.messages || session.messages.length < 2) return false;
@@ -612,7 +628,18 @@
     if (!hasUser || !hasAssistant) return false;
     const last = session.lastActivityAt || session.updatedAt || 0;
     if (!last) return false;
-    return Date.now() - last >= IDLE_MINUTES * 60 * 1000;
+    if (Date.now() - last < IDLE_MINUTES * 60 * 1000) return false;
+    // Cooldown after a previous empty-bullet attempt — but only when no new
+    // activity has landed since. If the user kept chatting, the transcript has
+    // grown and retry is worthwhile even inside the cooldown window.
+    if (
+      session.summarizeAttemptedAt &&
+      session.summarizeAttemptedAt >= last &&
+      Date.now() - session.summarizeAttemptedAt < SUMMARIZE_RETRY_COOLDOWN_MS
+    ) {
+      return false;
+    }
+    return true;
   }
 
   async function checkIdleSessions() {
@@ -636,14 +663,98 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (resp.ok) {
+      if (!resp.ok) {
+        // HTTP-level failure: try again next tick without burning the cooldown.
+        console.warn("[memory] summarize http", resp.status);
+        return;
+      }
+      const data = await resp.json().catch(() => null);
+      const bullets = (data && data.result && data.result.bullets) || [];
+      session.summarizeAttemptedAt = Date.now();
+      if (bullets.length > 0) {
+        // Only seal the session once bullets actually landed. Otherwise the same
+        // session could silently "consume" its one-shot summary and never retry,
+        // even after we've fixed LLM params or added more conversation.
         session.summarized = true;
-        persistSessions();
+      }
+      persistSessions();
+      // If the user has "每日记忆" open right now, refresh it so the new
+      // bullet shows up without needing to click the 刷新 button.
+      if (bullets.length > 0 && isMemoryDailyVisible()) {
+        loadMemoryDailyList().catch(() => {});
       }
     } catch (err) {
       console.warn("[memory] idle summarize failed", err);
     } finally {
       idleSummarizeInFlight = false;
+    }
+  }
+
+  function isMemoryDailyVisible() {
+    const settingsPane = document.querySelector('[data-settings-pane="memory"]');
+    if (!settingsPane || settingsPane.classList.contains("hidden")) return false;
+    const dailyView = document.querySelector('[data-memory-view="daily"]');
+    if (!dailyView || dailyView.classList.contains("hidden")) return false;
+    const shell = document.querySelector(".app-shell");
+    return shell && shell.getAttribute("data-view") === "settings";
+  }
+
+  // Manual trigger invoked from the "立即总结当前会话" button — lets the user
+  // verify the summarize pipeline works without waiting IDLE_MINUTES.
+  async function summarizeActiveSessionNow() {
+    const btn = document.getElementById("btn-memory-daily-summarize-now");
+    const viewer = document.getElementById("memory-daily-content");
+    const session =
+      sessions.find((s) => s.id === activeSessionId) ||
+      sessions.find((s) => (s.messages || []).length > 0);
+    if (!session || !session.messages || session.messages.length < 2) {
+      if (viewer) viewer.textContent = "当前没有足够的对话可供摘要（至少需要 1 条用户 + 1 条助手消息）。";
+      return;
+    }
+    const messages = session.messages
+      .filter((m) => m.text && (m.role === "user" || m.role === "assistant"))
+      .slice(-40)
+      .map((m) => ({ role: m.role, content: m.text }));
+    if (messages.length < 2) {
+      if (viewer) viewer.textContent = "当前没有足够的对话可供摘要（语音未转写 / 消息为空）。";
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "总结中…";
+    }
+    try {
+      const resp = await fetch("/api/memory/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: session.id, messages }),
+      });
+      const data = await resp.json().catch(() => null);
+      const bullets = (data && data.result && data.result.bullets) || [];
+      if (!resp.ok) {
+        if (viewer) viewer.textContent = `总结失败：HTTP ${resp.status}`;
+      } else if (bullets.length === 0) {
+        if (viewer) {
+          viewer.textContent =
+            "模型没有返回任何要点（skipped=" +
+            ((data && data.result && data.result.skipped) || "no-summary") +
+            "）。\n\n常见原因：\n" +
+            "  · fast_model 是推理模型（如 mimo-v2-omni），服务端日志里会出现 memory.summarize.reasoning_only；\n" +
+            "  · 对话过短，模型判断没有值得长期记忆的信息（会直接输出“无”）。";
+        }
+      } else {
+        session.summarized = true;
+        session.summarizeAttemptedAt = Date.now();
+        persistSessions();
+        await loadMemoryDailyList();
+      }
+    } catch (err) {
+      if (viewer) viewer.textContent = `总结失败：${err && err.message ? err.message : err}`;
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "立即总结当前会话";
+      }
     }
   }
 
@@ -850,7 +961,7 @@
     });
   }
 
-  function deleteSession(id) {
+  async function deleteSession(id) {
     const session = sessions.find((s) => s.id === id);
     if (!session) return;
     if (!window.confirm(`确认删除会话「${session.title || "未命名"}」？`)) return;
@@ -862,6 +973,16 @@
     }
     persistSessions();
     renderHistory();
+    try {
+      await waitForSessionSyncIdle();
+      const resp = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      console.warn("[sessions] delete on server failed:", err);
+      addSystemMessage("删除会话失败，刷新后历史可能恢复。");
+    }
   }
 
   function loadSession(id) {
@@ -906,7 +1027,7 @@
     renderHistory();
   }
 
-  function clearAllHistory() {
+  async function clearAllHistory() {
     if (!confirm("确认清空全部会话历史？")) return;
     sessions = [];
     activeSessionId = null;
@@ -914,6 +1035,18 @@
     chatMessages.innerHTML = "";
     ensureEmptyState();
     renderHistory();
+    try {
+      await waitForSessionSyncIdle();
+      const resp = await fetch("/api/sessions", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      console.warn("[sessions] clear all on server failed:", err);
+      addSystemMessage("清空历史失败，刷新后历史可能恢复。");
+    }
   }
 
   /* ---- View routing ---- */
@@ -1268,13 +1401,18 @@
     }
   }
 
-  function setPlaybackMode(mode) {
+  function setPlaybackMode(mode, { persist = true } = {}) {
     const nextMode = PLAYBACK_MODES.has(mode) ? mode : "cleaned";
     playbackMode = nextMode;
     playbackModeButtons.forEach((btn) => {
       btn.classList.toggle("is-active", btn.dataset.playbackMode === nextMode);
     });
-    localStorage.setItem(PLAYBACK_MODE_KEY, nextMode);
+    if (persist) {
+      // `persist` means "this is a user-driven session override". We write it
+      // to localStorage so it survives reloads within this browser until the
+      // server-side default changes (see saveCfgFromButton).
+      localStorage.setItem(PLAYBACK_MODE_KEY, nextMode);
+    }
   }
 
   /* ---- WebSocket ---- */
@@ -1290,6 +1428,13 @@
       ws.send(JSON.stringify({ type: "expressions" }));
       ws.send(JSON.stringify({ type: "openclaw_tasks" }));
       ws.send(JSON.stringify({ type: "status" }));
+      // Pre-populate the Hardware settings dropdowns (camera.port /
+      // voice.mic_device) so the user never sees "(自定义，保留原值)" as the
+      // only option. These probes are cheap on the server and the results
+      // are cached in `detectedDevices` / `cameraCache` for the chip
+      // popovers, keeping both surfaces consistent.
+      ws.send(JSON.stringify({ type: "list_cameras", request_id: `cam_boot_${Date.now()}` }));
+      ws.send(JSON.stringify({ type: "list_mics", request_id: `mic_boot_${Date.now()}` }));
     };
 
     ws.onclose = () => {
@@ -1725,6 +1870,13 @@
           available: msg.result.available !== false,
           reason: msg.result.reason || "",
         };
+        // Share the server's camera list with the settings dropdown so both
+        // surfaces stay consistent without a second probe.
+        detectedDevices.cameras = (msg.result.cameras || []).map((c) => ({
+          port: String(c.port || ""),
+          name: c.name || "",
+        }));
+        repopulateCameraPortSelect();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
       }
       return;
@@ -1733,8 +1885,25 @@
     if (msg.type === "set_camera") {
       if (msg.ok && msg.result) {
         cameraCache.active = msg.result.active || "";
+        // Mirror the chip's runtime switch into the settings dropdown.
+        repopulateCameraPortSelect(msg.result.active || "");
         if (isCameraPopoverOpen()) renderCameraPopover(false);
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
+      }
+      return;
+    }
+
+    if (msg.type === "list_mics") {
+      if (msg.ok && msg.result) {
+        // `voice.mic_device` is a server-side PyAudio index. Feed the same
+        // list the settings hardware card uses so the dropdown matches
+        // whatever the server can actually open.
+        detectedDevices.mics = (msg.result.mics || []).map((m) => ({
+          index: String(m.index || ""),
+          name: m.name || "",
+          is_default: !!m.is_default,
+        }));
+        repopulateMicDeviceSelect();
       }
       return;
     }
@@ -2047,17 +2216,28 @@
     } catch {}
   }
 
+  // How many most-recent events to always replay on a fresh page load, even
+  // if localStorage says we've already seen them. Gives the user a continuous
+  // session across reloads without re-rendering thousands of old events.
+  const EVENT_REPLAY_WINDOW = 200;
+
   async function backfillEventsFromServer() {
-    // Fetches events missed while this browser was away (or all history for a
-    // fresh browser). We only *render into the event log* — stateful things
-    // like OpenClaw tasks have their own GETs and shouldn't be double-applied.
-    // Dedup against lastEventSeq in case live WS events race us.
+    // Fetches events missed while this browser was away, plus the last
+    // EVENT_REPLAY_WINDOW events as context after a hard reload. Live events
+    // are persisted by the server into ~/.lampgo/events.log; we just paint
+    // them into the DOM. Dedup against lastEventSeq handles the backfill-HTTP
+    // vs live-WS race for anything strictly newer than the cursor.
+    const replayFromScratch = !!eventLog && eventLog.childElementCount === 0;
+    const cursor = replayFromScratch
+      ? Math.max(0, lastEventSeq - EVENT_REPLAY_WINDOW)
+      : lastEventSeq;
+
     const chunks = [];
-    let cursor = lastEventSeq;
+    let paging = cursor;
     for (let round = 0; round < 10; round += 1) {
       let resp;
       try {
-        resp = await fetch(`/api/events?since=${encodeURIComponent(cursor)}&limit=500`);
+        resp = await fetch(`/api/events?since=${encodeURIComponent(paging)}&limit=500`);
       } catch (err) {
         console.warn("[events] backfill fetch failed:", err);
         return;
@@ -2072,29 +2252,42 @@
       const result = body && body.result;
       if (!result || !Array.isArray(result.events)) return;
       chunks.push(...result.events);
-      cursor = result.latest_seq || cursor;
+      // Advance the paging cursor past the events we just received. We can't
+      // use result.latest_seq here because that's the absolute tail, not the
+      // last seq we actually pulled — using it would skip events when the
+      // server logs new ones while we page.
+      const lastInChunk = result.events.length
+        ? result.events[result.events.length - 1].seq
+        : paging;
+      if (typeof lastInChunk === "number" && lastInChunk > paging) {
+        paging = lastInChunk;
+      }
       if (!result.truncated) break;
     }
     for (const e of chunks) {
       if (!e || typeof e.seq !== "number") continue;
-      if (e.seq <= lastEventSeq) continue;
+      // In normal catch-up mode we skip anything already seen; in replay mode
+      // we intentionally render the window even if it's behind the cursor.
+      if (!replayFromScratch && e.seq <= lastEventSeq) continue;
       try {
-        logEvent(e);
+        logEvent(e, { allowReplay: replayFromScratch });
       } catch (err) {
         console.warn("[events] replay logEvent failed:", err);
       }
-      bumpEventSeq(e.seq);
     }
   }
 
-  function logEvent(msg) {
+  function logEvent(msg, { allowReplay = false } = {}) {
     if (!eventLog || !msg || !msg.event) return;
     if (msg.event === "IntentProgress" && msg.data && NOISY_PROGRESS_STAGES.has(msg.data.stage)) {
       return; // skip high-frequency streaming chunks from the activity log
     }
     // Dedup when the same event arrives twice (backfill HTTP + live WS race).
+    // Replay mode (page reload) explicitly asks to render history *behind*
+    // the already-seen cursor, so we skip this guard but still bump the
+    // cursor forward for events that are actually newer than it.
     if (typeof msg.seq === "number") {
-      if (msg.seq <= lastEventSeq) return;
+      if (!allowReplay && msg.seq <= lastEventSeq) return;
       bumpEventSeq(msg.seq);
     }
     const { cls, icon } = eventCategory(msg.event);
@@ -4147,13 +4340,44 @@
     if (fastEl && !fastEl.value.trim() && preset.default_fast_model) fastEl.value = preset.default_fast_model;
   }
 
+  function syncCustomProviderField(selectedProvider, customValue) {
+    const fieldEl = document.getElementById("cfg-llm-provider-custom-field");
+    const inputEl = document.getElementById("cfg-llm-provider-custom");
+    const isCustom = selectedProvider === "custom";
+    if (fieldEl) fieldEl.hidden = !isCustom;
+    if (inputEl) {
+      inputEl.disabled = !isCustom;
+      if (typeof customValue === "string") inputEl.value = customValue;
+    }
+  }
+
+  function resolveProviderInput() {
+    const provEl = document.getElementById("cfg-llm-provider");
+    const customEl = document.getElementById("cfg-llm-provider-custom");
+    const status = document.getElementById("cfg-llm-status");
+    const selected = provEl ? provEl.value : "";
+    if (selected !== "custom") return selected;
+    const customValue = customEl ? customEl.value.trim() : "";
+    if (!customValue) {
+      setSettingsStatus(status, "请选择“自定义”后填写 Provider ID。", "error");
+      if (customEl) customEl.focus();
+      return "";
+    }
+    return customValue;
+  }
+
   async function loadLlmConfig() {
     const provEl = document.getElementById("cfg-llm-provider");
+    const customProvEl = document.getElementById("cfg-llm-provider-custom");
     const baseEl = document.getElementById("cfg-llm-base-url");
     const keyEl = document.getElementById("cfg-llm-api-key");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
     const mtEl = document.getElementById("cfg-llm-message-type");
+    const ctxEl = document.getElementById("cfg-llm-context-window");
+    const maxTokEl = document.getElementById("cfg-llm-max-tokens");
+    const sumMaxTokEl = document.getElementById("cfg-llm-summary-max-tokens");
+    const tempEl = document.getElementById("cfg-llm-temperature");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
     const status = document.getElementById("cfg-llm-status");
     setSettingsStatus(status, "加载中…");
@@ -4162,14 +4386,15 @@
       settingsProviderPresets = result.provider_presets || null;
       if (provEl && result.provider) {
         const known = Array.from(provEl.options).some((opt) => opt.value === result.provider);
-        if (!known) {
-          const opt = document.createElement("option");
-          opt.value = result.provider;
-          opt.textContent = `${result.provider}（未知，请选 自定义 或重新挑选）`;
-          opt.dataset.synthetic = "1";
-          provEl.appendChild(opt);
+        if (known && result.provider !== "custom") {
+          provEl.value = result.provider;
+          syncCustomProviderField(result.provider, "");
+        } else {
+          provEl.value = "custom";
+          syncCustomProviderField("custom", result.provider === "custom" ? "" : result.provider);
         }
-        provEl.value = result.provider;
+      } else {
+        syncCustomProviderField(provEl ? provEl.value : "", customProvEl ? customProvEl.value : "");
       }
       if (baseEl) { baseEl.value = result.api_base || ""; baseEl.dataset.autofilled = "0"; }
       settingsApiKeyIsSet = !!result.api_key_is_set;
@@ -4180,6 +4405,18 @@
       if (modelEl) modelEl.value = result.model || "";
       if (fastEl) fastEl.value = result.fast_model || "";
       if (mtEl && result.message_type) mtEl.value = result.message_type;
+      if (ctxEl && typeof result.context_window === "number") {
+        ctxEl.value = String(result.context_window);
+      }
+      if (maxTokEl && typeof result.max_tokens === "number") {
+        maxTokEl.value = String(result.max_tokens);
+      }
+      if (sumMaxTokEl && typeof result.summary_max_tokens === "number") {
+        sumMaxTokEl.value = String(result.summary_max_tokens);
+      }
+      if (tempEl && typeof result.temperature === "number") {
+        tempEl.value = String(result.temperature);
+      }
       if (shareEl) shareEl.checked = !!result.share_openclaw_memory;
       setSettingsStatus(status, "");
     } catch (err) {
@@ -4188,24 +4425,43 @@
   }
 
   async function saveLlmConfig(validate) {
-    const provEl = document.getElementById("cfg-llm-provider");
     const baseEl = document.getElementById("cfg-llm-base-url");
     const keyEl = document.getElementById("cfg-llm-api-key");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
     const mtEl = document.getElementById("cfg-llm-message-type");
+    const ctxEl = document.getElementById("cfg-llm-context-window");
+    const maxTokEl = document.getElementById("cfg-llm-max-tokens");
+    const sumMaxTokEl = document.getElementById("cfg-llm-summary-max-tokens");
+    const tempEl = document.getElementById("cfg-llm-temperature");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
     const status = document.getElementById("cfg-llm-status");
     const btnSave = document.getElementById("btn-cfg-llm-save");
     const btnTest = document.getElementById("btn-cfg-llm-test");
+    const providerValue = resolveProviderInput();
+    if (!providerValue) return;
+    const parseIntOrNull = (el) => {
+      if (!el || el.value === "" || el.value == null) return null;
+      const v = parseInt(el.value, 10);
+      return Number.isFinite(v) && v > 0 ? v : null;
+    };
+    const parseFloatOrNull = (el) => {
+      if (!el || el.value === "" || el.value == null) return null;
+      const v = parseFloat(el.value);
+      return Number.isFinite(v) ? v : null;
+    };
     const body = {
       validate: !!validate,
-      provider: provEl ? provEl.value : "",
+      provider: providerValue,
       api_base: baseEl ? baseEl.value.trim() : "",
       api_key: keyEl && keyEl.value ? keyEl.value : "",
       model: modelEl ? modelEl.value.trim() : "",
       fast_model: fastEl ? fastEl.value.trim() : "",
       message_type: mtEl ? mtEl.value : "openai",
+      context_window: parseIntOrNull(ctxEl),
+      max_tokens: parseIntOrNull(maxTokEl),
+      summary_max_tokens: parseIntOrNull(sumMaxTokEl),
+      temperature: parseFloatOrNull(tempEl),
       share_openclaw_memory: shareEl ? shareEl.checked : undefined,
     };
     setSettingsStatus(status, validate ? "正在测试连接…" : "保存中…");
@@ -4222,6 +4478,10 @@
         keyEl.placeholder = result.api_key_is_set ? (result.api_key_preview || "已设置（留空保持不变）") : "sk-...";
       }
       settingsApiKeyIsSet = !!result.api_key_is_set;
+      if (ctxEl && typeof result.context_window === "number") ctxEl.value = String(result.context_window);
+      if (maxTokEl && typeof result.max_tokens === "number") maxTokEl.value = String(result.max_tokens);
+      if (sumMaxTokEl && typeof result.summary_max_tokens === "number") sumMaxTokEl.value = String(result.summary_max_tokens);
+      if (tempEl && typeof result.temperature === "number") tempEl.value = String(result.temperature);
       setSettingsStatus(
         status,
         validate ? "已应用，下一条消息即生效。" : "已保存。",
@@ -4236,13 +4496,14 @@
   }
 
   async function testLlmConfig() {
-    const provEl = document.getElementById("cfg-llm-provider");
     const baseEl = document.getElementById("cfg-llm-base-url");
     const keyEl = document.getElementById("cfg-llm-api-key");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
     const mtEl = document.getElementById("cfg-llm-message-type");
     const status = document.getElementById("cfg-llm-status");
+    const providerValue = resolveProviderInput();
+    if (!providerValue) return;
     setSettingsStatus(status, "正在测试连接…");
     try {
       const resp = await fetch("/api/config/llm", {
@@ -4251,7 +4512,7 @@
         body: JSON.stringify({
           validate: true,
           dry_run: true,
-          provider: provEl ? provEl.value : "",
+          provider: providerValue,
           api_base: baseEl ? baseEl.value.trim() : "",
           api_key: keyEl && keyEl.value ? keyEl.value : "",
           model: modelEl ? modelEl.value.trim() : "",
@@ -4570,8 +4831,11 @@
       provEl._bound = true;
       provEl.addEventListener("change", () => {
         const baseEl = document.getElementById("cfg-llm-base-url");
+        const customProvEl = document.getElementById("cfg-llm-provider-custom");
         if (baseEl) baseEl.dataset.autofilled = "1";
-        applyProviderPreset(provEl.value);
+        const customValue = provEl.value === "custom" ? (customProvEl ? customProvEl.value : "") : "";
+        syncCustomProviderField(provEl.value, customValue);
+        if (provEl.value !== "custom") applyProviderPreset(provEl.value);
       });
     }
     const btnSave = document.getElementById("btn-cfg-llm-save");
@@ -4656,6 +4920,11 @@
       btnMemDailyReload._bound = true;
       btnMemDailyReload.addEventListener("click", () => reloadMemoryDailyFromDisk());
     }
+    const btnMemDailySummarizeNow = document.getElementById("btn-memory-daily-summarize-now");
+    if (btnMemDailySummarizeNow && !btnMemDailySummarizeNow._bound) {
+      btnMemDailySummarizeNow._bound = true;
+      btnMemDailySummarizeNow.addEventListener("click", () => summarizeActiveSessionNow());
+    }
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
     if (shareEl && !shareEl._bound) {
       shareEl._bound = true;
@@ -4666,6 +4935,27 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ validate: false, share_openclaw_memory: shareEl.checked }),
         }).catch(() => {});
+      });
+    }
+    // ---- generic config panes (hardware / voice / motion / safety) ----
+    document.querySelectorAll("[data-cfg-save]").forEach((btn) => {
+      if (btn._bound) return;
+      btn._bound = true;
+      btn.addEventListener("click", () => saveCfgFromButton(btn));
+    });
+    const ttsProviderSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
+    if (ttsProviderSel && !ttsProviderSel._ttsBound) {
+      ttsProviderSel._ttsBound = true;
+      // Switching provider invalidates the old voice list, so force-select the
+      // first option of the new provider instead of preserving a stale value.
+      ttsProviderSel.addEventListener("change", () => repopulateTtsVoiceSelect(""));
+    }
+    const btnDismiss = document.getElementById("btn-cfg-restart-dismiss");
+    if (btnDismiss && !btnDismiss._bound) {
+      btnDismiss._bound = true;
+      btnDismiss.addEventListener("click", () => {
+        const banner = document.getElementById("cfg-restart-banner");
+        if (banner) banner.classList.add("hidden");
       });
     }
     refreshSettingsData();
@@ -4680,7 +4970,349 @@
       loadPersonaAll(),
       loadMemoryCore(),
       loadMemoryDailyList(),
+      loadCfgAll(),
     ]).catch((err) => console.warn("[settings] refresh failed", err));
+  }
+
+  // ---------------- generic config (hardware / voice / motion / safety) ----------------
+
+  // Map each section → list of status element + form container.
+  const CFG_SECTION_DOM = {
+    device: {
+      status: "cfg-hw-status",
+      form: '[data-cfg-section="hardware"]',
+    },
+    voice: {
+      status: "cfg-voice-status",
+      form: '[data-cfg-section="voice"]',
+    },
+    motion: {
+      status: "cfg-motion-status",
+      form: '[data-cfg-section="motion"]',
+    },
+    safety: {
+      status: "cfg-safety-status",
+      form: '[data-cfg-section="safety"]',
+    },
+    web: {
+      status: "cfg-web-status",
+      form: '[data-cfg-section="web"]',
+    },
+  };
+
+  let cfgColdRestartFields = [];
+
+  // `camera.port` lives in the backend's "voice" section allowlist (camera is
+  // voice-adjacent — vision input for the voice assistant). The generic save
+  // grouper would otherwise POST it to /api/config/camera, which 404s.
+  const CFG_SECTION_OVERRIDE = {
+    "camera.port": "voice",
+  };
+
+  // Latest server-side device enumeration, keyed by kind. Kept as module
+  // state so the topbar chips (camera list) and the hardware settings selects
+  // can share the same source of truth.
+  const detectedDevices = {
+    cameras: [], // [{port: string, name: string}]
+    mics: [],    // [{index: string, name: string}]
+  };
+
+  function repopulateCameraPortSelect(desiredValue) {
+    const sel = document.querySelector("[data-cfg-camera-port]");
+    if (!sel) return;
+    const keep = desiredValue !== undefined ? desiredValue : sel.value;
+    sel.innerHTML = "";
+    const addOpt = (value, label) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    };
+    addOpt("", "关闭 / 禁用视觉输入");
+    const seen = new Set([""]);
+    detectedDevices.cameras.forEach((cam) => {
+      const port = String(cam.port || "");
+      if (!port || seen.has(port)) return;
+      seen.add(port);
+      addOpt(port, cam.name ? `${port} (${cam.name})` : `摄像头 ${port}`);
+    });
+    // Preserve any stored value that's not in the detected list so the user's
+    // saved choice isn't silently rewritten to "关闭" on first load before
+    // detection has populated `detectedDevices.cameras`.
+    if (keep && !seen.has(keep)) {
+      addOpt(keep, `${keep}（自定义，保留原值）`);
+    }
+    sel.value = keep || "";
+  }
+
+  function repopulateMicDeviceSelect(desiredValue) {
+    const sel = document.querySelector("[data-cfg-mic-device]");
+    if (!sel) return;
+    const keep = desiredValue !== undefined ? desiredValue : sel.value;
+    sel.innerHTML = "";
+    const addOpt = (value, label) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    };
+    addOpt("", "系统默认（跟随 sounddevice 默认输入）");
+    const seen = new Set([""]);
+    detectedDevices.mics.forEach((m) => {
+      const idx = String(m.index);
+      if (seen.has(idx)) return;
+      seen.add(idx);
+      const label = m.name ? `${idx} (${m.name})` : `麦克风 ${idx}`;
+      addOpt(idx, m.is_default ? `${label} · 默认` : label);
+    });
+    if (keep && !seen.has(keep)) {
+      addOpt(keep, `${keep}（自定义，保留原值）`);
+    }
+    sel.value = keep || "";
+  }
+
+  // Voices offered per TTS provider. `mimo_default` is the only voice-id we
+  // have verified against MiMo-V2-TTS's public API; edge-tts supports hundreds
+  // more, we surface a curated short list. If the stored value isn't in either
+  // list we keep it as an extra option so saves don't silently rewrite it.
+  const TTS_VOICE_OPTIONS = {
+    mimo: [
+      { value: "mimo_default", label: "mimo_default（默认）" },
+    ],
+    "edge-tts": [
+      { value: "zh-CN-XiaoxiaoNeural", label: "zh-CN-XiaoxiaoNeural（晓晓 · 中文女声）" },
+      { value: "zh-CN-YunxiNeural", label: "zh-CN-YunxiNeural（云希 · 中文男声，年轻）" },
+      { value: "zh-CN-XiaoyiNeural", label: "zh-CN-XiaoyiNeural（晓伊 · 中文女声）" },
+      { value: "zh-CN-YunjianNeural", label: "zh-CN-YunjianNeural（云健 · 中文男声）" },
+      { value: "zh-CN-YunyangNeural", label: "zh-CN-YunyangNeural（云扬 · 中文男声，播音）" },
+      { value: "zh-CN-XiaomengNeural", label: "zh-CN-XiaomengNeural（晓梦 · 中文女声）" },
+      { value: "en-US-JennyNeural", label: "en-US-JennyNeural（Jenny · 英文女声）" },
+      { value: "en-US-GuyNeural", label: "en-US-GuyNeural（Guy · 英文男声）" },
+    ],
+  };
+
+  function repopulateTtsVoiceSelect(desiredValue) {
+    const providerSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
+    const voiceSel = document.querySelector("[data-cfg-tts-voice]");
+    if (!voiceSel) return;
+    const provider = (providerSel && providerSel.value) || "mimo";
+    const options = TTS_VOICE_OPTIONS[provider] || [];
+    const keep = desiredValue !== undefined ? desiredValue : voiceSel.value;
+    voiceSel.innerHTML = "";
+    options.forEach((opt) => {
+      const el = document.createElement("option");
+      el.value = opt.value;
+      el.textContent = opt.label;
+      voiceSel.appendChild(el);
+    });
+    if (keep && options.every((o) => o.value !== keep)) {
+      const el = document.createElement("option");
+      el.value = keep;
+      el.textContent = `${keep}（自定义，保留原值）`;
+      voiceSel.appendChild(el);
+    }
+    voiceSel.value = keep || (options[0] && options[0].value) || "";
+  }
+
+  function coerceCfgInputValue(inputEl, rawValue) {
+    if (inputEl.type === "checkbox") return Boolean(rawValue);
+    if (inputEl.type === "number") {
+      if (rawValue === null || rawValue === undefined || rawValue === "") return "";
+      return String(rawValue);
+    }
+    if (rawValue === null || rawValue === undefined) return "";
+    return String(rawValue);
+  }
+
+  function extractCfgInputValue(inputEl) {
+    if (inputEl.type === "checkbox") return inputEl.checked;
+    if (inputEl.type === "number") {
+      const v = inputEl.value.trim();
+      if (v === "") return null;
+      return Number(v);
+    }
+    // textarea or text input
+    if (inputEl.tagName === "TEXTAREA") return inputEl.value;
+    return inputEl.value;
+  }
+
+  function applyCfgFieldValue(dotted, cell) {
+    const input = document.querySelector(`[data-cfg-input="${dotted}"]`);
+    if (!input) return;
+    input.value = "";
+    input.checked = false;
+    const value = cell ? cell.value : null;
+    if (input.type === "checkbox") {
+      input.checked = Boolean(value);
+    } else {
+      input.value = coerceCfgInputValue(input, value);
+    }
+    // Mark override state (grey out + hint) if source === "env".
+    const source = cell ? cell.source : "default";
+    const wrap = input.closest("[data-cfg-field]");
+    const hint = document.querySelector(`[data-cfg-override-for="${dotted}"]`);
+    if (source === "env") {
+      input.disabled = true;
+      input.classList.add("is-override-env");
+      if (wrap) wrap.classList.add("is-override-env");
+      if (hint) {
+        hint.textContent = "该字段被 .env / 环境变量覆盖；删除对应 LAMPGO_* 后才能在此修改。";
+        hint.classList.remove("hidden");
+      }
+    } else {
+      input.disabled = false;
+      input.classList.remove("is-override-env");
+      if (wrap) wrap.classList.remove("is-override-env");
+      if (hint) {
+        hint.textContent = "";
+        hint.classList.add("hidden");
+      }
+    }
+  }
+
+  async function loadCfgAll() {
+    try {
+      const res = await fetch("/api/config");
+      const body = await res.json();
+      if (!body.ok) throw new Error(body.error || "load failed");
+      const { sections, cold_restart_fields } = body.result || {};
+      cfgColdRestartFields = cold_restart_fields || [];
+      const voiceCell = (sections && sections.voice && sections.voice["voice.tts_voice"]) || null;
+      const cameraCell = (sections && sections.voice && sections.voice["camera.port"]) || null;
+      const micCell = (sections && sections.voice && sections.voice["voice.mic_device"]) || null;
+      const pbCell = (sections && sections.motion && sections.motion["motion.default_playback_mode"]) || null;
+      Object.entries(sections || {}).forEach(([, fields]) => {
+        Object.entries(fields).forEach(([dotted, cell]) => {
+          applyCfgFieldValue(dotted, cell);
+        });
+      });
+      // Selects that start empty need a post-load populate so the stored
+      // value from disk isn't wiped. For camera/mic the option list may not
+      // be filled yet (detection runs on demand), but we preserve `value` as
+      // a "custom, keep" option until the next autodetect populates it.
+      repopulateTtsVoiceSelect(voiceCell ? (voiceCell.value || "") : undefined);
+      repopulateCameraPortSelect(cameraCell ? (cameraCell.value || "") : undefined);
+      repopulateMicDeviceSelect(micCell ? (micCell.value || "") : undefined);
+      // Motion default playback mode → chip bar. If the user hasn't yet
+      // clicked a chip this session (no localStorage override), adopt the
+      // server-side default so the chip bar reflects reality.
+      if (pbCell && pbCell.value && !localStorage.getItem(PLAYBACK_MODE_KEY)) {
+        setPlaybackMode(pbCell.value, { persist: false });
+      }
+    } catch (err) {
+      console.warn("[settings] /api/config failed", err);
+    }
+  }
+
+  async function saveCfgFromButton(btn) {
+    // Collect inputs within the card that owns this save button. Group by the
+    // field's API section (word before the first `.`) so a card can mix fields
+    // from multiple sections (e.g. the hardware card embeds `voice.mic_device`
+    // next to `device.motor_port`) and we fire one POST per section.
+    const card = btn.closest(".settings-card") || document;
+    const primarySection = btn.dataset.cfgSave || "";
+    const statusId =
+      (CFG_SECTION_DOM[primarySection] || {}).status || null;
+    const statusEl = statusId ? document.getElementById(statusId) : null;
+
+    const grouped = {};
+    card.querySelectorAll("[data-cfg-input]").forEach((input) => {
+      if (input.disabled) return;
+      const dotted = input.dataset.cfgInput || "";
+      const dot = dotted.indexOf(".");
+      if (dot < 0) return;
+      const section = CFG_SECTION_OVERRIDE[dotted] || dotted.slice(0, dot);
+      (grouped[section] = grouped[section] || {})[dotted] = extractCfgInputValue(input);
+    });
+    const sections = Object.keys(grouped);
+    if (sections.length === 0) {
+      if (statusEl) statusEl.textContent = "没有可保存的字段（都被 .env 覆盖或未改动）";
+      return;
+    }
+
+    if (statusEl) statusEl.textContent = "保存中…";
+    const needsRestart = [];
+    const errors = [];
+    let cameraPortSaved = null;
+    let playbackDefaultSaved = null;
+    for (const section of sections) {
+      try {
+        const res = await fetch(`/api/config/${section}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(grouped[section]),
+        });
+        const body = await res.json();
+        if (!body.ok) throw new Error(body.error || "save failed");
+        const { needs_restart, section: refreshed } = body.result || {};
+        if (refreshed) {
+          Object.entries(refreshed).forEach(([dotted, cell]) => {
+            applyCfgFieldValue(dotted, cell);
+          });
+        }
+        if (needs_restart && needs_restart.length) needsRestart.push(...needs_restart);
+        if ("camera.port" in grouped[section]) {
+          cameraPortSaved = String(grouped[section]["camera.port"] || "");
+        }
+        if ("motion.default_playback_mode" in grouped[section]) {
+          playbackDefaultSaved = String(grouped[section]["motion.default_playback_mode"] || "");
+        }
+      } catch (err) {
+        errors.push(`${section}: ${err.message}`);
+      }
+    }
+    if (statusEl) {
+      statusEl.textContent = errors.length
+        ? `保存失败：${errors.join("; ")}`
+        : "已保存";
+    }
+    if (needsRestart.length) showColdRestartBanner(needsRestart);
+    // Settings save persists to disk + updates in-memory config, but the
+    // topbar chip's cache and any live camera producer also need to know.
+    // Broadcast via the same WS path the chip popover uses.
+    if (cameraPortSaved !== null && typeof send === "function") {
+      send({ type: "set_camera", port: cameraPortSaved, request_id: `cam_set_${Date.now()}` });
+    }
+    // When the default playback mode changes, clear any stale session override
+    // so the chip bar immediately switches to (and persists as) the new
+    // default. The user can still click a chip afterwards to override.
+    if (playbackDefaultSaved !== null && PLAYBACK_MODES.has(playbackDefaultSaved)) {
+      localStorage.removeItem(PLAYBACK_MODE_KEY);
+      setPlaybackMode(playbackDefaultSaved, { persist: false });
+    }
+  }
+
+  // Map a dotted config path (e.g. "device.motor_port") to its human-readable
+  // form label (e.g. "电机串口"). We reuse the labels the user actually sees
+  // in the settings form so the cold-restart banner stays in sync with the UI
+  // without maintaining a parallel translation table.
+  function cfgFieldDisplayName(dotted) {
+    const field = document.querySelector(`[data-cfg-field="${dotted}"]`);
+    const label = field && field.querySelector(".settings-field-label");
+    if (label) {
+      // Strip any trailing "(some.dotted.path)" suffix the form uses to echo
+      // the config key — the banner appends the dotted name separately.
+      const text = label.textContent.replace(/\s*\([^)]*\)\s*$/, "").trim();
+      if (text) return text;
+    }
+    return "";
+  }
+
+  function showColdRestartBanner(fields) {
+    const banner = document.getElementById("cfg-restart-banner");
+    if (!banner) return;
+    banner.classList.remove("hidden");
+    const desc = banner.querySelector(".settings-restart-banner-desc");
+    if (desc && fields && fields.length) {
+      const list = fields
+        .map((f) => {
+          const name = cfgFieldDisplayName(f);
+          return name ? `${name} <code>${f}</code>` : `<code>${f}</code>`;
+        })
+        .join("、");
+      desc.innerHTML =
+        `${list} 需要重启 lampgo 才会生效。请在启动的终端按 <code>Ctrl+C</code> 后重跑 <code>uv run lampgo run --web</code>。`;
+    }
   }
 
   function initSettingsView() {

@@ -170,6 +170,9 @@ class LampgoServer:
         if cmd == "set_camera":
             return self._handle_set_camera(str(data.get("port", "")))
 
+        if cmd == "list_mics":
+            return self._handle_list_mics()
+
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
     async def openclaw_ask_user(
@@ -842,6 +845,7 @@ class LampgoServer:
                 api_key=self.config.llm.api_key,
                 api_base=self.config.llm.api_base,
                 voice=self.config.voice.tts_voice,
+                provider=self.config.voice.tts_provider,
             )
             if result:
                 audio_b64, fmt = result
@@ -982,6 +986,68 @@ class LampgoServer:
             },
         }
 
+    def _handle_list_mics(self) -> dict:
+        """Enumerate server-side audio input devices (PyAudio / sounddevice).
+
+        This matches the semantics of ``voice.mic_device`` — a *server-side*
+        device index that the Python voice loop opens via ``sounddevice``.
+        It is intentionally distinct from the browser-side mic list shown in
+        the topbar mic chip popover (which is what the browser streams up
+        over WebRTC).
+        """
+        try:
+            import sounddevice as sd  # type: ignore
+        except ImportError:
+            return {
+                "ok": True,
+                "result": {
+                    "mics": [],
+                    "active": self.config.voice.mic_device,
+                    "available": False,
+                    "reason": "sounddevice not installed",
+                },
+            }
+
+        mics: list[dict[str, object]] = []
+        default_index: int | None = None
+        try:
+            devices = sd.query_devices()
+            try:
+                default_index = int(sd.default.device[0])
+            except Exception:
+                default_index = None
+            for i, dev in enumerate(devices):
+                if int(dev.get("max_input_channels", 0) or 0) <= 0:
+                    continue
+                mics.append(
+                    {
+                        "index": str(i),
+                        "name": str(dev.get("name", "") or ""),
+                        "is_default": (default_index is not None and i == default_index),
+                        "max_input_channels": int(dev.get("max_input_channels", 0) or 0),
+                    }
+                )
+        except Exception as exc:
+            return {
+                "ok": True,
+                "result": {
+                    "mics": [],
+                    "active": self.config.voice.mic_device,
+                    "available": False,
+                    "reason": f"enumeration failed: {exc}",
+                },
+            }
+
+        return {
+            "ok": True,
+            "result": {
+                "mics": mics,
+                "active": self.config.voice.mic_device,
+                "default": str(default_index) if default_index is not None else "",
+                "available": True,
+            },
+        }
+
     def _handle_skills(self) -> dict:
         skills = []
         for skill in self.registry.list_skills():
@@ -1007,13 +1073,35 @@ class LampgoServer:
         if self.config.no_hw:
             logger.info("server.no_hw_mode", msg="Skipping motor and LED connections")
         else:
-            self.hal.connect()
-            self.led.connect()
-            self.motion.start()
-            home = self.hal.get_calibration_home()
-            if home is not None:
-                from lampgo.skills.builtin.motion_skills import set_calibration_home
-                set_calibration_home(home)
+            # Hardware may fail to open (wrong port, permission, device unplugged).
+            # Degrade to no_hw instead of crashing so the Web UI still comes up and
+            # the user can fix the port in the settings page.
+            try:
+                self.hal.connect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "server.hal_connect_failed_degrading_to_no_hw",
+                    motor_port=self.config.device.motor_port,
+                    error=str(exc),
+                )
+                print(
+                    f"[warn] failed to open motor_port={self.config.device.motor_port!r}: {exc}\n"
+                    "       falling back to --no-hw; fix the port in the Web UI (硬件 tab) "
+                    "or via `lampgo onboard`, then restart.",
+                    flush=True,
+                )
+                self.config.no_hw = True
+                self.config.home_on_start = False
+            else:
+                try:
+                    self.led.connect()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("server.led_connect_failed", error=str(exc))
+                self.motion.start()
+                home = self.hal.get_calibration_home()
+                if home is not None:
+                    from lampgo.skills.builtin.motion_skills import set_calibration_home
+                    set_calibration_home(home)
 
         self._register_builtin_skills()
         if self.config.home_on_start:

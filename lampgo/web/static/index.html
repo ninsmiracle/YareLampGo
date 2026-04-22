@@ -291,9 +291,18 @@
         <div class="view-header">
           <div>
             <div class="view-title">日志</div>
-            <div class="view-subtitle">实时事件与执行记录</div>
+            <div class="view-subtitle">
+              业务事件（意图 / 技能 / 工具调用 / TTS 等）。每次刷新都会从
+              <code>~/.lampgo/events.log</code> 回放最近 200 条，所以不会丢。
+            </div>
           </div>
-          <button id="btn-clear-events" class="ghost-button" type="button">清空</button>
+          <button id="btn-clear-events" class="ghost-button" type="button" title="仅清当前视图；刷新页面会重新回放历史">清空视图</button>
+        </div>
+
+        <div class="event-log-hint">
+          <strong>UI 日志</strong> = 面向用户的业务事件，写入 <code>~/.lampgo/events.log</code>（JSONL，单段 10MB，轮转 3 份）。
+          <strong>终端日志</strong> = 进程 stderr，面向开发者，粒度更细（motor bus、LLM 原始请求等）。
+          两者不重复，视角不同。
         </div>
 
         <div id="event-log" class="event-log"></div>
@@ -307,13 +316,22 @@
           </div>
           <div class="settings-tabs" role="tablist" aria-label="配置分类">
             <button class="settings-tab is-active" type="button" data-settings-tab="model" role="tab">模型</button>
+            <button class="settings-tab" type="button" data-settings-tab="hardware" role="tab">硬件</button>
             <button class="settings-tab" type="button" data-settings-tab="persona" role="tab">人设</button>
             <button class="settings-tab" type="button" data-settings-tab="memory" role="tab">记忆</button>
           </div>
         </div>
 
+        <div id="cfg-restart-banner" class="settings-restart-banner hidden" role="status" aria-live="polite">
+          <div class="settings-restart-banner-title">硬件相关改动已保存</div>
+          <div class="settings-restart-banner-desc">当前进程仍在使用旧串口/端口，请在启动 lampgo 的终端按 <code>Ctrl+C</code> 后重跑 <code>uv run lampgo run --web</code> 使其生效。</div>
+          <div class="settings-restart-banner-actions">
+            <button id="btn-cfg-restart-dismiss" class="ghost-button" type="button">我知道了</button>
+          </div>
+        </div>
+
         <div class="settings-body">
-          <div class="settings-pane" data-settings-pane="model">
+            <div class="settings-pane" data-settings-pane="model">
             <div class="settings-card">
               <div class="settings-card-title">LLM 模型</div>
               <div class="settings-card-desc">选择 Provider 并填写 API 密钥；保存前会发一条 ping 校验连通性。</div>
@@ -333,6 +351,12 @@
                   </select>
                 </label>
 
+                <label id="cfg-llm-provider-custom-field" class="settings-field" hidden>
+                  <span class="settings-field-label">自定义 Provider ID</span>
+                  <input id="cfg-llm-provider-custom" class="settings-input" type="text" placeholder="例如：my-proxy / azure-openai" autocomplete="off">
+                  <span class="settings-field-hint">仅用于标识当前配置来源；真正的连接仍由 Base URL、消息格式和模型决定。</span>
+                </label>
+
                 <label class="settings-field">
                   <span class="settings-field-label">Base URL</span>
                   <input id="cfg-llm-base-url" class="settings-input" type="text" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off">
@@ -347,12 +371,13 @@
                 <label class="settings-field">
                   <span class="settings-field-label">主模型（Model）</span>
                   <input id="cfg-llm-model" class="settings-input" type="text" placeholder="mimo-v2-omni" autocomplete="off">
+                  <span class="settings-field-hint">建议使用多模态模型，否则无法理解语音与图像信息。</span>
                 </label>
 
                 <label class="settings-field">
                   <span class="settings-field-label">快速模型（Fast Model）</span>
-                  <input id="cfg-llm-fast-model" class="settings-input" type="text" placeholder="mimo-v2-omni" autocomplete="off">
-                  <span class="settings-field-hint">用于记忆总结等轻量任务，降低时延与成本。</span>
+                  <input id="cfg-llm-fast-model" class="settings-input" type="text" placeholder="mimo-v2-pro" autocomplete="off">
+                  <span class="settings-field-hint">用于记忆总结等轻量任务。建议选非推理模型（如 <code>mimo-v2-pro</code>），推理模型会把预算花在思考链上导致输出为空。</span>
                 </label>
 
                 <label class="settings-field">
@@ -363,6 +388,40 @@
                   </select>
                   <span class="settings-field-hint">多数 Provider 选 OpenAI 兼容即可。</span>
                 </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">上下文窗口（context_window）</span>
+                  <input id="cfg-llm-context-window" class="settings-input" type="number" min="1024" step="1024" placeholder="128000" autocomplete="off">
+                  <span class="settings-field-hint">
+                    模型的输入 token 预算。按所用模型填：<code>mimo-v2-pro</code> / <code>mimo-v2-omni</code> ≈ 128000、
+                    Claude Sonnet ≈ 200000、<code>gpt-4o-mini</code> ≈ 128000。
+                    目前仅作信息记录，将来用于历史消息自动裁剪以避免超窗。
+                  </span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">单次输出上限（max_tokens）</span>
+                  <input id="cfg-llm-max-tokens" class="settings-input" type="number" min="256" step="256" placeholder="4096" autocomplete="off">
+                  <span class="settings-field-hint">
+                    每轮 LLM 回复的 token 上限（OpenAI: <code>max_tokens</code>；MiMo: <code>max_completion_tokens</code>）。
+                    多轮工具调用建议 ≥ 2048；复杂长回复可调到 8192。
+                  </span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">摘要任务输出上限（summary_max_tokens）</span>
+                  <input id="cfg-llm-summary-max-tokens" class="settings-input" type="number" min="1024" step="1024" placeholder="8192" autocomplete="off">
+                  <span class="settings-field-hint">
+                    每日记忆 / 会话摘要专用。推理模型（mimo-v2-omni、o-系列、deepseek-r1）会把预算花在思考链上，
+                    至少给 <strong>4096</strong> 才能稳定产出 bullet；非推理模型 2048 即可。
+                  </span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">Temperature</span>
+                  <input id="cfg-llm-temperature" class="settings-input" type="number" min="0" max="2" step="0.05" placeholder="0.3" autocomplete="off">
+                  <span class="settings-field-hint">采样温度，0 最稳定，1.0 更发散。对话型用 0.3–0.7 比较合适。</span>
+                </label>
               </div>
 
               <div class="settings-actions">
@@ -371,9 +430,62 @@
                 <button id="btn-cfg-llm-save" class="send-button" type="button">保存并生效</button>
               </div>
             </div>
-          </div>
 
-          <div class="settings-pane hidden" data-settings-pane="persona">
+            <div class="settings-card">
+              <div class="settings-card-title">语音链路</div>
+              <div class="settings-card-desc">TTS 语音合成相关。大多数字段热改即可生效。</div>
+
+              <div class="settings-form" data-cfg-section="voice">
+                <label class="settings-field" data-cfg-field="voice.tts_provider">
+                  <span class="settings-field-label">TTS Provider</span>
+                  <select class="settings-input" data-cfg-input="voice.tts_provider">
+                    <option value="mimo">mimo（MiMo-V2-TTS，流式 PCM）</option>
+                    <option value="edge-tts">edge-tts（微软 Edge，免费无 Key）</option>
+                  </select>
+                  <span class="settings-field-hint" data-cfg-tts-provider-hint>
+                    选择 <code>mimo</code> 时会复用「LLM」卡片里的 <code>api_key</code> + <code>api_base</code>，
+                    <b>必须是 xiaomimimo.com 的密钥</b>；选择 <code>edge-tts</code> 则完全本地调用，无需 Key。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="voice.tts_voice">
+                  <span class="settings-field-label">TTS 声音</span>
+                  <select class="settings-input" data-cfg-input="voice.tts_voice" data-cfg-tts-voice>
+                  </select>
+                  <span class="settings-field-hint">可用声音会跟随 TTS Provider 变化；保存后下次对话生效。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-voice-status" class="settings-status" aria-live="polite"></span>
+                <button class="send-button" type="button" data-cfg-save="voice">保存</button>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="settings-card-title">Web 服务</div>
+              <div class="settings-card-desc">
+                Web UI 与 HTTP Gateway 的监听端口。默认 <code>8420</code>；被 <code>--web-port</code> 覆盖时会标灰提示。修改后需要在启动 lampgo 的终端 <code>Ctrl+C</code> 重跑才会生效（冷重启）。
+              </div>
+
+              <div class="settings-form" data-cfg-section="web">
+                <label class="settings-field" data-cfg-field="web.port">
+                  <span class="settings-field-label">Web 端口 (web.port)</span>
+                  <input class="settings-input" type="number" min="1" max="65535" step="1" placeholder="8420" data-cfg-input="web.port">
+                  <span class="settings-field-hint">OpenClaw 插件、外部脚本默认通过此端口访问 lampgo 守护进程。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="web.port"></span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-web-status" class="settings-status" aria-live="polite"></span>
+                <button class="send-button" type="button" data-cfg-save="web">保存</button>
+              </div>
+            </div>
+            </div>
+
+            <div class="settings-pane hidden" data-settings-pane="persona">
             <div class="settings-persona">
               <aside class="settings-persona-list" role="tablist" aria-label="人设文件">
                 <div class="settings-persona-list-head">
@@ -409,9 +521,9 @@
                 </div>
               </div>
             </div>
-          </div>
+            </div>
 
-          <div class="settings-pane hidden" data-settings-pane="memory">
+            <div class="settings-pane hidden" data-settings-pane="memory">
             <div class="settings-persona">
               <aside class="settings-persona-list" role="tablist" aria-label="记忆分类">
                 <div class="settings-persona-list-head">
@@ -450,6 +562,7 @@
                 <div data-memory-view="daily" class="settings-memory-view hidden">
                   <div class="settings-persona-editor-head">
                     <span class="settings-persona-editor-title">每日记忆</span>
+                    <button id="btn-memory-daily-summarize-now" class="sidebar-mini-btn" type="button" title="立即用 fast_model 对当前会话进行一次摘要并写入今日文件，跳过 3 分钟空闲等待">立即总结当前会话</button>
                     <button id="btn-memory-daily-reload" class="sidebar-mini-btn is-ghost" type="button" title="从磁盘重新加载日期列表与当前内容">刷新</button>
                   </div>
                   <div class="settings-card-desc">按天归档的对话摘要，空闲 3 分钟后会话自动总结。近 3 天会注入 prompt。</div>
@@ -474,7 +587,209 @@
                 </div>
               </div>
             </div>
-          </div>
+            </div>
+
+            <div class="settings-pane hidden" data-settings-pane="hardware">
+            <div class="settings-card">
+              <div class="settings-card-title">硬件接入</div>
+              <div class="settings-card-desc">
+                串口、LED、摄像头、麦克风。摄像头 / 麦克风启动时会自动探测，下拉框里直接选；电机 / LED 串口想看可用端口请在终端跑 <code>uv run lampgo detect</code>。修改后需要在启动 lampgo 的终端 <code>Ctrl+C</code> 重跑才会生效（冷重启）。
+              </div>
+
+              <div class="settings-form" data-cfg-section="hardware">
+                <label class="settings-field" data-cfg-field="device.motor_port">
+                  <span class="settings-field-label">电机串口 (motor_port)</span>
+                  <input class="settings-input" type="text" placeholder="/dev/tty.usbmodem..." data-cfg-input="device.motor_port" list="cfg-hw-serial-list">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.motor_port"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device.led_port">
+                  <span class="settings-field-label">LED 串口 (led_port)</span>
+                  <input class="settings-input" type="text" placeholder="/dev/tty.usbmodem..." data-cfg-input="device.led_port" list="cfg-hw-serial-list">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.led_port"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device.lamp_id">
+                  <span class="settings-field-label">设备标识 (lamp_id)</span>
+                  <input class="settings-input" type="text" placeholder="AL02" data-cfg-input="device.lamp_id">
+                  <span class="settings-field-hint">用于查找标定文件，默认 <code>AL02</code>。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.lamp_id"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device.use_degrees">
+                  <span class="settings-field-label">
+                    <input type="checkbox" data-cfg-input="device.use_degrees">
+                    角度输入用度数（deg）
+                  </span>
+                  <span class="settings-field-hint">控制外部 API / 录制文件里的角度单位：开启=度数（30°），关闭=弧度（0.52 rad）。建议保持关闭，除非你确认手写的动作文件都是度数。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.use_degrees"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="camera.port">
+                  <span class="settings-field-label">摄像头端口 (camera.port)</span>
+                  <select class="settings-input" data-cfg-input="camera.port" data-cfg-camera-port>
+                    <option value="">关闭 / 禁用视觉输入</option>
+                  </select>
+                  <span class="settings-field-hint">与顶栏「摄像头」胶囊共用同一份探测结果；保存后立即生效。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="camera.port"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="voice.mic_device">
+                  <span class="settings-field-label">麦克风设备 (mic_device)</span>
+                  <select class="settings-input" data-cfg-input="voice.mic_device" data-cfg-mic-device>
+                    <option value="">系统默认</option>
+                  </select>
+                  <span class="settings-field-hint">
+                    服务端 <code>sounddevice</code> 枚举结果（给 <code>VoiceLoop</code> 用）；和顶栏「麦克风」胶囊不是同一条链路：
+                    顶栏胶囊只控浏览器网页录音。修改后需重启 lampgo 才会重新打开音频流。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.mic_device"></span>
+                </label>
+                <datalist id="cfg-hw-serial-list"></datalist>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-hw-status" class="settings-status" aria-live="polite"></span>
+                <button class="send-button" type="button" data-cfg-save="device">保存</button>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="settings-card-title">运动（高级）</div>
+              <div class="settings-card-desc">
+                动作默认参数。大多数字段热改即可生效。
+              </div>
+
+              <div class="settings-form" data-cfg-section="motion">
+                <label class="settings-field" data-cfg-field="motion.tick_rate_hz">
+                  <span class="settings-field-label">Tick 频率 (Hz)</span>
+                  <input class="settings-input" type="number" min="20" max="400" step="10" data-cfg-input="motion.tick_rate_hz">
+                  <span class="settings-field-hint">
+                    电机控制回路的刷新频率。越高动作越平滑但 CPU 占用越高；默认 <code>50Hz</code>，一般 50–100 之间即可。改完即时生效（下一个 tick 就用新周期）。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.tick_rate_hz"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.default_max_velocity">
+                  <span class="settings-field-label">默认最大速度 (度/秒)</span>
+                  <input class="settings-input" type="number" step="1" data-cfg-input="motion.default_max_velocity">
+                  <span class="settings-field-hint">
+                    当一次动作没有显式指定 <code>max_velocity</code> 时的速度预算；用来给弹簧频率封顶，值越小动作越柔。默认 <code>120</code>。
+                    真正的硬上限是下方「安全限速」里的 <code>safety.max_velocity</code>，任何动作都不会突破那个值。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.default_max_velocity"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.default_style">
+                  <span class="settings-field-label">默认动作风格 (default_style)</span>
+                  <select class="settings-input" data-cfg-input="motion.default_style">
+                    <option value="gentle">gentle — 平滑无超调（默认）</option>
+                    <option value="confident">confident — 偏快带小弹跳</option>
+                    <option value="curious">curious — 慢且带明显超调</option>
+                    <option value="bouncy">bouncy — 快而多次弹跳，欢快</option>
+                    <option value="hesitant">hesitant — 过阻尼缓慢，犹豫</option>
+                    <option value="linear">linear — 接近直通，视觉伺服</option>
+                  </select>
+                  <span class="settings-field-hint">动作没有显式指定 <code>style</code> 时使用的弹簧-阻尼预设；单个动作仍可在指令里覆盖。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.default_style"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.default_playback_mode">
+                  <span class="settings-field-label">默认回放模式 (default_playback_mode)</span>
+                  <select class="settings-input" data-cfg-input="motion.default_playback_mode">
+                    <option value="cleaned">cleaned — 平滑（推荐，去抖动）</option>
+                    <option value="raw">raw — 原始录制帧透传</option>
+                    <option value="expressive">expressive — 允许动作重叠，更有表现力</option>
+                  </select>
+                  <span class="settings-field-hint">
+                    <code>play_recording</code> 技能未显式指定时的回放模式。顶部聊天区「回放模式」胶囊是本会话的临时覆盖，不会写回这里。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.default_playback_mode"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.breathing_enabled">
+                  <span class="settings-field-label">
+                    <input type="checkbox" data-cfg-input="motion.breathing_enabled">
+                    呼吸动作（待机时轻微起伏）
+                  </span>
+                  <span class="settings-field-hint">
+                    空闲时叠加一个低频正弦微动，让台灯看上去"在呼吸"、不显得僵硬。有正在执行的动作时会自动让位。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.breathing_enabled"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.breathing_amplitude">
+                  <span class="settings-field-label">呼吸幅度 (度)</span>
+                  <input class="settings-input" type="number" step="0.5" min="0" data-cfg-input="motion.breathing_amplitude">
+                  <span class="settings-field-hint">
+                    呼吸起伏的峰值角度（各关节会再按比例缩放）。默认 <code>3°</code>；调小接近"屏息"，调大约到 <code>8°</code> 会明显晃。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.breathing_amplitude"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.overlapping_action">
+                  <span class="settings-field-label">
+                    <input type="checkbox" data-cfg-input="motion.overlapping_action">
+                    动作重叠（新动作可打断上一个）
+                  </span>
+                  <span class="settings-field-hint">
+                    启用后：次要关节会带一点延迟"跟"主关节走（Overlapping Action，迪士尼十二法则之一），同时新动作可以在旧动作未完成时无缝接管，看起来更连贯自然。关闭则每个动作必须先结束才放下一个。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.overlapping_action"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.anticipation_enabled">
+                  <span class="settings-field-label">
+                    <input type="checkbox" data-cfg-input="motion.anticipation_enabled">
+                    Anticipation（动作前先反向蓄力）
+                  </span>
+                  <span class="settings-field-hint">
+                    在大幅度动作开始前先朝相反方向轻轻"蓄一下力"，让动作看起来更有生气、更可预测。仅当移动距离超过下方阈值才会触发；对小幅动作无影响。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.anticipation_enabled"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.anticipation_threshold">
+                  <span class="settings-field-label">Anticipation 触发阈值 (度)</span>
+                  <input class="settings-input" type="number" step="1" min="0" data-cfg-input="motion.anticipation_threshold">
+                  <span class="settings-field-hint">
+                    只有当本次动作各关节位移的最大值 ≥ 这个角度时，才会做蓄力。默认 <code>10°</code>；调大 = 只在大动作时蓄力，调小 = 连点头这种小动作也蓄。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.anticipation_threshold"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.anticipation_ratio">
+                  <span class="settings-field-label">Anticipation 反向幅度比例</span>
+                  <input class="settings-input" type="number" step="0.01" min="0" max="0.5" data-cfg-input="motion.anticipation_ratio">
+                  <span class="settings-field-hint">
+                    蓄力角度 = 本次移动距离 × 这个比例（方向相反）。默认 <code>0.08</code>（8%）。调大蓄力更夸张像卡通，调小则几乎看不见。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.anticipation_ratio"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.anticipation_duration_ms">
+                  <span class="settings-field-label">Anticipation 持续时长 (ms)</span>
+                  <input class="settings-input" type="number" step="10" min="0" data-cfg-input="motion.anticipation_duration_ms">
+                  <span class="settings-field-hint">
+                    蓄力位保持多久再开始正式动作。默认 <code>120ms</code>。太短看不出"蓄"，太长会明显卡顿。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.anticipation_duration_ms"></span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-motion-status" class="settings-status" aria-live="polite"></span>
+                <button class="send-button" type="button" data-cfg-save="motion">保存</button>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="settings-card-title">安全限速</div>
+              <div class="settings-card-desc">全局速度/加速度上限。任何动作都不会超过这里的值。</div>
+
+              <div class="settings-form" data-cfg-section="safety">
+                <label class="settings-field" data-cfg-field="safety.max_velocity">
+                  <span class="settings-field-label">最大速度 (rad/s)</span>
+                  <input class="settings-input" type="number" step="0.1" data-cfg-input="safety.max_velocity">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="safety.max_velocity"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="safety.max_acceleration">
+                  <span class="settings-field-label">最大加速度 (rad/s²)</span>
+                  <input class="settings-input" type="number" step="0.1" data-cfg-input="safety.max_acceleration">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="safety.max_acceleration"></span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-safety-status" class="settings-status" aria-live="polite"></span>
+                <button class="send-button" type="button" data-cfg-save="safety">保存</button>
+              </div>
+            </div>
         </div>
       </section>
     </main>

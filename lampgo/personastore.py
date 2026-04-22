@@ -4,7 +4,7 @@ Encapsulates the `~/.lampgo/` directory:
 
 ```
 ~/.lampgo/
-├── config.toml          non-sensitive overrides (layered on top of lampgo.toml)
+├── config.toml          non-sensitive overrides (the only persistent TOML lampgo reads)
 ├── credentials.json     secrets (chmod 0600), never read by untrusted code paths
 ├── SOUL.md              identity
 ├── AGENTS.md            behavior guide
@@ -164,7 +164,7 @@ def _format_toml_value(value: Any) -> str:
 def _render_overrides_toml(data: dict[str, Any]) -> str:
     lines: list[str] = [
         "# lampgo 用户本地配置覆盖（由 UI 生成，不要手动乱编辑非 KV 结构）\n",
-        "# 优先级：defaults < lampgo.toml < 本文件 < 环境变量 < CLI\n",
+        "# 优先级：defaults < 本文件 < 环境变量 (LAMPGO_* / .env) < CLI\n",
     ]
     top_kv = {k: v for k, v in data.items() if not isinstance(v, dict)}
     for k, v in top_kv.items():

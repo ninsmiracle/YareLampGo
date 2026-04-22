@@ -20,7 +20,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from lampgo.core.config import WebConfig
+from lampgo.core.config import LLMConfig, WebConfig
 from lampgo.core.led import LED_EXPRESSIONS
 from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, IntentRouting
 from lampgo.perception.camera import CameraCapture
@@ -32,6 +32,41 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _coerce_value(current: Any, value: Any) -> Any:
+    """Best-effort coerce ``value`` to the same Python type as ``current``.
+
+    Used when patching LampgoConfig fields from JSON payloads that might
+    arrive as strings (e.g. numeric inputs from HTML forms). We only coerce
+    when the target field already has a typed value; otherwise the raw value
+    is returned and pydantic will do its own validation at load time.
+    """
+    if value is None or current is None:
+        return value
+    if isinstance(current, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    if isinstance(current, int) and not isinstance(current, bool):
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip():
+            return int(float(value))
+        return current
+    if isinstance(current, float):
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip():
+            return float(value)
+        return current
+    if isinstance(current, str):
+        return "" if value is None else str(value)
+    return value
 
 
 class WebGateway:
@@ -66,6 +101,14 @@ class WebGateway:
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
             Route("/api/estop", self.api_estop, methods=["POST"]),
             # ---- user-editable config / persona / memory ----
+            Route("/api/config", self.api_config_all, methods=["GET"]),
+            Route("/api/config/device", self.api_config_device, methods=["POST"]),
+            Route("/api/config/voice", self.api_config_voice, methods=["POST"]),
+            Route("/api/config/motion", self.api_config_motion, methods=["POST"]),
+            Route("/api/config/safety", self.api_config_safety, methods=["POST"]),
+            Route("/api/config/web", self.api_config_web, methods=["POST"]),
+            Route("/api/config/detect", self.api_config_detect, methods=["POST"]),
+            Route("/api/config/restart", self.api_config_restart, methods=["POST"]),
             Route("/api/config/llm", self.api_config_llm, methods=["GET", "POST"]),
             Route("/api/persona", self.api_persona_all, methods=["GET"]),
             Route("/api/persona/import-openclaw", self.api_persona_import, methods=["POST"]),
@@ -375,7 +418,10 @@ class WebGateway:
             "label": "MiMo（小米）",
             "base_url": "https://api.xiaomimimo.com/v1",
             "default_model": "mimo-v2-omni",
-            "default_fast_model": "mimo-v2-omni",
+            # mimo-v2-pro：非推理的对话模型，更适合"记忆总结/意图分类"这类
+            # 轻量短输出任务。mimo-v2-omni 是推理模型，会把预算全花在 reasoning
+            # 上导致正式 content 空返（参见 _summarize_messages 里的注释）。
+            "default_fast_model": "mimo-v2-pro",
             "message_type": "openai",
         },
         "openrouter": {
@@ -429,11 +475,271 @@ class WebGateway:
         },
     }
 
+    # ------------------------------------------------------------------
+    # Generic configuration endpoints (device / voice / motion / safety)
+    # ------------------------------------------------------------------
+
+    # Fields that require a daemon restart to take effect (can't be applied
+    # to a live motion loop without reconnecting hardware).
+    #
+    # Deliberately NOT listed here:
+    #   - camera.port      → hot-swapped via the set_camera WS command in
+    #                        `server._handle_set_camera`; the Web UI also
+    #                        rebroadcasts this on save.
+    #   - voice.mic_device → only read when a VoiceLoop is (re)constructed.
+    #                        Web UI users capture mic in the browser, so the
+    #                        server-side device never opens. CLI users pick
+    #                        it up on the next `--voice` invocation.
+    _COLD_RESTART_FIELDS: frozenset[str] = frozenset(
+        {
+            "device.motor_port",
+            "device.led_port",
+            "device.lamp_id",
+            "device.use_degrees",
+            "led.port",
+            "led.baud_rate",
+            "web.host",
+            "web.port",
+            "socket_path",
+        }
+    )
+
+    # Map web UI section → (allowed LampgoConfig paths, restart-only fields).
+    # Each path uses the same dotted notation as the provenance map.
+    _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+        "device": (
+            "device.motor_port",
+            "device.led_port",
+            "device.lamp_id",
+            "device.use_degrees",
+            "led.port",
+        ),
+        "voice": (
+            "voice.tts_provider",
+            "voice.tts_voice",
+            "voice.mic_device",
+            "camera.port",
+        ),
+        "motion": (
+            "motion.tick_rate_hz",
+            "motion.default_max_velocity",
+            "motion.default_style",
+            "motion.default_playback_mode",
+            "motion.breathing_enabled",
+            "motion.breathing_amplitude",
+            "motion.overlapping_action",
+            "motion.anticipation_enabled",
+            "motion.anticipation_threshold",
+            "motion.anticipation_ratio",
+            "motion.anticipation_duration_ms",
+        ),
+        "safety": (
+            "safety.max_velocity",
+            "safety.max_acceleration",
+        ),
+        "web": (
+            "web.port",
+        ),
+    }
+
+    def _dump_section(self, section_fields: tuple[str, ...], provenance: dict[str, str]) -> dict[str, Any]:
+        """Build ``{field: {value, source}}`` payload for the given dotted paths."""
+        cfg = self.server.config
+        out: dict[str, Any] = {}
+        for dotted in section_fields:
+            head, _, tail = dotted.partition(".")
+            obj = getattr(cfg, head, None)
+            if not tail:
+                value = obj
+            else:
+                value = getattr(obj, tail, None) if obj is not None else None
+            out[dotted] = {
+                "value": value,
+                "source": provenance.get(dotted, "default"),
+            }
+        return out
+
+    def _list_env_overrides(self, provenance: dict[str, str]) -> list[str]:
+        return sorted(k for k, v in provenance.items() if v == "env")
+
+    async def api_config_all(self, request: Request) -> JSONResponse:
+        """Return every editable field grouped by tab, with per-field provenance."""
+        from lampgo.core.config import load_config_with_provenance
+
+        _, provenance = load_config_with_provenance()
+
+        sections = {
+            name: self._dump_section(fields, provenance)
+            for name, fields in self._SECTION_FIELDS.items()
+        }
+
+        cold_fields = sorted(self._COLD_RESTART_FIELDS)
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "sections": sections,
+                    "env_overrides": self._list_env_overrides(provenance),
+                    "cold_restart_fields": cold_fields,
+                    "provenance": provenance,
+                },
+            }
+        )
+
+    async def _save_section(
+        self,
+        request: Request,
+        section: str,
+    ) -> JSONResponse:
+        """Common POST handler: accept a flat field map, validate + persist."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "body must be a JSON object"}, status_code=400)
+
+        allowed = self._SECTION_FIELDS.get(section)
+        if allowed is None:
+            return JSONResponse({"ok": False, "error": f"unknown section: {section}"}, status_code=400)
+        allowed_set = set(allowed)
+
+        # Accept two input shapes:
+        #   { "device.motor_port": "/dev/...", ... }       ← dotted flat
+        #   { "motor_port": "/dev/...", ... }              ← bare field names
+        # We normalize to dotted form and reject unknown keys.
+        flat: dict[str, Any] = {}
+        for key, value in body.items():
+            if key in allowed_set:
+                flat[key] = value
+                continue
+            # try prefixing with section
+            candidate = f"{section}.{key}"
+            if candidate in allowed_set:
+                flat[candidate] = value
+                continue
+            # try matching any allowed field with the same tail
+            matches = [p for p in allowed_set if p.endswith("." + key)]
+            if len(matches) == 1:
+                flat[matches[0]] = value
+                continue
+            return JSONResponse(
+                {"ok": False, "error": f"field '{key}' not allowed in section '{section}'"},
+                status_code=400,
+            )
+
+        if not flat:
+            return JSONResponse({"ok": False, "error": "no fields to update"}, status_code=400)
+
+        # Build nested patch for personastore.
+        patch: dict[str, Any] = {}
+        for dotted, value in flat.items():
+            head, _, tail = dotted.partition(".")
+            if not tail:
+                patch[head] = value
+            else:
+                patch.setdefault(head, {})[tail] = value
+
+        # Apply to running config + save.
+        from lampgo import personastore
+
+        try:
+            self._apply_flat_to_config(flat)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"invalid value: {exc}"}, status_code=400)
+        personastore.patch_overrides_toml(patch)
+
+        needs_restart = sorted(f for f in flat if f in self._COLD_RESTART_FIELDS)
+
+        # Recompute provenance so the UI can refresh the override hints.
+        from lampgo.core.config import load_config_with_provenance
+
+        _, provenance = load_config_with_provenance()
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "saved": sorted(flat.keys()),
+                    "needs_restart": needs_restart,
+                    "section": self._dump_section(allowed, provenance),
+                    "env_overrides": self._list_env_overrides(provenance),
+                },
+            }
+        )
+
+    def _apply_flat_to_config(self, flat: dict[str, Any]) -> None:
+        """Mutate ``self.server.config`` in place so hot-reload fields take effect."""
+        cfg = self.server.config
+        for dotted, value in flat.items():
+            head, _, tail = dotted.partition(".")
+            obj = getattr(cfg, head, None)
+            if obj is None:
+                continue
+            if not tail:
+                setattr(cfg, head, value)
+                continue
+            # Coerce to the current field's type for pydantic friendliness.
+            current = getattr(obj, tail, None)
+            coerced = _coerce_value(current, value)
+            setattr(obj, tail, coerced)
+
+    async def api_config_device(self, request: Request) -> JSONResponse:
+        return await self._save_section(request, "device")
+
+    async def api_config_voice(self, request: Request) -> JSONResponse:
+        return await self._save_section(request, "voice")
+
+    async def api_config_motion(self, request: Request) -> JSONResponse:
+        return await self._save_section(request, "motion")
+
+    async def api_config_safety(self, request: Request) -> JSONResponse:
+        return await self._save_section(request, "safety")
+
+    async def api_config_web(self, request: Request) -> JSONResponse:
+        return await self._save_section(request, "web")
+
+    async def api_config_detect(self, request: Request) -> JSONResponse:
+        """Run hardware autodetect on demand (used by the 硬件 tab button)."""
+        try:
+            from lampgo import autodetect
+
+            # detect_ports may block on serial IO; run off the event loop.
+            result = await asyncio.to_thread(autodetect.detect_ports)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return JSONResponse({"ok": True, "result": result})
+
+    async def api_config_restart(self, request: Request) -> JSONResponse:
+        """Cold-restart hint.
+
+        We intentionally don't try to actually restart the daemon here — the
+        user may or may not have launched lampgo under a supervisor. Returning
+        a structured hint lets the UI explain the situation (see design plan).
+        """
+        import os
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "restarted": False,
+                    "pid": os.getpid(),
+                    "hint": (
+                        "请在启动 lampgo 的终端按 Ctrl+C 退出当前进程，再重跑 "
+                        "`uv run lampgo run --web`。硬件相关字段需要重新打开串口才会生效。"
+                    ),
+                },
+            }
+        )
+
     async def api_config_llm(self, request: Request) -> JSONResponse:
         from lampgo import personastore
 
         if request.method == "GET":
             cfg = self.server.config.llm
+            provider = str(LLMConfig.normalize_provider_alias(cfg.provider) or "")
             overrides = personastore.get_overrides_toml()
             message_type = (
                 (overrides.get("llm") or {}).get("message_type")
@@ -445,13 +751,17 @@ class WebGateway:
                 {
                     "ok": True,
                     "result": {
-                        "provider": cfg.provider,
+                        "provider": provider,
                         "api_base": cfg.api_base,
                         "api_key_preview": personastore.mask_api_key(cfg.api_key),
                         "api_key_is_set": bool(cfg.api_key),
                         "model": cfg.model,
                         "fast_model": cfg.fast_model,
                         "message_type": message_type,
+                        "max_tokens": cfg.max_tokens,
+                        "summary_max_tokens": cfg.summary_max_tokens,
+                        "context_window": cfg.context_window,
+                        "temperature": cfg.temperature,
                         "share_openclaw_memory": share_memory,
                         "provider_presets": self._PROVIDER_PRESETS,
                     },
@@ -462,7 +772,21 @@ class WebGateway:
         # Quick path: caller only toggles share_openclaw_memory.
         if (
             "share_openclaw_memory" in body
-            and not any(k in body for k in ("provider", "api_base", "api_key", "model", "fast_model", "message_type"))
+            and not any(
+                k in body
+                for k in (
+                    "provider",
+                    "api_base",
+                    "api_key",
+                    "model",
+                    "fast_model",
+                    "message_type",
+                    "max_tokens",
+                    "summary_max_tokens",
+                    "context_window",
+                    "temperature",
+                )
+            )
         ):
             from lampgo import personastore
 
@@ -475,6 +799,7 @@ class WebGateway:
         validate = bool(body.get("validate", True))
         dry_run = bool(body.get("dry_run", False))
         provider = str(body.get("provider") or "").strip() or self.server.config.llm.provider
+        provider = str(LLMConfig.normalize_provider_alias(provider) or "")
         api_base = str(body.get("api_base") or "").strip()
         api_key_raw = body.get("api_key")
         api_key = str(api_key_raw).strip() if api_key_raw is not None else ""
@@ -482,6 +807,34 @@ class WebGateway:
         fast_model = str(body.get("fast_model") or "").strip() or model
         message_type = str(body.get("message_type") or "").strip() or "openai"
         share_memory = body.get("share_openclaw_memory")
+
+        def _coerce_positive_int(raw: Any, fallback: int) -> int:
+            if raw is None or raw == "":
+                return int(fallback)
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return int(fallback)
+            return v if v > 0 else int(fallback)
+
+        def _coerce_temperature(raw: Any, fallback: float) -> float:
+            if raw is None or raw == "":
+                return float(fallback)
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                return float(fallback)
+            return max(0.0, min(2.0, v))
+
+        current_llm = self.server.config.llm
+        max_tokens_val = _coerce_positive_int(body.get("max_tokens"), current_llm.max_tokens)
+        summary_max_tokens_val = _coerce_positive_int(
+            body.get("summary_max_tokens"), current_llm.summary_max_tokens
+        )
+        context_window_val = _coerce_positive_int(
+            body.get("context_window"), current_llm.context_window
+        )
+        temperature_val = _coerce_temperature(body.get("temperature"), current_llm.temperature)
 
         if api_key == "":
             # empty string is a no-op (keep existing); client sends new key only when rotating.
@@ -511,6 +864,10 @@ class WebGateway:
                 "model": model,
                 "fast_model": fast_model,
                 "message_type": message_type,
+                "max_tokens": max_tokens_val,
+                "summary_max_tokens": summary_max_tokens_val,
+                "context_window": context_window_val,
+                "temperature": temperature_val,
             },
         }
         if share_memory is not None:
@@ -537,6 +894,10 @@ class WebGateway:
         cfg.llm.api_key = effective_key
         cfg.llm.model = model
         cfg.llm.fast_model = fast_model
+        cfg.llm.max_tokens = max_tokens_val
+        cfg.llm.summary_max_tokens = summary_max_tokens_val
+        cfg.llm.context_window = context_window_val
+        cfg.llm.temperature = temperature_val
         if share_memory is not None:
             cfg.share_openclaw_memory = bool(share_memory)
 
@@ -561,6 +922,10 @@ class WebGateway:
                     "model": model,
                     "fast_model": fast_model,
                     "message_type": message_type,
+                    "max_tokens": max_tokens_val,
+                    "summary_max_tokens": summary_max_tokens_val,
+                    "context_window": context_window_val,
+                    "temperature": temperature_val,
                     "api_key_preview": personastore.mask_api_key(effective_key),
                     "api_key_is_set": bool(effective_key),
                     "share_openclaw_memory": bool(cfg.share_openclaw_memory),
@@ -808,28 +1173,44 @@ class WebGateway:
         except Exception:
             return []
         url = f"{base}/chat/completions"
-        payload = {
+        # 摘要任务的 token 预算读 llm.summary_max_tokens（UI 可改）。保留下限 1024
+        # 兜底：推理模型（mimo-v2-omni / o-系列 / deepseek-r1）会把预算花在
+        # reasoning_content 上，预算不够就 finish_reason=length、content 为空。
+        summary_budget = max(1024, int(getattr(cfg, "summary_max_tokens", 0) or 0))
+        payload: dict[str, Any] = {
             "model": cfg.fast_model or cfg.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": transcript},
             ],
-            "max_tokens": 256,
+            "max_tokens": summary_budget,
             "temperature": 0.2,
         }
+        # mimo-v2-omni 是推理模型；这个任务里它会花几百 token 思考却不吐内容。
+        # chat_template_kwargs.enable_thinking=false 会跳过思考链，直接吐 bullet。
+        # 对非 mimo provider 带上这个字段也无副作用（未知字段多半被忽略），但为
+        # 保守起见仅在 mimo 下注入。
+        if (cfg.provider or "").lower() == "mimo":
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code >= 400:
                 logger.warning("memory.summarize.http_error", status=resp.status_code, body=resp.text[:200])
                 return []
             data = resp.json()
             content = ""
+            finish_reason = ""
+            reasoning_len = 0
             if isinstance(data, dict):
                 choices = data.get("choices") or []
                 if choices:
-                    content = str(((choices[0] or {}).get("message") or {}).get("content") or "")
+                    choice = choices[0] or {}
+                    finish_reason = str(choice.get("finish_reason") or "")
+                    message = choice.get("message") or {}
+                    content = str(message.get("content") or "")
+                    reasoning_len = len(str(message.get("reasoning_content") or ""))
         except Exception:
             logger.exception("memory.summarize.failed")
             return []
@@ -843,6 +1224,24 @@ class WebGateway:
             body_line = norm.lstrip("-•*· ").strip()
             if body_line:
                 bullets.append(body_line)
+        # Diagnostic: empty content with a non-trivial reasoning chain usually means
+        # the model ran out of tokens while "thinking" — log loud enough so the user
+        # can see why /memory/summarize keeps returning skipped=no-summary.
+        if not bullets and not content.strip() and reasoning_len > 0:
+            logger.warning(
+                "memory.summarize.reasoning_only",
+                model=payload["model"],
+                finish_reason=finish_reason,
+                reasoning_chars=reasoning_len,
+                hint="reasoning model consumed all max_tokens before emitting content; try a non-reasoning fast_model",
+            )
+        elif not bullets and content.strip():
+            logger.info(
+                "memory.summarize.no_bullets",
+                model=payload["model"],
+                finish_reason=finish_reason,
+                content_preview=content[:120],
+            )
         return bullets[:3]
 
     async def api_memory_openclaw(self, request: Request) -> JSONResponse:
@@ -1124,6 +1523,12 @@ class WebGateway:
         elif msg_type == "set_camera":
             result = self.server._handle_set_camera(str(msg.get("port", "")))
             result["type"] = "set_camera"
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "list_mics":
+            result = self.server._handle_list_mics()
+            result["type"] = "list_mics"
             result["request_id"] = request_id
             await ws.send_json(result)
 
