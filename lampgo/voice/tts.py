@@ -199,30 +199,67 @@ async def play_audio_file(path: Path) -> None:
     logger.warning("tts.no_player", msg="Install ffplay or mpv to hear TTS output")
 
 
-async def synthesize_for_web(text: str, api_key: str = "", api_base: str = "", voice: str = "") -> tuple[str, str] | None:
-    """Generate TTS audio suitable for browser playback. Returns (base64_audio, format) or None."""
+async def synthesize_for_web(
+    text: str,
+    api_key: str = "",
+    api_base: str = "",
+    voice: str = "",
+    provider: str = "",
+) -> tuple[str, str] | None:
+    """Generate TTS audio suitable for browser playback.
+
+    ``provider`` comes from ``config.voice.tts_provider`` and takes precedence:
+      - "edge-tts" → always use EdgeTTS (no Key needed).
+      - "mimo"     → use MiMoTTS (requires ``api_key``).
+      - ""         → legacy auto-detect: MiMo if key is present, else Edge.
+
+    Returns ``(base64_audio, format)`` or ``None`` on failure.
+    """
     if not text.strip():
         return None
 
-    if api_key:
-        tts = MiMoTTS(api_key=api_key, api_base=api_base or "https://api.xiaomimimo.com/v1", voice=voice or "mimo_default")
-        chunks: list[bytes] = []
-        async for pcm in tts.stream_pcm(text):
-            chunks.append(pcm)
-        if not chunks:
-            return None
-        wav_bytes = _pcm_to_wav(b"".join(chunks), TTS_SAMPLE_RATE)
-        return base64.b64encode(wav_bytes).decode(), "wav"
+    chosen = (provider or "").strip().lower()
+    if not chosen:
+        chosen = "mimo" if api_key else "edge-tts"
 
-    try:
-        edge = EdgeTTS()
-        path = await edge.synthesize(text)
-        if path and path.exists():
-            mp3_bytes = path.read_bytes()
-            path.unlink(missing_ok=True)
-            return base64.b64encode(mp3_bytes).decode(), "mp3"
-    except Exception:
-        logger.exception("tts.web_synthesize_failed")
+    if chosen == "mimo":
+        if not api_key:
+            logger.warning(
+                "tts.web_synthesize_missing_key",
+                msg="tts_provider=mimo requires api_key; falling back to edge-tts",
+            )
+            chosen = "edge-tts"
+        else:
+            tts = MiMoTTS(
+                api_key=api_key,
+                api_base=api_base or "https://api.xiaomimimo.com/v1",
+                voice=voice or "mimo_default",
+            )
+            chunks: list[bytes] = []
+            async for pcm in tts.stream_pcm(text):
+                chunks.append(pcm)
+            if not chunks:
+                return None
+            wav_bytes = _pcm_to_wav(b"".join(chunks), TTS_SAMPLE_RATE)
+            return base64.b64encode(wav_bytes).decode(), "wav"
+
+    if chosen == "edge-tts":
+        try:
+            # Edge voice names look like "zh-CN-XiaoxiaoNeural". If `voice` is
+            # something else (e.g. a mimo voice id left over from a previous
+            # provider), fall back to the EdgeTTS default.
+            edge_voice = voice if voice and "-" in voice else ""
+            edge = EdgeTTS(voice=edge_voice) if edge_voice else EdgeTTS()
+            path = await edge.synthesize(text)
+            if path and path.exists():
+                mp3_bytes = path.read_bytes()
+                path.unlink(missing_ok=True)
+                return base64.b64encode(mp3_bytes).decode(), "mp3"
+        except Exception:
+            logger.exception("tts.web_synthesize_failed")
+        return None
+
+    logger.warning("tts.web_synthesize_unknown_provider", provider=chosen)
     return None
 
 

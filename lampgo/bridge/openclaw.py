@@ -146,6 +146,111 @@ class OpenClawAdapter:
         self._event_subscribers: list[Callable[..., Awaitable[None]]] = []
         self._tasks: dict[str, OpenClawTask] = {}
         self._lock = asyncio.Lock()
+        self._load_tasks_from_disk()
+
+    # ---- persistence: ~/.lampgo/openclaw_tasks.json -----------------------
+
+    @staticmethod
+    def _tasks_path():
+        from pathlib import Path
+        import os
+
+        base = Path(os.environ.get("LAMPGO_HOME") or Path.home() / ".lampgo")
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "openclaw_tasks.json"
+
+    def _load_tasks_from_disk(self) -> None:
+        import json
+        from pathlib import Path
+
+        path: Path = self._tasks_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.exception("openclaw.load_corrupt", path=str(path))
+            return
+        if not isinstance(data, dict):
+            return
+        raw_tasks = data.get("tasks")
+        if not isinstance(raw_tasks, list):
+            return
+        for raw in raw_tasks:
+            if not isinstance(raw, dict):
+                continue
+            task_id = raw.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            proposals: list[PromotionProposal] = []
+            for rp in raw.get("proposals") or []:
+                if not isinstance(rp, dict):
+                    continue
+                try:
+                    proposals.append(
+                        PromotionProposal(
+                            proposal_id=str(rp.get("proposal_id", "")),
+                            proposal_type=str(rp.get("proposal_type", "")),
+                            title=str(rp.get("title", "")),
+                            summary=str(rp.get("summary", "")),
+                            files=list(rp.get("files") or []),
+                            risks=list(rp.get("risks") or []),
+                            worker=str(rp.get("worker", "claude_code")),
+                            promotion_target=str(rp.get("promotion_target", "")),
+                            status=str(rp.get("status", "pending")),
+                        )
+                    )
+                except Exception:
+                    continue
+            try:
+                task = OpenClawTask(
+                    task_id=task_id,
+                    request_id=str(raw.get("request_id", "")),
+                    user_text=str(raw.get("user_text", "")),
+                    reason=str(raw.get("reason", "")),
+                    source=str(raw.get("source", "openclaw")),
+                    status=str(raw.get("status", "queued")),
+                    detail=str(raw.get("detail", "")),
+                    created_at=float(raw.get("created_at", time.time())),
+                    updated_at=float(raw.get("updated_at", time.time())),
+                    available_capability_count=int(raw.get("available_capability_count", 0) or 0),
+                    recent_tool_calls=list(raw.get("recent_tool_calls") or []),
+                    proposals=proposals,
+                )
+            except Exception:
+                logger.exception("openclaw.load_task_failed", task_id=task_id)
+                continue
+            self._tasks[task_id] = task
+        logger.info("openclaw.tasks_loaded", count=len(self._tasks), path=str(path))
+
+    def _persist_tasks(self) -> None:
+        """Snapshot current tasks to disk. Safe to call from any async context."""
+        import json
+        import os
+        import tempfile
+
+        path = self._tasks_path()
+        try:
+            data = {
+                "version": 1,
+                "updated_at": time.time(),
+                "tasks": [task.to_dict() for task in self._tasks.values()],
+            }
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=str(path.parent),
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                json.dump(data, tmp, ensure_ascii=False, separators=(",", ":"))
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_name = tmp.name
+            os.replace(tmp_name, path)
+        except Exception:
+            logger.exception("openclaw.persist_failed", path=str(path))
 
     def get_capabilities(self) -> list[CapabilitySpec]:
         return [CapabilitySpec(skill) for skill in self._registry.list_skills()]
@@ -325,9 +430,18 @@ class OpenClawAdapter:
         """Run OpenClaw agent directly when no promotion proposal is required."""
         message = (
             f"用户任务：{user_text}\n"
-            "指令：请直接完成该任务。如果需要操作 lampgo 机器人（动作/表情/状态/录制），"
-            "请使用 lampgo plugin tools（lampgo_status / lampgo_move / lampgo_expression / "
-            "lampgo_save_recording 等）。如需用户澄清，请调用 lampgo_ask_user。"
+            "指令：请直接完成该任务。以下是关键上下文和工具选择规则：\n"
+            "1. 用户是通过桌面台灯机器人 lampgo 和你说话的。用户所有"
+            "'个人资料 / 人设 / 记忆'相关的请求（比如「把我叫成 XXX」「记住我喜欢 XXX」"
+            "「更新我的 profile」）指的都是 lampgo 的文件（位于 ~/.lampgo/），"
+            "不是你自己的 OpenClaw 配置。不要用通用的 write_file 去改 ~/.openclaw/ 里的任何东西。\n"
+            "2. 修改台灯对用户的称呼 / 主人偏好 → 调用 lampgo_save_persona(which=\"PROFILE\", content=...)；\n"
+            "   可先用 lampgo_get_persona(which=\"PROFILE\") 读取当前内容再修改。\n"
+            "3. 记住长期事实（而不是人设） → 调用 lampgo_save_memory(bullets=[...], promote=true)；\n"
+            "   只是当天笔记则 promote=false。\n"
+            "4. 操作 lampgo 机器人（动作/表情/状态/录制） → 用 lampgo_move / lampgo_expression / "
+            "lampgo_status / lampgo_save_recording 等。\n"
+            "5. 如需用户澄清，调用 lampgo_ask_user（会通过台灯 TTS 和 Web UI 询问用户）。"
         )
         logger.info("openclaw.executing_direct", task_id=task_id, message_preview=message[:120])
         try:
@@ -361,6 +475,8 @@ class OpenClawAdapter:
 
     async def _publish_task_update(self, task: OpenClawTask) -> None:
         snapshot = task.to_dict()
+        # Persist first so that a crash mid-publish still leaves disk consistent.
+        self._persist_tasks()
         await self._events.publish(OpenClawTaskUpdated(request_id=task.request_id, task=snapshot))
 
     def _build_proposal(self, task: OpenClawTask, payload: dict[str, Any]) -> PromotionProposal | None:

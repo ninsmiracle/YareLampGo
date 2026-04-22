@@ -68,6 +68,60 @@ def test_resolve_calibration_port_falls_back_to_autodetect(monkeypatch):
     assert port == "/dev/tty.usbmodemB"
 
 
+def test_load_config_from_args_degrades_to_no_hw_when_motor_port_missing(monkeypatch, capsys):
+    """Missing motor_port must NOT exit; must degrade to no_hw so Web UI still boots."""
+    args = argparse.Namespace(
+        config=None,
+        motor_port=None,
+        led_port=None,
+        lamp_id=None,
+        recordings_dir=None,
+    )
+
+    fake_config = SimpleNamespace(
+        device=SimpleNamespace(motor_port=""),
+        no_hw=False,
+        home_on_start=True,
+    )
+
+    import lampgo.core.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda config_path=None, cli_overrides=None: fake_config)
+
+    result = cli._load_config_from_args(args)
+    assert result is fake_config
+    assert result.no_hw is True
+    assert result.home_on_start is False
+
+    err = capsys.readouterr().err
+    assert "no-hw" in err.lower()
+
+
+def test_load_config_from_args_keeps_hw_when_motor_port_set(monkeypatch):
+    """motor_port present → must leave no_hw alone."""
+    args = argparse.Namespace(
+        config=None,
+        motor_port=None,
+        led_port=None,
+        lamp_id=None,
+        recordings_dir=None,
+    )
+
+    fake_config = SimpleNamespace(
+        device=SimpleNamespace(motor_port="/dev/ttyUSB0"),
+        no_hw=False,
+        home_on_start=True,
+    )
+
+    import lampgo.core.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda config_path=None, cli_overrides=None: fake_config)
+
+    result = cli._load_config_from_args(args)
+    assert result.no_hw is False
+    assert result.home_on_start is True
+
+
 def test_cmd_ping_reports_status_error(monkeypatch, capsys):
     args = argparse.Namespace(port="/dev/tty.test", config=None)
 

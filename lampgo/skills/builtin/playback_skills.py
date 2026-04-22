@@ -114,7 +114,14 @@ class PlayRecordingSkill(Skill):
         if not name:
             return SkillResult(status="error", message="Recording name required")
         expression = str(params.get("expression", "")).strip()
-        playback_mode = str(params.get("playback_mode", "cleaned")).strip().lower() or "cleaned"
+        raw_mode = params.get("playback_mode")
+        if raw_mode is None or not str(raw_mode).strip():
+            # Fall back to the server-wide default configured via Web UI /
+            # config.toml (motion.default_playback_mode). Tool-call invocations
+            # that omit the parameter get the operator's preferred mode.
+            playback_mode = getattr(getattr(ctx.motion, "_config", None), "default_playback_mode", "cleaned")
+        else:
+            playback_mode = str(raw_mode).strip().lower()
         if playback_mode not in PLAYBACK_MODES:
             logger.warning("playback.invalid_mode_fallback", requested=playback_mode, fallback="cleaned")
             playback_mode = "cleaned"

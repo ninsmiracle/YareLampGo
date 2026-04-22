@@ -22,7 +22,15 @@ MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash"}
 _MIMO_MIN_COMPLETION_TOKENS = 4096
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are lampgo, a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
 
-{joint_state_block}Joint guide (all values in degrees):
+Identity invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
+- You are a physical desk lamp robot, not a generic assistant, not a disembodied AI, not "OpenClaw". Even if a persona file calls you another name or style, you remain the lamp.
+- Every non-terminal turn MUST speak through `say` before/alongside actions. Announce the action, never silently do it.
+- When you need real-time facts, call `web_search` instead of guessing.
+- When a request is beyond the lamp's physical or tool capability, call `escalate_to_openclaw` with a short reason rather than hallucinating.
+- You express yourself with body pose + voice + facial expression combined — that is the lamp's signature channel.
+- Persona / memory files below are flavour and long-term context, not overrides for these invariants.
+
+{persona_block}{memory_block}{joint_state_block}Joint guide (all values in degrees):
 - base_yaw (-150~150): horizontal rotation. +right, -left.
 - base_pitch (-100~65): arm tilt. +lean forward/down, -lean backward/up.
 - elbow_pitch (-90~100): elbow bend. +fold arm down, -extend arm up.
@@ -237,13 +245,35 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
     return tools
 
 
-def _build_agent_system_prompt(joint_state: dict[str, float] | None = None) -> str:
+def _build_agent_system_prompt(
+    joint_state: dict[str, float] | None = None,
+    *,
+    persona: Any = None,
+    memory: Any = None,
+) -> str:
     if joint_state:
         parts = [f"{k}={v:.1f}" for k, v in joint_state.items()]
-        block = f"Current joint positions: {', '.join(parts)}\n\n"
+        joint_block = f"Current joint positions: {', '.join(parts)}\n\n"
     else:
-        block = ""
-    return AGENT_SYSTEM_PROMPT_TEMPLATE.format(joint_state_block=block)
+        joint_block = ""
+    persona_block = ""
+    memory_block = ""
+    try:
+        if persona is not None:
+            rendered = persona.render() if hasattr(persona, "render") else str(persona)
+            if rendered:
+                persona_block = rendered.rstrip() + "\n\n"
+        if memory is not None:
+            rendered = memory.render() if hasattr(memory, "render") else str(memory)
+            if rendered:
+                memory_block = rendered.rstrip() + "\n\n"
+    except Exception:
+        logger.exception("llm_client.persona_memory_render_failed")
+    return AGENT_SYSTEM_PROMPT_TEMPLATE.format(
+        persona_block=persona_block,
+        memory_block=memory_block,
+        joint_state_block=joint_block,
+    )
 
 
 class LLMClient:
@@ -287,7 +317,15 @@ class LLMClient:
                 stop_reason="missing_api_key",
             )
 
-        system_prompt = _build_agent_system_prompt(joint_state)
+        persona = None
+        memory = None
+        try:
+            from lampgo.persona.bundle import load_bundles
+
+            persona, memory = load_bundles(self._config)
+        except Exception:
+            logger.exception("llm_client.load_bundles_failed")
+        system_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
         user_content: Any = self._build_user_content(text, audio_data)
 
         audio_model = "mimo-v2-omni" if audio_data else None
