@@ -479,9 +479,18 @@ class LampgoServer:
                 return task
             return None
 
+        raw_history = data.get("history") or []
+        history = raw_history if isinstance(raw_history, list) else []
+
         intent = self.router.route(text)
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
-            logger.info("server.text_escalate_to_llm_agent", text=text, request_id=request_id, detail=intent.detail)
+            logger.info(
+                "server.text_escalate_to_llm_agent",
+                text=text,
+                request_id=request_id,
+                detail=intent.detail,
+                history_len=len(history),
+            )
             await _publish_intent_progress("llm_fallback", "关键词未命中，转交 LLM Agent...", "llm")
             agent_result = await self.router.run_agent_loop(
                 text,
@@ -499,6 +508,7 @@ class LampgoServer:
                     phase=phase,
                     **kwargs,
                 ),
+                history=history,
             )
             if agent_result.intent_type == "complex":
                 await self.events.publish(
@@ -637,7 +647,13 @@ class LampgoServer:
             IntentProgress(stage="audio_transcribed", message=f"听到：{text}", source="llm", request_id=request_id)
         )
 
-        result = await self._handle_text({"input": text, "request_id": request_id})
+        result = await self._handle_text(
+            {
+                "input": text,
+                "request_id": request_id,
+                "history": data.get("history") or [],
+            }
+        )
         await self._maybe_tts(result, request_id)
         return result
 
@@ -846,6 +862,7 @@ class LampgoServer:
                 api_base=self.config.llm.api_base,
                 voice=self.config.voice.tts_voice,
                 provider=self.config.voice.tts_provider,
+                model=self.config.voice.tts_model,
             )
             if result:
                 audio_b64, fmt = result

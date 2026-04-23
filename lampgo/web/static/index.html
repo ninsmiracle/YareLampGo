@@ -370,14 +370,14 @@
 
                 <label class="settings-field">
                   <span class="settings-field-label">主模型（Model）</span>
-                  <input id="cfg-llm-model" class="settings-input" type="text" placeholder="mimo-v2-omni" autocomplete="off">
-                  <span class="settings-field-hint">建议使用多模态模型，否则无法理解语音与图像信息。</span>
+                  <input id="cfg-llm-model" class="settings-input" type="text" placeholder="mimo-v2.5" autocomplete="off">
+                  <span class="settings-field-hint">建议使用多模态模型，否则无法理解语音与图像信息。默认 <code>mimo-v2.5</code>；需强推理可改 <code>mimo-v2-omni</code>。</span>
                 </label>
 
                 <label class="settings-field">
                   <span class="settings-field-label">快速模型（Fast Model）</span>
-                  <input id="cfg-llm-fast-model" class="settings-input" type="text" placeholder="mimo-v2-pro" autocomplete="off">
-                  <span class="settings-field-hint">用于记忆总结等轻量任务。建议选非推理模型（如 <code>mimo-v2-pro</code>），推理模型会把预算花在思考链上导致输出为空。</span>
+                  <input id="cfg-llm-fast-model" class="settings-input" type="text" placeholder="mimo-v2.5" autocomplete="off">
+                  <span class="settings-field-hint">用于记忆总结等轻量任务。默认 <code>mimo-v2.5</code>。建议选非推理模型，推理模型会把预算花在思考链上导致输出为空。</span>
                 </label>
 
                 <label class="settings-field">
@@ -391,29 +391,50 @@
 
                 <label class="settings-field">
                   <span class="settings-field-label">上下文窗口（context_window）</span>
-                  <input id="cfg-llm-context-window" class="settings-input" type="number" min="1024" step="1024" placeholder="128000" autocomplete="off">
+                  <input id="cfg-llm-context-window" class="settings-input" type="number" min="1024" step="1024" placeholder="200000" autocomplete="off">
                   <span class="settings-field-hint">
-                    模型的输入 token 预算。按所用模型填：<code>mimo-v2-pro</code> / <code>mimo-v2-omni</code> ≈ 128000、
-                    Claude Sonnet ≈ 200000、<code>gpt-4o-mini</code> ≈ 128000。
+                    模型的输入 token 预算。默认 <code>200000</code>。按所用模型填：
+                    <code>mimo-v2.5</code> ≈ 200000、Claude Sonnet ≈ 200000、
+                    <code>mimo-v2-pro</code> / <code>mimo-v2-omni</code> ≈ 128000、<code>gpt-4o-mini</code> ≈ 128000。
                     目前仅作信息记录，将来用于历史消息自动裁剪以避免超窗。
                   </span>
                 </label>
 
                 <label class="settings-field">
                   <span class="settings-field-label">单次输出上限（max_tokens）</span>
-                  <input id="cfg-llm-max-tokens" class="settings-input" type="number" min="256" step="256" placeholder="4096" autocomplete="off">
+                  <input id="cfg-llm-max-tokens" class="settings-input" type="number" min="256" step="256" placeholder="20000" autocomplete="off">
                   <span class="settings-field-hint">
                     每轮 LLM 回复的 token 上限（OpenAI: <code>max_tokens</code>；MiMo: <code>max_completion_tokens</code>）。
-                    多轮工具调用建议 ≥ 2048；复杂长回复可调到 8192。
+                    默认 <code>20000</code>，适配 mimo-v2.5 这类新一代长输出模型；多轮工具调用建议 ≥ 2048。
                   </span>
                 </label>
 
                 <label class="settings-field">
                   <span class="settings-field-label">摘要任务输出上限（summary_max_tokens）</span>
-                  <input id="cfg-llm-summary-max-tokens" class="settings-input" type="number" min="1024" step="1024" placeholder="8192" autocomplete="off">
+                  <input id="cfg-llm-summary-max-tokens" class="settings-input" type="number" min="1024" step="1024" placeholder="20000" autocomplete="off">
                   <span class="settings-field-hint">
-                    每日记忆 / 会话摘要专用。推理模型（mimo-v2-omni、o-系列、deepseek-r1）会把预算花在思考链上，
+                    每日记忆 / 会话摘要专用。默认 <code>20000</code>。推理模型（mimo-v2-omni、o-系列、deepseek-r1）会把预算花在思考链上，
                     至少给 <strong>4096</strong> 才能稳定产出 bullet；非推理模型 2048 即可。
+                  </span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">历史上下文轮数（history_turns）</span>
+                  <input id="cfg-llm-history-turns" class="settings-input" type="number" min="0" max="200" step="1" placeholder="30" autocomplete="off">
+                  <span class="settings-field-hint">
+                    每次请求 LLM 时附带的当前会话历史轮数上限（一轮 = 一次 user + assistant 交互）。
+                    默认 <code>30</code>；调小可节省 token，调大能记住更久的对话。
+                    <code>0</code> = 关闭短期记忆，每轮互相独立。
+                  </span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">请求超时（timeout_s）</span>
+                  <input id="cfg-llm-timeout" class="settings-input" type="number" min="5" max="600" step="5" placeholder="300" autocomplete="off">
+                  <span class="settings-field-hint">
+                    单次 LLM HTTP 请求的超时秒数，默认 <code>300</code>。
+                    纯 chat 一般几秒就返回；启用 <code>web_search</code>（联网搜索）/ 多模态 / 多轮工具调用时服务端抓网页较慢，
+                    留足余量更稳。调小可以更快感知到 provider 卡死，但普通场景无需动。
                   </span>
                 </label>
 
@@ -439,7 +460,7 @@
                 <label class="settings-field" data-cfg-field="voice.tts_provider">
                   <span class="settings-field-label">TTS Provider</span>
                   <select class="settings-input" data-cfg-input="voice.tts_provider">
-                    <option value="mimo">mimo（MiMo-V2-TTS，流式 PCM）</option>
+                    <option value="mimo">mimo（MiMo-V2.5-TTS，流式 PCM）</option>
                     <option value="edge-tts">edge-tts（微软 Edge，免费无 Key）</option>
                   </select>
                   <span class="settings-field-hint" data-cfg-tts-provider-hint>
@@ -447,6 +468,15 @@
                     <b>必须是 mimomimo.com 的密钥</b>；选择 <code>edge-tts</code> 则完全本地调用，无需 Key。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="voice.tts_model">
+                  <span class="settings-field-label">TTS Model ID</span>
+                  <input class="settings-input" type="text" placeholder="mimo-v2.5-tts" autocomplete="off" data-cfg-input="voice.tts_model">
+                  <span class="settings-field-hint">
+                    MiMo 的 TTS 模型名，默认 <code>mimo-v2.5-tts</code>。仅当 Provider 选 <code>mimo</code> 时生效；
+                    选 <code>edge-tts</code> 会自动禁用（Edge 没有模型概念）。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_model"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="voice.tts_voice">
                   <span class="settings-field-label">TTS 声音</span>

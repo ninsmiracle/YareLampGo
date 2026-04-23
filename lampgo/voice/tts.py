@@ -1,4 +1,4 @@
-"""TTS — Text-to-Speech via MiMo-V2-TTS (streaming PCM) or edge-tts fallback."""
+"""TTS — Text-to-Speech via MiMo-V2.5-TTS (streaming PCM) or edge-tts fallback."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ TTS_SAMPLE_RATE = 24000  # MiMo TTS outputs 24kHz PCM16LE mono
 
 
 class MiMoTTS:
-    """Streaming TTS using MiMo-V2-TTS.
+    """Streaming TTS using MiMo-V2.5-TTS.
 
     Primary mode: stream=True + pcm16 format.
     Each SSE chunk contains base64-encoded PCM16LE audio that can be
@@ -30,11 +30,16 @@ class MiMoTTS:
         api_base: str = "https://api.mimomimo.com/v1",
         voice: str = "mimo_default",
         style_prompt: str = "",
+        model: str = "mimo-v2.5-tts",
     ) -> None:
         self._api_key = api_key
         self._api_base = api_base.rstrip("/")
         self._voice = voice
         self._style_prompt = style_prompt
+        # Sent verbatim to MiMo /v1/chat/completions; falls back to the current
+        # public default when the caller hands us an empty/whitespace string so
+        # a misconfigured UI never results in a 400 from the provider.
+        self._model = (model or "").strip() or "mimo-v2.5-tts"
 
     async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
         """Stream PCM16LE chunks from MiMo TTS via SSE.
@@ -56,7 +61,7 @@ class MiMoTTS:
         messages.append({"role": "assistant", "content": text})
 
         body = {
-            "model": "mimo-v2-tts",
+            "model": self._model,
             "messages": messages,
             "audio": {
                 "format": "pcm16",
@@ -205,6 +210,7 @@ async def synthesize_for_web(
     api_base: str = "",
     voice: str = "",
     provider: str = "",
+    model: str = "",
 ) -> tuple[str, str] | None:
     """Generate TTS audio suitable for browser playback.
 
@@ -234,6 +240,7 @@ async def synthesize_for_web(
                 api_key=api_key,
                 api_base=api_base or "https://api.mimomimo.com/v1",
                 voice=voice or "mimo_default",
+                model=model or "mimo-v2.5-tts",
             )
             chunks: list[bytes] = []
             async for pcm in tts.stream_pcm(text):

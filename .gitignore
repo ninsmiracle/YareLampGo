@@ -16,3 +16,5 @@ assets/recordings/user/
 assets/recordings/aliases.json
 .DS_Store
 .env_backup
+lampgo.toml_backup
+scripts/

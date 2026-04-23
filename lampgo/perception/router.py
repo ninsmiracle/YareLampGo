@@ -186,6 +186,7 @@ class IntentRouter:
         joint_state: dict[str, float] | None = None,
         audio_data: str | None = None,
         publish_tool_event: Callable[..., Awaitable[None]] | None = None,
+        history: list[dict[str, Any]] | None = None,
     ):
         if self._llm_client is None:
             raise RuntimeError("LLM client not configured")
@@ -196,6 +197,7 @@ class IntentRouter:
             joint_state=joint_state,
             audio_data=audio_data,
             publish_tool_event=publish_tool_event,
+            history=history,
         )
 
     async def transcribe_audio(self, audio_data: str) -> str:

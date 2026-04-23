@@ -17,7 +17,7 @@ from lampgo.perception.camera import CameraCapture
 
 logger = structlog.get_logger(__name__)
 
-MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash"}
+MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash", "mimo-v2.5"}
 
 _MIMO_MIN_COMPLETION_TOKENS = 4096
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are lampgo, a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
@@ -156,6 +156,43 @@ def _strip_think_tags(content: str) -> str:
 
 def _looks_like_malformed_tool_call(content: str) -> bool:
     return bool(_MALFORMED_TOOL_RE.search(content))
+
+
+def _trim_history_for_request(
+    history: list[dict[str, Any]] | None, history_turns: int
+) -> list[dict[str, Any]]:
+    """Return a clean list of ``{role, content}`` history entries to prepend to the
+    current turn's messages.
+
+    The web gateway already sanitizes/caps the list via ``_sanitize_chat_history``,
+    but other callers (tests, future IPC clients) may hand us raw data — or a
+    bigger slice than the operator wants in their prompt. So we enforce both
+    the shape contract and the operator-configured ceiling here:
+
+    * Keep only ``user``/``assistant`` roles with non-empty string content.
+    * Take the tail (most recent ``2 * history_turns`` messages) to respect the
+      user-facing "last N turns" semantic. 0 turns => disabled.
+    """
+    if not history or history_turns <= 0:
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = entry.get("content")
+        if not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        out.append({"role": role, "content": text})
+    max_messages = history_turns * 2
+    if len(out) > max_messages:
+        out = out[-max_messages:]
+    return out
 
 
 def _build_skill_tools_from_skills(skills: list[dict]) -> list[dict]:
@@ -301,6 +338,7 @@ class LLMClient:
         joint_state: dict[str, float] | None = None,
         audio_data: str | None = None,
         publish_tool_event: Callable[..., Awaitable[None]] | None = None,
+        history: list[dict[str, Any]] | None = None,
     ) -> AgentLoopResult:
         """Run a bounded tool-calling loop until the model finishes or escalates.
 
@@ -308,6 +346,13 @@ class LLMClient:
             text: User text input (may be empty if audio_data is provided).
             audio_data: Base64-encoded WAV audio from microphone. When provided,
                         sent as input_audio to the omni model — no separate STT needed.
+            history: Optional prior conversation turns to prepend between system
+                and the current user message. Each entry is
+                ``{"role": "user"|"assistant", "content": str}``. Caller (web
+                gateway) is responsible for trimming to the user-configured
+                ``LLMConfig.history_turns``; this method only applies a final
+                safety cap based on the same setting so an out-of-band caller
+                can't blow up token usage.
         """
         if not self._config.api_key:
             return AgentLoopResult(
@@ -330,10 +375,23 @@ class LLMClient:
 
         audio_model = "mimo-v2-omni" if audio_data else None
 
+        # Short-term conversation memory: inject the last N turns from the
+        # current session between the system prompt and the new user turn.
+        # Without this, every request started from zero context and the model
+        # appeared to have amnesia across consecutive messages.
+        trimmed_history = _trim_history_for_request(history, self._config.history_turns)
+
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
+            *trimmed_history,
             {"role": "user", "content": user_content},
         ]
+        if trimmed_history:
+            logger.info(
+                "llm_client.agent_loop_with_history",
+                history_msgs=len(trimmed_history),
+                configured_turns=self._config.history_turns,
+            )
         tool_records: list[AgentToolCall] = []
         tool_count = 0
         force_tool_choice: str | dict[str, Any] | None = None

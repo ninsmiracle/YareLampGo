@@ -988,8 +988,14 @@
   function loadSession(id) {
     const session = sessions.find((s) => s.id === id);
     if (!session) return;
-    if (id === activeSessionId && chatMessages && chatMessages.childElementCount > 0) {
-      // Already showing this session — don't rebuild DOM, preserves in-progress thinking state.
+    // 守卫的意图：同一会话里已经渲染过真实 bubble → 不要重建 DOM，保留 in-progress thinking 状态。
+    // 之前用 `childElementCount > 0` 会把 index.html 里静态存在的 `#empty-state` 当成 "已渲染"，
+    // 导致启动后 syncSessionsFromServer 在 activeSessionId 刚被设置那一帧就 early-return，
+    // 27 条历史 bubble 永远不 render —— 左侧能看到 "你好 5分钟前"，右侧却是欢迎语。
+    const hasRealBubbles = !!(
+      chatMessages && chatMessages.querySelector(".msg-bubble-wrap")
+    );
+    if (id === activeSessionId && hasRealBubbles) {
       showView("chat");
       renderHistory();
       scrollChat();
@@ -1423,6 +1429,10 @@
 
     ws.onopen = () => {
       setConnected(true);
+      // Re-run event backfill on every (re)connect so we pick up events
+      // missed during the disconnect AND can detect server seq rollback
+      // (see backfillEventsFromServer for the rollback guard).
+      backfillEventsFromServer();
       ws.send(JSON.stringify({ type: "skills" }));
       ws.send(JSON.stringify({ type: "recordings" }));
       ws.send(JSON.stringify({ type: "expressions" }));
@@ -2227,6 +2237,32 @@
     // are persisted by the server into ~/.lampgo/events.log; we just paint
     // them into the DOM. Dedup against lastEventSeq handles the backfill-HTTP
     // vs live-WS race for anything strictly newer than the cursor.
+
+    // Probe the server's current seq first. If it's strictly below our cached
+    // lastEventSeq, the server's seq counter rolled back at some point (log
+    // corruption, events.log wiped, dev reset, ...). Our old cursor would
+    // filter out every new event as "already seen" and the UI event log would
+    // look frozen. Reset the cursor in that case so we realign with the server.
+    try {
+      const probe = await fetch("/api/events?since=0&limit=1");
+      if (probe.ok) {
+        const probeBody = await probe.json();
+        const serverLatest = probeBody && probeBody.result && probeBody.result.latest_seq;
+        if (typeof serverLatest === "number" && serverLatest >= 0 && serverLatest < lastEventSeq) {
+          console.warn("[events] server seq rollback detected:", {
+            client_last: lastEventSeq,
+            server_latest: serverLatest,
+          });
+          lastEventSeq = 0;
+          try {
+            localStorage.setItem(EVENT_SEQ_KEY, "0");
+          } catch {}
+        }
+      }
+    } catch {
+      // Probe failure is non-fatal; fall through to regular backfill.
+    }
+
     const replayFromScratch = !!eventLog && eventLog.childElementCount === 0;
     const cursor = replayFromScratch
       ? Math.max(0, lastEventSeq - EVENT_REPLAY_WINDOW)
@@ -2306,12 +2342,12 @@
       </summary>
       <pre class="event-body">${esc(formatEventJson(msg.event, msg.data))}</pre>
     `;
-    eventLog.appendChild(item);
+    eventLog.insertBefore(item, eventLog.firstChild);
 
     while (eventLog.childElementCount > EVENT_LOG_MAX) {
-      eventLog.removeChild(eventLog.firstElementChild);
+      eventLog.removeChild(eventLog.lastElementChild);
     }
-    eventLog.scrollTop = eventLog.scrollHeight;
+    eventLog.scrollTop = 0;
   }
 
   function updateStatus(data) {
@@ -2847,6 +2883,34 @@
 
   /* ---- Chat form ---- */
 
+  // Build the recent conversation history for the backend, honoring the
+  // user-configured `history_turns` (one turn = one user+assistant exchange).
+  // We take the last `2*turns` real messages from the active session, keep
+  // only role=user|assistant with non-empty text, strip the placeholder user
+  // entry the frontend pushes for in-flight voice input, and emit the plain
+  // OpenAI-compatible {role, content} shape the LLM expects.
+  function buildChatHistoryForLlm() {
+    const turns = Math.max(0, Number(settingsHistoryTurns) || 0);
+    if (turns === 0) return [];
+    const session = getActiveSession();
+    if (!session || !Array.isArray(session.messages)) return [];
+    const maxMessages = turns * 2;
+    const out = [];
+    for (const m of session.messages) {
+      if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
+      const text = typeof m.text === "string" ? m.text.trim() : "";
+      if (!text) continue;
+      // Skip the transient voice placeholder ("[语音消息]") that hasn't been
+      // back-filled with the real transcript yet — sending it would teach the
+      // model a meaningless literal phrase.
+      if (m.role === "user" && m.meta && m.meta.voice && !m.meta.voice_transcribed) continue;
+      out.push({ role: m.role, content: text });
+    }
+    // Tail-trim to last N messages; this may leave an assistant-led slice but
+    // most providers tolerate that just fine.
+    return out.length > maxMessages ? out.slice(-maxMessages) : out;
+  }
+
   chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
     void unlockTtsPlayback();
@@ -2860,6 +2924,10 @@
     const text = chatInput.value.trim();
     if (!text) return;
 
+    // Snapshot history BEFORE pushing the new user message into the session,
+    // otherwise the current turn would duplicate itself as the last history entry.
+    const history = buildChatHistoryForLlm();
+
     clearEmptyState();
     chatInput.value = "";
     addUserBubble(text);
@@ -2867,7 +2935,7 @@
 
     const requestId = nextId();
     addAssistantBubble(requestId);
-    send({ type: "text", input: text, request_id: requestId });
+    send({ type: "text", input: text, request_id: requestId, history });
   });
 
   function addUserBubble(text, requestId) {
@@ -3534,6 +3602,14 @@
   function finalizeActivity(log) {
     if (!log || log.dataset.finalized === "1") return;
     log.dataset.finalized = "1";
+    // 兜底：把 .route-trail 里残留的 is-active 节点降级成 is-done。
+    // 正常链路里 IntentResolved 会调 setRouteTrail(buildResolvedTrail(...)) 完成降级，
+    // 但某些分支（错误退出 / OpenClaw handoff 中断 / IntentResolved 丢失）拿不到这个事件，
+    // 结果 .route-node.is-active 的 route-pulse 动画会在对话结束后继续闪。
+    log.querySelectorAll(".route-node.is-active").forEach((el) => {
+      el.classList.remove("is-active");
+      el.classList.add("is-done");
+    });
     const turnCount = log.querySelectorAll(".turn-card").length;
     const chips = log.querySelectorAll(".tool-chip");
     const toolTotal = chips.length;
@@ -4007,12 +4083,16 @@
     }
 
     clearEmptyState();
+    // Snapshot history BEFORE inserting the voice placeholder; otherwise the
+    // placeholder would either leak into history (if we didn't filter) or we'd
+    // miss the last real exchange.
+    const history = buildChatHistoryForLlm();
     const requestId = nextId();
     addUserBubble("[语音消息]", requestId);
     const pushed = pushMessageToSession("user", "[语音消息]", { voice: true });
     if (pushed) pendingUserEntries.set(requestId, pushed);
     addAssistantBubble(requestId);
-    send({ type: "audio", audio_data: b64, request_id: requestId });
+    send({ type: "audio", audio_data: b64, request_id: requestId, history });
   }
 
   async function measureWavRms(wavBlob) {
@@ -4303,6 +4383,11 @@
   let settingsMemoryDates = [];
   let settingsSelectedMemoryDate = "";
   let settingsApiKeyIsSet = false;
+  // Mirror of LLMConfig.history_turns. Cached so the chat send path can attach
+  // the right amount of history without hitting /api/config/llm every send.
+  // Seeded from GET /api/config/llm on boot (see loadLlmConfig) and updated
+  // whenever the user saves the settings form; default 30 matches the backend.
+  let settingsHistoryTurns = 30;
   let memoryCoreLoadedValue = null;
 
   function setSettingsStatus(el, message, kind) {
@@ -4378,6 +4463,8 @@
     const maxTokEl = document.getElementById("cfg-llm-max-tokens");
     const sumMaxTokEl = document.getElementById("cfg-llm-summary-max-tokens");
     const tempEl = document.getElementById("cfg-llm-temperature");
+    const timeoutEl = document.getElementById("cfg-llm-timeout");
+    const historyEl = document.getElementById("cfg-llm-history-turns");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
     const status = document.getElementById("cfg-llm-status");
     setSettingsStatus(status, "加载中…");
@@ -4417,6 +4504,13 @@
       if (tempEl && typeof result.temperature === "number") {
         tempEl.value = String(result.temperature);
       }
+      if (timeoutEl && typeof result.timeout_s === "number") {
+        timeoutEl.value = String(result.timeout_s);
+      }
+      if (historyEl && typeof result.history_turns === "number") {
+        historyEl.value = String(result.history_turns);
+        settingsHistoryTurns = result.history_turns;
+      }
       if (shareEl) shareEl.checked = !!result.share_openclaw_memory;
       setSettingsStatus(status, "");
     } catch (err) {
@@ -4434,6 +4528,8 @@
     const maxTokEl = document.getElementById("cfg-llm-max-tokens");
     const sumMaxTokEl = document.getElementById("cfg-llm-summary-max-tokens");
     const tempEl = document.getElementById("cfg-llm-temperature");
+    const timeoutEl = document.getElementById("cfg-llm-timeout");
+    const historyEl = document.getElementById("cfg-llm-history-turns");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
     const status = document.getElementById("cfg-llm-status");
     const btnSave = document.getElementById("btn-cfg-llm-save");
@@ -4462,6 +4558,14 @@
       max_tokens: parseIntOrNull(maxTokEl),
       summary_max_tokens: parseIntOrNull(sumMaxTokEl),
       temperature: parseFloatOrNull(tempEl),
+      timeout_s: parseFloatOrNull(timeoutEl),
+      // history_turns allows 0 (disable short-term memory), so we can't use parseIntOrNull.
+      history_turns: historyEl && historyEl.value !== ""
+        ? (() => {
+            const v = parseInt(historyEl.value, 10);
+            return Number.isFinite(v) && v >= 0 ? v : null;
+          })()
+        : null,
       share_openclaw_memory: shareEl ? shareEl.checked : undefined,
     };
     setSettingsStatus(status, validate ? "正在测试连接…" : "保存中…");
@@ -4482,6 +4586,11 @@
       if (maxTokEl && typeof result.max_tokens === "number") maxTokEl.value = String(result.max_tokens);
       if (sumMaxTokEl && typeof result.summary_max_tokens === "number") sumMaxTokEl.value = String(result.summary_max_tokens);
       if (tempEl && typeof result.temperature === "number") tempEl.value = String(result.temperature);
+      if (timeoutEl && typeof result.timeout_s === "number") timeoutEl.value = String(result.timeout_s);
+      if (historyEl && typeof result.history_turns === "number") {
+        historyEl.value = String(result.history_turns);
+        settingsHistoryTurns = result.history_turns;
+      }
       setSettingsStatus(
         status,
         validate ? "已应用，下一条消息即生效。" : "已保存。",
@@ -4948,7 +5057,14 @@
       ttsProviderSel._ttsBound = true;
       // Switching provider invalidates the old voice list, so force-select the
       // first option of the new provider instead of preserving a stale value.
-      ttsProviderSel.addEventListener("change", () => repopulateTtsVoiceSelect(""));
+      ttsProviderSel.addEventListener("change", () => {
+        repopulateTtsVoiceSelect("");
+        syncTtsModelEnabled();
+      });
+      // Honour the initial provider value on first bind too — otherwise the
+      // tts_model input stays enabled during the flash between DOM ready and
+      // the first loadCfgAll() response.
+      syncTtsModelEnabled();
     }
     const btnDismiss = document.getElementById("btn-cfg-restart-dismiss");
     if (btnDismiss && !btnDismiss._bound) {
@@ -5091,6 +5207,31 @@
     ],
   };
 
+  // Toggle the TTS Model ID input based on the current provider.
+  //
+  // Design rationale:
+  //   * Only MiMo uses a `model` field in its HTTP request body. Edge-tts has
+  //     no model concept, so leaving the field editable would just produce a
+  //     confusing "this does nothing" situation — and worse, saving it while
+  //     on edge-tts means the value stays on disk and silently takes effect
+  //     the next time the user switches back to mimo with maybe an invalid id.
+  //   * Disabled inputs are skipped by saveCfgFromButton (see the `input.disabled`
+  //     guard), so disabling here also keeps the POST payload clean.
+  //   * When re-enabling (user switched to mimo), we proactively seed the
+  //     default so the field isn't blank after the first switch.
+  function syncTtsModelEnabled() {
+    const providerSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
+    const modelInput = document.querySelector('[data-cfg-input="voice.tts_model"]');
+    const fieldWrap = document.querySelector('[data-cfg-field="voice.tts_model"]');
+    if (!providerSel || !modelInput) return;
+    const isMimo = String(providerSel.value || "").toLowerCase() === "mimo";
+    modelInput.disabled = !isMimo;
+    if (fieldWrap) fieldWrap.classList.toggle("is-disabled", !isMimo);
+    if (isMimo && !modelInput.value.trim()) {
+      modelInput.value = "mimo-v2.5-tts";
+    }
+  }
+
   function repopulateTtsVoiceSelect(desiredValue) {
     const providerSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
     const voiceSel = document.querySelector("[data-cfg-tts-voice]");
@@ -5191,6 +5332,11 @@
       // be filled yet (detection runs on demand), but we preserve `value` as
       // a "custom, keep" option until the next autodetect populates it.
       repopulateTtsVoiceSelect(voiceCell ? (voiceCell.value || "") : undefined);
+      // tts_model input's enabled state depends on the just-applied provider
+      // value. Without this call, reloading the page while tts_provider is
+      // "edge-tts" would leave the model input editable until the next manual
+      // provider change.
+      syncTtsModelEnabled();
       repopulateCameraPortSelect(cameraCell ? (cameraCell.value || "") : undefined);
       repopulateMicDeviceSelect(micCell ? (micCell.value || "") : undefined);
       // Motion default playback mode → chip bar. If the user hasn't yet

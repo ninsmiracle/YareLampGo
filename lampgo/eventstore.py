@@ -57,38 +57,74 @@ class EventStore:
     # ---- recovery ----
 
     def _recover_last_seq(self) -> int:
-        """Scan the current log tail (and rotated files if empty) for the max seq."""
+        """Scan the current log tail (and rotated files if empty) for the max seq.
+
+        Robust to very long lines: some events can be >1 MB (e.g. base64 TTS
+        audio in older logs), which would break a fixed 64 KB tail read —
+        the window would land mid-line, every fragment failed json parsing,
+        and the counter silently reset to 0. Post-restart events then reused
+        low seqs that the frontend had already marked "seen" as lastEventSeq,
+        and all new events disappeared from the UI event log.
+
+        Strategy: read the whole file when it fits in memory (rotation caps
+        it at MAX_BYTES = 10 MB, so this is always safe), else grow the tail
+        window until it contains at least one complete line.
+        """
         candidates: list[Path] = [events_path()]
         for i in range(1, KEEP_ROTATIONS + 1):
             candidates.append(_rotated_path(i))
         for p in candidates:
             if not p.exists() or p.stat().st_size == 0:
                 continue
-            # Read last line cheaply. Files are typically < 10 MB so we can
-            # read them whole; if larger we fall back to streaming.
             try:
-                if p.stat().st_size <= 512 * 1024:
-                    lines = p.read_text(encoding="utf-8").rstrip().splitlines()
+                size = p.stat().st_size
+                if size <= MAX_BYTES:
+                    data = p.read_bytes()
                 else:
-                    lines = []
+                    # Shouldn't normally happen because rotation keeps files
+                    # under MAX_BYTES, but if it does, grow the tail window
+                    # until we definitely contain at least one complete line
+                    # (i.e. a newline appears somewhere before the last char).
                     with p.open("rb") as fh:
-                        fh.seek(0, os.SEEK_END)
-                        size = fh.tell()
-                        chunk = min(size, 64 * 1024)
-                        fh.seek(size - chunk)
-                        tail = fh.read(chunk).decode("utf-8", errors="replace")
-                        lines = tail.rstrip().splitlines()
+                        chunk = 2 * 1024 * 1024
+                        data = b""
+                        while chunk <= size:
+                            fh.seek(size - chunk)
+                            data = fh.read(chunk)
+                            # If the slice starts mid-line, drop everything up
+                            # to the first newline so we don't feed a fragment
+                            # to json.loads.
+                            nl = data.find(b"\n")
+                            if nl >= 0 and nl < len(data) - 1:
+                                break
+                            if chunk >= size:
+                                break
+                            chunk *= 2
+                        if data and data.find(b"\n") > 0:
+                            data = data[data.find(b"\n") + 1 :]
+                text = data.decode("utf-8", errors="replace")
+                lines = text.rstrip().splitlines()
+                # Return the MAX seq seen, not just the last one. A previous
+                # buggy run could have silently reset the counter mid-file
+                # (see history comment above), leaving trailing lines with
+                # smaller seqs than earlier lines. Returning the last seq
+                # would resume numbering from a value the connected browser
+                # already recorded in localStorage as "seen", making new
+                # events disappear from its UI log.
+                best = 0
                 for line in reversed(lines):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         obj = json.loads(line)
-                        seq = int(obj.get("seq", 0) or 0)
-                        if seq > 0:
-                            return seq
                     except Exception:
                         continue
+                    seq = int(obj.get("seq", 0) or 0)
+                    if seq > best:
+                        best = seq
+                if best > 0:
+                    return best
             except Exception:
                 logger.exception("eventstore.recover_failed", path=str(p))
         return 0

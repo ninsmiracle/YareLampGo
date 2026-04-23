@@ -189,36 +189,48 @@ class LLMConfig(BaseModel):
         """
         return cls.normalize_provider_alias(v)
     message_type: str = Field(default="openai", description="Message envelope: 'openai' (chat.completions) or 'anthropic' (messages)")
-    model: str = Field(default="gpt-4o-mini", description="Model name for complex reasoning tasks")
-    fast_model: str = Field(default="gpt-4o-mini", description="Model for simple/fast intent classification")
+    model: str = Field(default="mimo-v2.5", description="Model name for complex reasoning tasks")
+    fast_model: str = Field(default="mimo-v2.5", description="Model for simple/fast intent classification")
     api_key: str = Field(default="", description="Set via LAMPGO_LLM_API_KEY env var, NOT in config file")
     api_base: str = Field(default="", description="Custom API base URL (for local/proxy models)")
     temperature: float = Field(default=0.3, ge=0, le=2)
     max_tokens: int = Field(
-        default=4096,
+        default=20000,
         gt=0,
         description=(
             "单次对话回复的 token 上限（OpenAI: max_tokens；MiMo: max_completion_tokens）。"
-            "对话链若支持多轮工具调用，建议 ≥ 2048。"
+            "对话链若支持多轮工具调用，建议 ≥ 2048。默认 20000 适配 mimo-v2.5 这类新一代长输出模型。"
         ),
     )
     summary_max_tokens: int = Field(
-        default=8192,
+        default=20000,
         gt=0,
         description=(
             "每日记忆 / 会话摘要任务的输出上限。推理模型（mimo-v2-omni、o-系列、deepseek-r1）"
-            "会把预算花在思考链上，至少给 4096 才能稳定产出 bullet。"
+            "会把预算花在思考链上，至少给 4096 才能稳定产出 bullet；默认 20000 保证即使强推理模型"
+            "也能吐出完整的摘要段落。"
         ),
     )
     context_window: int = Field(
-        default=128000,
+        default=200000,
         gt=0,
         description=(
             "模型的输入上下文窗口（tokens）。目前仅作信息记录；将来用于在超限前自动裁剪历史消息。"
-            "按所用模型填：mimo-v2-pro/omni ≈ 128k、Claude Sonnet ≈ 200k、gpt-4o-mini ≈ 128k。"
+            "按所用模型填：mimo-v2.5 ≈ 200k、Claude Sonnet ≈ 200k、gpt-4o-mini ≈ 128k、"
+            "mimo-v2-pro/omni ≈ 128k。"
         ),
     )
-    timeout_s: float = Field(default=15.0, gt=0, description="HTTP timeout for LLM requests")
+    timeout_s: float = Field(default=300.0, gt=0, description="HTTP timeout for LLM requests")
+    history_turns: int = Field(
+        default=30,
+        ge=0,
+        le=200,
+        description=(
+            "每次调用 LLM 时附带的当前会话历史轮数上限（一轮 = 一次 user+assistant 交互）。"
+            "0 表示关闭短期上下文（每轮对话互相独立）。过大可能超出模型 context_window，"
+            "运行时会从最旧消息开始裁剪。"
+        ),
+    )
     web_search_enabled: bool = Field(default=True, description="Enable MiMo built-in web search when supported")
     web_search_force: bool = Field(default=False, description="Force MiMo web search on every request")
     web_search_limit: int = Field(default=3, ge=1, le=10, description="Max web pages used per MiMo web search")
@@ -241,7 +253,15 @@ class VoiceConfig(BaseModel):
 
     stt_provider: str = Field(default="omni", description="STT provider: omni (mimo-v2-omni), whisper")
     stt_model: str = Field(default="mimo-v2-omni", description="STT model name (for omni provider)")
-    tts_provider: str = Field(default="mimo", description="TTS provider: mimo (mimo-v2-tts), edge-tts")
+    tts_provider: str = Field(default="mimo", description="TTS provider: mimo (mimo-v2.5-tts), edge-tts")
+    tts_model: str = Field(
+        default="mimo-v2.5-tts",
+        description=(
+            "Model id for the TTS provider. Only used when tts_provider=mimo "
+            "(sent as the `model` field in the chat/completions request to "
+            "mimomimo). Ignored by edge-tts (which has no notion of model)."
+        ),
+    )
     tts_voice: str = Field(default="mimo_default", description="TTS voice identifier")
     tts_style_prompt: str = Field(default="", description="MiMo TTS style instruction (e.g. '温柔甜美的女声')")
     chat_model: str = Field(default="mimo-v2-pro", description="LLM model for voice chat streaming responses")
