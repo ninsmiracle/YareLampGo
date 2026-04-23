@@ -224,9 +224,7 @@ class WebGateway:
         await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
 
         history = _sanitize_chat_history(body.get("history"))
-        result = await self.server.handle_request(
-            {"cmd": "text", "input": text, "request_id": request_id, "history": history}
-        )
+        result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id, "history": history})
 
         intent_type = result.get("result", {}).get("type", "unknown")
         skill_id = result.get("result", {}).get("skill_id")
@@ -442,7 +440,9 @@ class WebGateway:
         detail = body.get("detail")
         request_id = str(body.get("request_id", "")).strip()
         if status:
-            await self.server.events.publish(ChatMessage(role="assistant", content=f"[OpenClaw] {status}: {detail or ''}".strip(), request_id=request_id))
+            await self.server.events.publish(
+                ChatMessage(role="assistant", content=f"[OpenClaw] {status}: {detail or ''}".strip(), request_id=request_id)
+            )
         return JSONResponse({"ok": True, "result": {"accepted": True}})
 
     async def api_openclaw_tasks(self, request: Request) -> JSONResponse:
@@ -680,9 +680,7 @@ class WebGateway:
             "safety.max_velocity",
             "safety.max_acceleration",
         ),
-        "web": (
-            "web.port",
-        ),
+        "web": ("web.port",),
     }
 
     def _dump_section(self, section_fields: tuple[str, ...], provenance: dict[str, str]) -> dict[str, Any]:
@@ -711,10 +709,7 @@ class WebGateway:
 
         _, provenance = load_config_with_provenance()
 
-        sections = {
-            name: self._dump_section(fields, provenance)
-            for name, fields in self._SECTION_FIELDS.items()
-        }
+        sections = {name: self._dump_section(fields, provenance) for name, fields in self._SECTION_FIELDS.items()}
 
         cold_fields = sorted(self._COLD_RESTART_FIELDS)
 
@@ -870,8 +865,7 @@ class WebGateway:
                     "restarted": False,
                     "pid": os.getpid(),
                     "hint": (
-                        "请在启动 lampgo 的终端按 Ctrl+C 退出当前进程，再重跑 "
-                        "`uv run lampgo run --web`。硬件相关字段需要重新打开串口才会生效。"
+                        "请在启动 lampgo 的终端按 Ctrl+C 退出当前进程，再重跑 " "`uv run lampgo run --web`。硬件相关字段需要重新打开串口才会生效。"
                     ),
                 },
             }
@@ -884,11 +878,7 @@ class WebGateway:
             cfg = self.server.config.llm
             provider = str(LLMConfig.normalize_provider_alias(cfg.provider) or "")
             overrides = personastore.get_overrides_toml()
-            message_type = (
-                (overrides.get("llm") or {}).get("message_type")
-                if isinstance(overrides, dict)
-                else None
-            ) or "openai"
+            message_type = ((overrides.get("llm") or {}).get("message_type") if isinstance(overrides, dict) else None) or "openai"
             share_memory = bool(getattr(self.server.config, "share_openclaw_memory", True))
             return JSONResponse(
                 {
@@ -917,9 +907,7 @@ class WebGateway:
                         "web_search_country": cfg.web_search_country,
                         "web_search_region": cfg.web_search_region,
                         "web_search_city": cfg.web_search_city,
-                        "web_search_api_key_preview": personastore.mask_api_key(
-                            cfg.web_search_api_key
-                        ),
+                        "web_search_api_key_preview": personastore.mask_api_key(cfg.web_search_api_key),
                         "web_search_api_key_is_set": bool(cfg.web_search_api_key),
                     },
                 }
@@ -927,32 +915,29 @@ class WebGateway:
 
         body = await request.json()
         # Quick path: caller only toggles share_openclaw_memory.
-        if (
-            "share_openclaw_memory" in body
-            and not any(
-                k in body
-                for k in (
-                    "provider",
-                    "api_base",
-                    "api_key",
-                    "model",
-                    "fast_model",
-                    "message_type",
-                    "max_tokens",
-                    "summary_max_tokens",
-                    "context_window",
-                    "temperature",
-                    "timeout_s",
-                    "history_turns",
-                    "web_search_enabled",
-                    "web_search_force",
-                    "web_search_limit",
-                    "web_search_max_keyword",
-                    "web_search_country",
-                    "web_search_region",
-                    "web_search_city",
-                    "web_search_api_key",
-                )
+        if "share_openclaw_memory" in body and not any(
+            k in body
+            for k in (
+                "provider",
+                "api_base",
+                "api_key",
+                "model",
+                "fast_model",
+                "message_type",
+                "max_tokens",
+                "summary_max_tokens",
+                "context_window",
+                "temperature",
+                "timeout_s",
+                "history_turns",
+                "web_search_enabled",
+                "web_search_force",
+                "web_search_limit",
+                "web_search_max_keyword",
+                "web_search_country",
+                "web_search_region",
+                "web_search_city",
+                "web_search_api_key",
             )
         ):
             from lampgo import personastore
@@ -974,22 +959,12 @@ class WebGateway:
         current_llm = self.server.config.llm
         provider = str(body.get("provider") or "").strip() or current_llm.provider
         provider = str(LLMConfig.normalize_provider_alias(provider) or "")
-        api_base = (
-            str(body.get("api_base") or "").strip()
-            if "api_base" in body
-            else current_llm.api_base
-        )
+        api_base = str(body.get("api_base") or "").strip() if "api_base" in body else current_llm.api_base
         api_key_raw = body.get("api_key")
         api_key = str(api_key_raw).strip() if api_key_raw is not None else ""
         model = str(body.get("model") or "").strip() or current_llm.model
-        fast_model = (
-            str(body.get("fast_model") or "").strip()
-            or (model if "model" in body else current_llm.fast_model)
-        )
-        message_type = (
-            str(body.get("message_type") or "").strip()
-            or (current_llm.message_type or "openai")
-        )
+        fast_model = str(body.get("fast_model") or "").strip() or (model if "model" in body else current_llm.fast_model)
+        message_type = str(body.get("message_type") or "").strip() or (current_llm.message_type or "openai")
         share_memory = body.get("share_openclaw_memory")
 
         def _coerce_positive_int(raw: Any, fallback: int) -> int:
@@ -1021,12 +996,8 @@ class WebGateway:
 
         # ``current_llm`` was already hoisted above for PATCH-like fallbacks.
         max_tokens_val = _coerce_positive_int(body.get("max_tokens"), current_llm.max_tokens)
-        summary_max_tokens_val = _coerce_positive_int(
-            body.get("summary_max_tokens"), current_llm.summary_max_tokens
-        )
-        context_window_val = _coerce_positive_int(
-            body.get("context_window"), current_llm.context_window
-        )
+        summary_max_tokens_val = _coerce_positive_int(body.get("summary_max_tokens"), current_llm.summary_max_tokens)
+        context_window_val = _coerce_positive_int(body.get("context_window"), current_llm.context_window)
         temperature_val = _coerce_temperature(body.get("temperature"), current_llm.temperature)
         timeout_s_val = _coerce_timeout(body.get("timeout_s"), current_llm.timeout_s)
 
@@ -1039,9 +1010,7 @@ class WebGateway:
                 return int(fallback)
             return max(0, min(200, v))
 
-        history_turns_val = _coerce_history_turns(
-            body.get("history_turns"), current_llm.history_turns
-        )
+        history_turns_val = _coerce_history_turns(body.get("history_turns"), current_llm.history_turns)
 
         # ------------------------------------------------------------------
         # MiMo web search sub-service fields.
@@ -1078,25 +1047,17 @@ class WebGateway:
                 return False
             return bool(fallback)
 
-        ws_enabled = _opt_bool(
-            body.get("web_search_enabled"), current_llm.web_search_enabled
-        )
+        ws_enabled = _opt_bool(body.get("web_search_enabled"), current_llm.web_search_enabled)
         ws_force = _opt_bool(body.get("web_search_force"), current_llm.web_search_force)
-        ws_limit = _coerce_bounded_int(
-            body.get("web_search_limit"), current_llm.web_search_limit, lo=1, hi=10
-        )
+        ws_limit = _coerce_bounded_int(body.get("web_search_limit"), current_llm.web_search_limit, lo=1, hi=10)
         ws_max_keyword = _coerce_bounded_int(
             body.get("web_search_max_keyword"),
             current_llm.web_search_max_keyword,
             lo=1,
             hi=10,
         )
-        ws_country = (
-            str(body.get("web_search_country") or current_llm.web_search_country).strip()
-        )
-        ws_region = (
-            str(body.get("web_search_region") or current_llm.web_search_region).strip()
-        )
+        ws_country = str(body.get("web_search_country") or current_llm.web_search_country).strip()
+        ws_region = str(body.get("web_search_region") or current_llm.web_search_region).strip()
         ws_city = str(body.get("web_search_city") or current_llm.web_search_city).strip()
 
         ws_key_raw = body.get("web_search_api_key")
@@ -1207,6 +1168,7 @@ class WebGateway:
         # Invalidate persona/memory cache so the next prompt assembly re-reads
         try:
             from lampgo.persona.bundle import invalidate_bundles
+
             invalidate_bundles()
         except Exception:
             pass
@@ -1235,9 +1197,7 @@ class WebGateway:
                     "web_search_country": ws_country,
                     "web_search_region": ws_region,
                     "web_search_city": ws_city,
-                    "web_search_api_key_preview": personastore.mask_api_key(
-                        effective_ws_key
-                    ),
+                    "web_search_api_key_preview": personastore.mask_api_key(effective_ws_key),
                     "web_search_api_key_is_set": bool(effective_ws_key),
                     "share_openclaw_memory": bool(cfg.share_openclaw_memory),
                     "hot_reloaded": True,
@@ -1642,9 +1602,7 @@ class WebGateway:
             try:
                 body = await request.json()
             except Exception:
-                return JSONResponse(
-                    {"ok": False, "error": "invalid JSON body"}, status_code=400
-                )
+                return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
             try:
                 stored = sessionstore.save_snapshot(body)
             except ValueError as exc:
@@ -1658,7 +1616,7 @@ class WebGateway:
             body = {}
         if not (isinstance(body, dict) and body.get("confirm") is True):
             return JSONResponse(
-                {"ok": False, "error": "DELETE requires {\"confirm\": true}"},
+                {"ok": False, "error": 'DELETE requires {"confirm": true}'},
                 status_code=400,
             )
         stored = sessionstore.clear_all()
@@ -1669,9 +1627,7 @@ class WebGateway:
 
         session_id = request.path_params.get("session_id", "").strip()
         if not session_id:
-            return JSONResponse(
-                {"ok": False, "error": "session_id required"}, status_code=400
-            )
+            return JSONResponse({"ok": False, "error": "session_id required"}, status_code=400)
         stored = sessionstore.delete_session(session_id)
         return JSONResponse({"ok": True, "result": stored})
 
@@ -1747,9 +1703,7 @@ class WebGateway:
                 msg_type = msg.get("type", "")
                 # Long-running messages must not block the receive loop; otherwise
                 # urgent commands like `estop` cannot be processed until completion.
-                run_async = msg_type in ("text", "audio", "recording_save") or (
-                    msg_type == "invoke" and bool(msg.get("wait", True))
-                )
+                run_async = msg_type in ("text", "audio", "recording_save") or (msg_type == "invoke" and bool(msg.get("wait", True)))
                 if run_async:
                     task = asyncio.create_task(self._handle_ws_message(ws, msg))
                     self._active_request_tasks[ws] = task
@@ -1779,9 +1733,7 @@ class WebGateway:
             try:
                 await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
                 history = _sanitize_chat_history(msg.get("history"))
-                result = await self.server.handle_request(
-                    {"cmd": "text", "input": text, "request_id": request_id, "history": history}
-                )
+                result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id, "history": history})
 
                 intent_type = result.get("result", {}).get("type", "unknown")
                 skill_id = result.get("result", {}).get("skill_id")
@@ -1976,17 +1928,19 @@ class WebGateway:
             )
         )
         try:
-            await ws.send_json({
-                "ok": True,
-                "result": {
-                    "type": "agent",
-                    "response": "已停止",
-                    "source": "user",
-                    "detail": "用户手动停止",
-                    "stop_reason": "user_cancelled",
-                },
-                "request_id": request_id,
-            })
+            await ws.send_json(
+                {
+                    "ok": True,
+                    "result": {
+                        "type": "agent",
+                        "response": "已停止",
+                        "source": "user",
+                        "detail": "用户手动停止",
+                        "stop_reason": "user_cancelled",
+                    },
+                    "request_id": request_id,
+                }
+            )
         except Exception:
             pass
 
