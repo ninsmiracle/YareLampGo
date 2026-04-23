@@ -15,6 +15,16 @@ logger = structlog.get_logger(__name__)
 
 TTS_SAMPLE_RATE = 24000  # MiMo TTS outputs 24kHz PCM16LE mono
 
+# MiMo's TTS extension lives on the OpenAI-compat ``/chat/completions``
+# endpoint — there is no Anthropic-compat variant.  We therefore hard-code
+# the base URL here: reusing ``config.llm.api_base`` caused 404s the
+# moment a user switched the LLM over to the Anthropic-compat path
+# (``…/anthropic/v1/chat/completions`` does not exist).  MiMoTTS only
+# shares the **API key** with the LLM config; everything else is fixed.
+#
+# Ref: https://platform.mimomimo.com/docs/usage-guide/speech-synthesis-v2.5
+MIMO_TTS_API_BASE = "https://api.mimomimo.com/v1"
+
 
 class MiMoTTS:
     """Streaming TTS using MiMo-V2.5-TTS.
@@ -22,18 +32,23 @@ class MiMoTTS:
     Primary mode: stream=True + pcm16 format.
     Each SSE chunk contains base64-encoded PCM16LE audio that can be
     fed directly to a sounddevice output stream for real-time playback.
+
+    The base URL is fixed at :data:`MIMO_TTS_API_BASE` (MiMo's OpenAI-compat
+    host).  We intentionally do **not** accept an ``api_base`` argument —
+    this used to mirror the LLM ``api_base`` but that broke the moment a
+    user switched the LLM to MiMo's Anthropic-compat path.  Only the API
+    key is shared with the LLM config.
     """
 
     def __init__(
         self,
         api_key: str,
-        api_base: str = "https://api.mimomimo.com/v1",
         voice: str = "mimo_default",
         style_prompt: str = "",
         model: str = "mimo-v2.5-tts",
     ) -> None:
         self._api_key = api_key
-        self._api_base = api_base.rstrip("/")
+        self._api_base = MIMO_TTS_API_BASE
         self._voice = voice
         self._style_prompt = style_prompt
         # Sent verbatim to MiMo /v1/chat/completions; falls back to the current
@@ -207,7 +222,6 @@ async def play_audio_file(path: Path) -> None:
 async def synthesize_for_web(
     text: str,
     api_key: str = "",
-    api_base: str = "",
     voice: str = "",
     provider: str = "",
     model: str = "",
@@ -218,6 +232,9 @@ async def synthesize_for_web(
       - "edge-tts" → always use EdgeTTS (no Key needed).
       - "mimo"     → use MiMoTTS (requires ``api_key``).
       - ""         → legacy auto-detect: MiMo if key is present, else Edge.
+
+    MiMoTTS is hard-wired to MiMo's OpenAI-compat endpoint — callers do not
+    (and must not) supply an ``api_base``; see :data:`MIMO_TTS_API_BASE`.
 
     Returns ``(base64_audio, format)`` or ``None`` on failure.
     """
@@ -238,7 +255,6 @@ async def synthesize_for_web(
         else:
             tts = MiMoTTS(
                 api_key=api_key,
-                api_base=api_base or "https://api.mimomimo.com/v1",
                 voice=voice or "mimo_default",
                 model=model or "mimo-v2.5-tts",
             )

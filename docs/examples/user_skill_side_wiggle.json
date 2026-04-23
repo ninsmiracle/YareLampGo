@@ -1,0 +1,21 @@
+{
+  "skill_id": "side_wiggle",
+  "label": "左右扭扭",
+  "description": "一个 Level 2 自定义轨迹示例：两次左右小幅度扭动 yaw + pitch 联动，LED 切成笑脸。",
+  "steps": [
+    { "skill_id": "set_expression", "params": { "expression": "smiley" } },
+    {
+      "trajectory": {
+        "waypoints": [
+          { "joints": { "base_yaw": 0.0,   "base_pitch": -38.0 }, "duration": 0.0 },
+          { "joints": { "base_yaw": 20.0,  "base_pitch": -32.0 }, "duration": 0.35 },
+          { "joints": { "base_yaw": -20.0, "base_pitch": -32.0 }, "duration": 0.4 },
+          { "joints": { "base_yaw": 20.0,  "base_pitch": -32.0 }, "duration": 0.4 },
+          { "joints": { "base_yaw": 0.0,   "base_pitch": -38.0 }, "duration": 0.35 }
+        ],
+        "fps": 50,
+        "interpolation": "ease_in_out_cubic"
+      }
+    }
+  ]
+}
