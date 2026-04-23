@@ -10,6 +10,7 @@ The server owns:
 from __future__ import annotations
 
 import asyncio
+import re
 import signal
 import time
 import uuid
@@ -26,10 +27,12 @@ from lampgo.core.events import (
     ChatMessage,
     EventBus,
     IntentProgress,
+    IntentRouting,
     OpenClawAskRequested,
     OpenClawAskResolved,
     ToolCallFinished,
     ToolCallPlanned,
+    TtsAudio,
 )
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.config import LEDConfig
@@ -50,6 +53,7 @@ from lampgo.skills.builtin.parametric_skills import (
     NodSkill,
 )
 from lampgo.skills.builtin.playback_skills import PlayRecordingSkill
+from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.fsm import StateMachine
 from lampgo.skills.registry import SkillRegistry
@@ -83,6 +87,13 @@ class LampgoServer:
         self._recording_alias_cache: tuple[float, dict[str, str]] = (0.0, {})
         self._openclaw_asks: dict[str, asyncio.Future[str]] = {}
         self._openclaw_asks_lock = asyncio.Lock()
+        self._tts_tasks: set[asyncio.Task] = set()
+        self._record_lock = asyncio.Lock()
+        self._record_recorder: TeachRecorder | None = None
+        self._record_task: asyncio.Task | None = None
+        self._record_started_at: float = 0.0
+        self._record_fps: int = 30
+        self._record_motion_was_running: bool = False
 
     def _register_builtin_skills(self) -> None:
         recordings_dir = Path(self.config.recordings_dir)
@@ -116,7 +127,12 @@ class LampgoServer:
             return await self._handle_invoke(data)
 
         if cmd == "text":
-            return await self._handle_text(data)
+            result = await self._handle_text(data)
+            await self._maybe_tts(result, data.get("request_id", ""))
+            return result
+
+        if cmd == "audio":
+            return await self._handle_audio(data)
 
         if cmd == "status":
             return self._handle_status()
@@ -132,6 +148,30 @@ class LampgoServer:
             self.safety.estop("IPC estop command")
             self.motion.stop_immediate()
             return {"ok": True, "result": {"status": "estopped"}}
+
+        if cmd == "recording_start":
+            return await self.start_recording_session(fps=int(data.get("fps", 30) or 30))
+
+        if cmd == "recording_stop":
+            return await self.stop_recording_session()
+
+        if cmd == "recording_save":
+            return await self.save_recording_session(
+                str(data.get("name", "")),
+                overwrite=bool(data.get("overwrite", False)),
+            )
+
+        if cmd == "recording_discard":
+            return await self.discard_recording_session()
+
+        if cmd == "list_cameras":
+            return self._handle_list_cameras()
+
+        if cmd == "set_camera":
+            return self._handle_set_camera(str(data.get("port", "")))
+
+        if cmd == "list_mics":
+            return self._handle_list_mics()
 
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
@@ -176,6 +216,12 @@ class LampgoServer:
         skill_id = data.get("skill_id", "")
         params = data.get("params", {})
 
+        if self._record_recorder is not None:
+            return {
+                "ok": False,
+                "error": "recording session active; save/discard recording first",
+            }
+
         skill = self.registry.get(skill_id)
         if skill is None:
             return {"ok": False, "error": f"Skill '{skill_id}' not registered"}
@@ -201,11 +247,200 @@ class LampgoServer:
         asyncio.ensure_future(_bg())
         return {"ok": True, "result": {"status": "accepted", "skill_id": skill_id}}
 
+    async def start_recording_session(self, fps: int = 30) -> dict[str, Any]:
+        """Start a teach-recording session in run mode.
+
+        The session samples HAL joint positions at a fixed FPS and buffers frames
+        in memory until the caller stops + saves (or discards).
+        """
+        async with self._record_lock:
+            if self.config.no_hw or not self.hal.is_connected:
+                return {"ok": False, "error": "hardware not connected"}
+            if self._record_recorder is not None:
+                return {"ok": False, "error": "recording session already active"}
+
+            fps = max(1, min(120, int(fps or 30)))
+            logger.info("server.recording_start_requested", fps=fps)
+            await self.executor.cancel_current()
+            self._record_motion_was_running = bool(getattr(self.motion, "is_running", False))
+            if self._record_motion_was_running:
+                self.motion.stop()
+            self.hal.disable_torque()
+
+            recordings_dir = Path(self.config.recordings_dir) / "user"
+            recordings_dir.mkdir(parents=True, exist_ok=True)
+            rec = TeachRecorder(self.hal, recordings_dir, fps=fps)
+            rec.start()
+            self._record_recorder = rec
+            self._record_started_at = time.monotonic()
+            self._record_fps = fps
+            self._record_task = asyncio.create_task(self._record_loop())
+            logger.info("server.recording_started", fps=fps)
+
+            return {
+                "ok": True,
+                "result": {
+                    "status": "recording",
+                    "fps": fps,
+                    "started_at": self._record_started_at,
+                },
+            }
+
+    async def stop_recording_session(self) -> dict[str, Any]:
+        """Stop sampling but keep buffered frames for save/discard."""
+        async with self._record_lock:
+            rec = self._record_recorder
+            if rec is None:
+                return {"ok": False, "error": "no active recording session"}
+            rec.stop()
+            if self._record_task is not None:
+                await self._record_task
+                self._record_task = None
+            # Product requirement: after recording ends, re-enable torque so the
+            # arm holds its current pose and does not slump under gravity.
+            self.hal.enable_torque()
+            if self._record_motion_was_running:
+                self.motion.start()
+            self._record_motion_was_running = False
+            elapsed = max(0.0, time.monotonic() - self._record_started_at)
+            logger.info("server.recording_stopped", frames=rec.frame_count, duration_s=round(elapsed, 3))
+            return {
+                "ok": True,
+                "result": {
+                    "status": "stopped",
+                    "frames": rec.frame_count,
+                    "duration_s": round(elapsed, 3),
+                },
+            }
+
+    async def save_recording_session(self, name: str, *, overwrite: bool = False) -> dict[str, Any]:
+        """Persist buffered recording frames to <recordings_dir>/user/<name>.csv."""
+        async with self._record_lock:
+            rec = self._record_recorder
+            if rec is None:
+                return {"ok": False, "error": "no recording session to save"}
+            if rec.is_recording:
+                return {"ok": False, "error": "recording still active; stop first"}
+
+            name = name.strip()
+            if not name or not re.match(r"^[\w\-]+$", name):
+                return {"ok": False, "error": "invalid name: use letters/numbers/_/-"}
+
+            target_path = Path(self.config.recordings_dir) / "user" / f"{name}.csv"
+            if target_path.exists() and not overwrite:
+                return {
+                    "ok": False,
+                    "error": "recording already exists",
+                    "result": {
+                        "status": "name_conflict",
+                        "name": name,
+                        "path": str(target_path),
+                        "requires_overwrite": True,
+                    },
+                }
+
+            path = rec.save(name)
+            frames = rec.frame_count
+            self._record_recorder = None
+            self._record_started_at = 0.0
+            self._record_fps = 30
+            self._record_motion_was_running = False
+            return {
+                "ok": True,
+                "result": {
+                    "status": "saved",
+                    "name": name,
+                    "path": str(path),
+                    "frames": frames,
+                    "record_playback_notes": {
+                        "record": "samples HAL joint positions only (no style interpolation)",
+                        "play": "uses move_to waypoint playback (style-aware planned interpolation)",
+                        "safety": "playback follows move_to safety path via validate_frame",
+                    },
+                },
+            }
+
+    async def discard_recording_session(self) -> dict[str, Any]:
+        """Discard current recording session (active or stopped)."""
+        async with self._record_lock:
+            rec = self._record_recorder
+            if rec is None:
+                return {"ok": False, "error": "no recording session to discard"}
+            if rec.is_recording:
+                rec.stop()
+            if self._record_task is not None:
+                await self._record_task
+                self._record_task = None
+            frames = rec.frame_count
+            self._record_recorder = None
+            self._record_started_at = 0.0
+            self._record_fps = 30
+            if self._record_motion_was_running:
+                self.motion.start()
+            self._record_motion_was_running = False
+            return {"ok": True, "result": {"status": "discarded", "frames": frames}}
+
+    async def _record_loop(self) -> None:
+        """Background sampling loop for run-mode recording sessions."""
+        rec = self._record_recorder
+        if rec is None:
+            return
+        interval = 1.0 / max(1, self._record_fps)
+        try:
+            while rec.is_recording:
+                rec.tick()
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            # Normal shutdown/cancel path.
+            pass
+        except Exception:
+            logger.exception("server.record_loop_failed")
+
+    def _record_status(self) -> dict[str, Any]:
+        rec = self._record_recorder
+        if rec is None:
+            return {"active": False, "has_buffer": False, "frames": 0}
+        return {
+            "active": rec.is_recording,
+            "has_buffer": rec.frame_count > 0,
+            "fps": self._record_fps,
+            "frames": rec.frame_count,
+            "started_at": self._record_started_at,
+        }
+
+    def _extract_response_text(self, result: dict) -> str | None:
+        r = result.get("result", {})
+        return r.get("response") or r.get("chat_response") or None
+
+    async def _maybe_tts(self, result: dict, request_id: str) -> None:
+        text = self._extract_response_text(result)
+        if text:
+            task = asyncio.create_task(self._tts_for_web(text, request_id))
+            self._tts_tasks.add(task)
+            task.add_done_callback(self._tts_tasks.discard)
+
+    def cancel_pending_tts(self) -> int:
+        """Cancel all in-flight TTS synthesis tasks. Returns count cancelled."""
+        cancelled = 0
+        for t in list(self._tts_tasks):
+            if not t.done():
+                t.cancel()
+                cancelled += 1
+        self._tts_tasks.clear()
+        if cancelled:
+            logger.info("server.tts_cancelled", count=cancelled)
+        return cancelled
+
     async def _handle_text(self, data: dict) -> dict:
         """Route free text through the IntentRouter, then invoke or reply."""
         text = data.get("input", "").strip()
         if not text:
             return {"ok": False, "error": "empty input"}
+        if self._record_recorder is not None:
+            return {
+                "ok": False,
+                "error": "recording session active; save/discard recording first",
+            }
 
         request_id = data.get("request_id", "")
 
@@ -228,7 +463,7 @@ class LampgoServer:
                 },
             }
 
-        async def _publish_intent_progress(stage: str, message: str, source: str) -> None:
+        async def _publish_intent_progress(stage: str, message: str, source: str) -> asyncio.Task | None:
             await self.events.publish(
                 IntentProgress(
                     stage=stage,
@@ -237,10 +472,25 @@ class LampgoServer:
                     request_id=request_id,
                 )
             )
+            if stage == "llm_narration" and message.strip():
+                task = asyncio.create_task(self._tts_for_web(message, request_id))
+                self._tts_tasks.add(task)
+                task.add_done_callback(self._tts_tasks.discard)
+                return task
+            return None
+
+        raw_history = data.get("history") or []
+        history = raw_history if isinstance(raw_history, list) else []
 
         intent = self.router.route(text)
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
-            logger.info("server.text_escalate_to_llm_agent", text=text, request_id=request_id, detail=intent.detail)
+            logger.info(
+                "server.text_escalate_to_llm_agent",
+                text=text,
+                request_id=request_id,
+                detail=intent.detail,
+                history_len=len(history),
+            )
             await _publish_intent_progress("llm_fallback", "关键词未命中，转交 LLM Agent...", "llm")
             agent_result = await self.router.run_agent_loop(
                 text,
@@ -253,6 +503,12 @@ class LampgoServer:
                 ),
                 on_progress=_publish_intent_progress,
                 joint_state=self.motion.current_state.positions,
+                publish_tool_event=lambda phase, **kwargs: self._publish_inline_tool_event(
+                    request_id=request_id,
+                    phase=phase,
+                    **kwargs,
+                ),
+                history=history,
             )
             if agent_result.intent_type == "complex":
                 await self.events.publish(
@@ -359,6 +615,48 @@ class LampgoServer:
             },
         }
 
+    async def _handle_audio(self, data: dict) -> dict:
+        """Handle audio input: omni transcribes → text goes through normal _handle_text.
+
+        Two-step approach because mimo-v2-omni cannot reliably do
+        function calling + audio understanding simultaneously.
+        """
+        audio_data = data.get("audio_data", "")
+        if not audio_data:
+            return {"ok": False, "error": "empty audio_data"}
+
+        request_id = data.get("request_id", "")
+
+        if not self.router.has_llm_client:
+            return {"ok": False, "error": "LLM client not configured — cannot process audio"}
+
+        audio_rms = self._measure_audio_rms(audio_data)
+        logger.info("server.audio_transcribing", request_id=request_id, audio_b64_len=len(audio_data), rms=f"{audio_rms:.1f}")
+        await self.events.publish(IntentRouting(text="[语音输入]", request_id=request_id))
+        await self.events.publish(
+            IntentProgress(stage="audio_transcribe", message="正在识别语音...", source="llm", request_id=request_id)
+        )
+
+        text = await self.router.transcribe_audio(audio_data)
+        if not text:
+            logger.warning("server.audio_transcribe_empty", request_id=request_id)
+            return {"ok": True, "result": {"type": "chat", "response": "抱歉，没有听清您说的话。", "source": "audio"}}
+
+        logger.info("server.audio_transcribed", request_id=request_id, text=text)
+        await self.events.publish(
+            IntentProgress(stage="audio_transcribed", message=f"听到：{text}", source="llm", request_id=request_id)
+        )
+
+        result = await self._handle_text(
+            {
+                "input": text,
+                "request_id": request_id,
+                "history": data.get("history") or [],
+            }
+        )
+        await self._maybe_tts(result, request_id)
+        return result
+
     def _resolve_recording_alias(self, text: str) -> str | None:
         path = Path(self.config.recordings_dir) / RECORDING_ALIASES_FILE
         try:
@@ -441,6 +739,68 @@ class LampgoServer:
         )
         return tool_payload
 
+    async def _publish_inline_tool_event(
+        self,
+        *,
+        request_id: str,
+        phase: str,
+        turn_index: int,
+        tool_index: int,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        status: str = "",
+        error: str | None = None,
+    ) -> None:
+        """Emit ToolCallPlanned/Finished for inline tools handled inside the LLM client.
+
+        Tools like ``web_search`` / ``capture_image`` short-circuit inside
+        :class:`LlmClient` and never touch ``_execute_agent_tool``; without this
+        bridge the frontend would never see a tool chip for them.
+        """
+        if phase == "planned":
+            await self.events.publish(
+                ToolCallPlanned(
+                    request_id=request_id,
+                    turn_index=turn_index,
+                    tool_index=tool_index,
+                    tool_name=tool_name,
+                    arguments=arguments or {},
+                )
+            )
+            logger.info(
+                "server.agent_inline_tool_planned",
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+            )
+            return
+
+        if phase == "finished":
+            summary = f"{tool_name} -> {status or 'ok'}"
+            if error:
+                summary = f"{summary}: {error}"
+            await self.events.publish(
+                ToolCallFinished(
+                    request_id=request_id,
+                    turn_index=turn_index,
+                    tool_index=tool_index,
+                    tool_name=tool_name,
+                    status=status or "ok",
+                    invocation_id=None,
+                    summary=summary,
+                    error=error,
+                )
+            )
+            logger.info(
+                "server.agent_inline_tool_finished",
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+                status=status or "ok",
+            )
+
     async def _handoff_to_openclaw(
         self,
         request_id: str,
@@ -471,6 +831,47 @@ class LampgoServer:
                 "openclaw_task": task,
             },
         }
+
+    @staticmethod
+    def _measure_audio_rms(audio_b64: str) -> float:
+        """Decode base64 WAV and compute RMS to check if audio has content."""
+        import base64, struct, math
+        try:
+            raw = base64.b64decode(audio_b64)
+            if len(raw) < 46:
+                return 0.0
+            pcm = raw[44:]
+            n = len(pcm) // 2
+            if n == 0:
+                return 0.0
+            sum_sq = 0.0
+            for i in range(0, len(pcm) - 1, 2):
+                sample = struct.unpack_from("<h", pcm, i)[0]
+                sum_sq += sample * sample
+            return math.sqrt(sum_sq / n)
+        except Exception:
+            return -1.0
+
+    async def _tts_for_web(self, text: str, request_id: str) -> None:
+        """Synthesize TTS and publish audio event for web playback."""
+        try:
+            from lampgo.voice.tts import synthesize_for_web
+            result = await synthesize_for_web(
+                text,
+                api_key=self.config.llm.api_key,
+                api_base=self.config.llm.api_base,
+                voice=self.config.voice.tts_voice,
+                provider=self.config.voice.tts_provider,
+                model=self.config.voice.tts_model,
+            )
+            if result:
+                audio_b64, fmt = result
+                await self.events.publish(TtsAudio(audio=audio_b64, format=fmt, request_id=request_id))
+                logger.debug("server.tts_for_web_done", request_id=request_id, format=fmt)
+            else:
+                logger.warning("server.tts_for_web_empty", request_id=request_id)
+        except Exception:
+            logger.exception("server.tts_for_web_failed", request_id=request_id)
 
     @staticmethod
     def _format_agent_result(agent_result, text: str) -> dict[str, Any]:
@@ -531,6 +932,136 @@ class LampgoServer:
                 "device_health": health,
                 "estopped": self.safety.is_estopped(),
                 "estop_reason": self.safety.last_estop_reason,
+                "recording": self._record_status(),
+                "hal_connected": bool(self.hal.is_connected),
+                "led_ready": bool(self.led.is_connected),
+                "camera_ready": bool(self.config.camera.port.strip()),
+            },
+        }
+
+    def _handle_list_cameras(self) -> dict:
+        """Probe camera indices 0..3 and return availability + names.
+
+        Returns active port based on the in-memory config so the UI can highlight it.
+        """
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            return {
+                "ok": True,
+                "result": {
+                    "cameras": [],
+                    "active": self.config.camera.port,
+                    "available": False,
+                    "reason": "opencv-python not installed",
+                },
+            }
+
+        try:
+            from lampgo.autodetect import _list_camera_names  # type: ignore
+            names = _list_camera_names()
+        except Exception:
+            names = {}
+
+        import os
+        import cv2
+        cameras: list[dict[str, str]] = []
+        for idx in range(4):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            old_stderr = os.dup(2)
+            os.dup2(devnull, 2)
+            try:
+                cap = cv2.VideoCapture(idx)
+                opened = cap.isOpened()
+                cap.release()
+            finally:
+                os.dup2(old_stderr, 2)
+                os.close(devnull)
+                os.close(old_stderr)
+            if opened:
+                cameras.append({"port": str(idx), "name": names.get(idx, "") or f"camera_{idx}"})
+
+        return {
+            "ok": True,
+            "result": {
+                "cameras": cameras,
+                "active": self.config.camera.port,
+                "available": True,
+            },
+        }
+
+    def _handle_set_camera(self, port: str) -> dict:
+        """Update the active camera port in the in-memory config (runtime switch)."""
+        value = (port or "").strip()
+        self.config.camera.port = value
+        logger.info("camera.port_updated", port=value or "<disabled>")
+        return {
+            "ok": True,
+            "result": {
+                "active": self.config.camera.port,
+                "camera_ready": bool(value),
+            },
+        }
+
+    def _handle_list_mics(self) -> dict:
+        """Enumerate server-side audio input devices (PyAudio / sounddevice).
+
+        This matches the semantics of ``voice.mic_device`` — a *server-side*
+        device index that the Python voice loop opens via ``sounddevice``.
+        It is intentionally distinct from the browser-side mic list shown in
+        the topbar mic chip popover (which is what the browser streams up
+        over WebRTC).
+        """
+        try:
+            import sounddevice as sd  # type: ignore
+        except ImportError:
+            return {
+                "ok": True,
+                "result": {
+                    "mics": [],
+                    "active": self.config.voice.mic_device,
+                    "available": False,
+                    "reason": "sounddevice not installed",
+                },
+            }
+
+        mics: list[dict[str, object]] = []
+        default_index: int | None = None
+        try:
+            devices = sd.query_devices()
+            try:
+                default_index = int(sd.default.device[0])
+            except Exception:
+                default_index = None
+            for i, dev in enumerate(devices):
+                if int(dev.get("max_input_channels", 0) or 0) <= 0:
+                    continue
+                mics.append(
+                    {
+                        "index": str(i),
+                        "name": str(dev.get("name", "") or ""),
+                        "is_default": (default_index is not None and i == default_index),
+                        "max_input_channels": int(dev.get("max_input_channels", 0) or 0),
+                    }
+                )
+        except Exception as exc:
+            return {
+                "ok": True,
+                "result": {
+                    "mics": [],
+                    "active": self.config.voice.mic_device,
+                    "available": False,
+                    "reason": f"enumeration failed: {exc}",
+                },
+            }
+
+        return {
+            "ok": True,
+            "result": {
+                "mics": mics,
+                "active": self.config.voice.mic_device,
+                "default": str(default_index) if default_index is not None else "",
+                "available": True,
             },
         }
 
@@ -556,9 +1087,38 @@ class LampgoServer:
 
     async def start(self) -> None:
         logger.info("server.starting")
-        self.hal.connect()
-        self.led.connect()
-        self.motion.start()
+        if self.config.no_hw:
+            logger.info("server.no_hw_mode", msg="Skipping motor and LED connections")
+        else:
+            # Hardware may fail to open (wrong port, permission, device unplugged).
+            # Degrade to no_hw instead of crashing so the Web UI still comes up and
+            # the user can fix the port in the settings page.
+            try:
+                self.hal.connect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "server.hal_connect_failed_degrading_to_no_hw",
+                    motor_port=self.config.device.motor_port,
+                    error=str(exc),
+                )
+                print(
+                    f"[warn] failed to open motor_port={self.config.device.motor_port!r}: {exc}\n"
+                    "       falling back to --no-hw; fix the port in the Web UI (硬件 tab) "
+                    "or via `lampgo onboard`, then restart.",
+                    flush=True,
+                )
+                self.config.no_hw = True
+                self.config.home_on_start = False
+            else:
+                try:
+                    self.led.connect()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("server.led_connect_failed", error=str(exc))
+                self.motion.start()
+                home = self.hal.get_calibration_home()
+                if home is not None:
+                    from lampgo.skills.builtin.motion_skills import set_calibration_home
+                    set_calibration_home(home)
 
         self._register_builtin_skills()
         if self.config.home_on_start:
@@ -569,7 +1129,7 @@ class LampgoServer:
         logger.info(
             "server.ready",
             skills=self.registry.list_ids(),
-            motor_port=self.config.device.motor_port,
+            motor_port="(disabled)" if self.config.no_hw else self.config.device.motor_port,
             socket=self.config.socket_path,
         )
 
@@ -621,6 +1181,35 @@ class LampgoServer:
         except Exception:
             logger.exception("server.llm_router_setup_failed")
 
+    def reload_llm_client(self) -> bool:
+        """Rebuild the LLMClient from the current config (called after live config edits)."""
+        try:
+            from lampgo.perception.llm_client import LLMClient
+        except Exception:
+            logger.exception("server.reload_llm_client_import_failed")
+            return False
+        if not self.config.llm.api_key:
+            logger.info("server.reload_llm_client_skipped (no API key)")
+            try:
+                self.router.set_llm_client(None)
+            except Exception:
+                pass
+            return False
+        try:
+            skill_specs = self._handle_skills()["result"]["skills"]
+            client = LLMClient(self.config.llm, skill_specs, camera_config=self.config.camera)
+            self.router.set_llm_client(client)
+            logger.info(
+                "server.llm_router_reloaded",
+                provider=self.config.llm.provider,
+                model=self.config.llm.model,
+                fast_model=self.config.llm.fast_model,
+            )
+            return True
+        except Exception:
+            logger.exception("server.reload_llm_client_failed")
+            return False
+
     async def _run_blocking_shutdown_step(self, name: str, fn, timeout_s: float = 2.0) -> None:
         """Run a potentially blocking shutdown step with timeout guard."""
         try:
@@ -632,6 +1221,17 @@ class LampgoServer:
 
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
+        async with self._record_lock:
+            if self._record_recorder is not None and self._record_recorder.is_recording:
+                self._record_recorder.stop()
+            if self._record_task is not None and not self._record_task.done():
+                self._record_task.cancel()
+                try:
+                    await self._record_task
+                except asyncio.CancelledError:
+                    pass
+            self._record_task = None
+            self._record_recorder = None
         await self._state_writer.stop()
         if self._voice_task is not None:
             self._voice_task.cancel()
@@ -640,10 +1240,11 @@ class LampgoServer:
             except asyncio.CancelledError:
                 pass
         await self._ipc.stop()
-        self.motion.stop()
-        await self._run_blocking_shutdown_step("led.off", self.led.off)
-        await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)
-        await self._run_blocking_shutdown_step("hal.disconnect", self.hal.disconnect, timeout_s=3.0)
+        if not self.config.no_hw:
+            self.motion.stop()
+            await self._run_blocking_shutdown_step("led.off", self.led.off)
+            await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)
+            await self._run_blocking_shutdown_step("hal.disconnect", self.hal.disconnect, timeout_s=3.0)
         logger.info("server.stopped")
 
     async def run_forever(self) -> None:
@@ -677,14 +1278,55 @@ class LampgoServer:
             )
             uvi_server = uvicorn.Server(uvi_config)
             self._web_serve_task = asyncio.create_task(uvi_server.serve())
+            local_url = f"http://localhost:{self.config.web.port}"
             logger.info(
                 "server.web_started",
-                url=f"http://localhost:{self.config.web.port}",
+                url=local_url,
             )
+            self._print_connection_banner(local_url)
         except ImportError:
             logger.error("server.web_missing_deps (pip install starlette uvicorn websockets)")
         except Exception:
             logger.exception("server.web_start_failed")
+
+    @staticmethod
+    def _print_connection_banner(local_url: str) -> None:
+        """Print a clear banner so users know how to wire up OpenClaw when port changes."""
+        try:
+            from lampgo.bridge.openclaw_installer import detect_openclaw_integration
+
+            status = detect_openclaw_integration()
+            overall = status.overall
+            def _mark(ok: bool) -> str:
+                return "✓" if ok else "✗"
+            integration_lines = [
+                f"openclaw CLI     : {_mark(status.binary.ok)} {status.binary.detail}",
+                f"lampgo plugin    : {_mark(status.plugin.ok)} {'已安装' if status.plugin.ok else '未安装（运行 `lampgo install-openclaw --yes` 一键安装）'}",
+                f"lampgo skill     : {_mark(status.skill.ok)} {'已注册' if status.skill.ok else '未注册（关键词触发不可用）'}",
+                f"plugin 启用      : {_mark(status.trusted.ok)} {'已启用' if status.trusted.ok else '未启用（OpenClaw 会拒绝加载）'}",
+                f"gateway 在线     : {_mark(status.gateway.ok)} {status.gateway.detail}",
+            ]
+            overall_line = f"集成状态         : {overall}"
+        except Exception:
+            integration_lines = ["openclaw 集成检测失败（忽略）"]
+            overall_line = ""
+
+        lines = [
+            "",
+            "──────── lampgo ready ────────",
+            f"Web UI           : {local_url}",
+            f"OpenClaw plugin  : set lampgoApiBase = {local_url}",
+            f"Env override     : export LAMPGO_API_BASE={local_url}",
+            *integration_lines,
+        ]
+        if overall_line:
+            lines.append(overall_line)
+        lines += [
+            "一键修复集成     : uv run lampgo install-openclaw --yes",
+            "──────────────────────────────",
+            "",
+        ]
+        print("\n".join(lines), flush=True)
 
     def _start_voice_loop(self) -> None:
         try:

@@ -14,3 +14,7 @@ lampgo.toml
 # User-created recordings and runtime alias mappings (not project assets)
 assets/recordings/user/
 assets/recordings/aliases.json
+.DS_Store
+.env_backup
+lampgo.toml_backup
+scripts/

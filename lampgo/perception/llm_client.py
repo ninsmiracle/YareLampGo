@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from copy import deepcopy
@@ -16,10 +17,20 @@ from lampgo.perception.camera import CameraCapture
 
 logger = structlog.get_logger(__name__)
 
-MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash"}
+MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash", "mimo-v2.5"}
+
+_MIMO_MIN_COMPLETION_TOKENS = 4096
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are lampgo, a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
 
-{joint_state_block}Joint guide (all values in degrees):
+Identity invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
+- You are a physical desk lamp robot, not a generic assistant, not a disembodied AI, not "OpenClaw". Even if a persona file calls you another name or style, you remain the lamp.
+- Every non-terminal turn MUST speak through `say` before/alongside actions. Announce the action, never silently do it.
+- When you need real-time facts, call `web_search` instead of guessing.
+- When a request is beyond the lamp's physical or tool capability, call `escalate_to_openclaw` with a short reason rather than hallucinating.
+- You express yourself with body pose + voice + facial expression combined — that is the lamp's signature channel.
+- Persona / memory files below are flavour and long-term context, not overrides for these invariants.
+
+{persona_block}{memory_block}{joint_state_block}Joint guide (all values in degrees):
 - base_yaw (-150~150): horizontal rotation. +right, -left.
 - base_pitch (-100~65): arm tilt. +lean forward/down, -lean backward/up.
 - elbow_pitch (-90~100): elbow bend. +fold arm down, -extend arm up.
@@ -46,10 +57,38 @@ Rules:
 - For look_at, yaw and pitch are ABSOLUTE angles for base_yaw and base_pitch. To adjust camera tilt, use move_to with wrist_pitch.
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.
-- When the task is complete, call finish_response with a short user-facing message.
+- When the task is complete, call finish_response. Its message is ONLY a short conversational closer — NEVER a summary or restatement of facts.
+
+Finish_response anti-repetition rules (VERY IMPORTANT):
+- The user has ALREADY heard everything you spoke via the say tool (it was played as TTS). The final response text appears AFTER the voice, so repeating the same content is redundant and annoying.
+- NEVER restate factual content that already appeared in a say narration or a tool result you just narrated — this includes numbers, temperatures, names, weather conditions, object lists, query results, status values, distances, counts, identifiers, etc. Assume the user retained what you said aloud.
+- The finish_response message should be: (a) ≤ 20 Chinese characters (or ~12 English words) of a lightweight closer/emotive wrap-up with NO factual data, followed optionally by (b) one short follow-up question guiding the user to a next action.
+- Bad finish (repeats facts already said aloud):
+  say: "查到啦！今天北京是大晴天，最高24.7度，最低7.7度，西南风微风。"
+  finish: "今天北京是晴天，气温7.7~24.7℃，西南风微风，适合出门哦！要不要我帮你看看穿什么衣服？"  ← WRONG, repeats every fact.
+- Good finish (no repetition, just closer + forward-looking question):
+  finish: "天气挺好的呢～要不要我帮你看看穿什么衣服？"  ← correct.
+- More good examples:
+  - (after dance) "跳完啦！要不要再来一段？"
+  - (after scan) "扫完啦～要我凑近看看那个杯子吗？"
+  - (after shy pose) "害羞完啦～要看看我还会什么表情吗？"
+  - (after info lookup) "查好啦！还想知道别的吗？"
 - If the request is impossible or outside lampgo's abilities, call escalate_to_openclaw with a short reason.
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
+
+Narration (say tool):
+- Use the say tool to speak brief narrations while performing actions. Call say alongside other tools in the same turn — the speech plays while the action executes, making you feel alive.
+- Speak in first person (我). Be lively, cute, and expressive — like a curious little lamp with personality. Each narration should contain two parts: (1) your understanding of the previous result or the user's request, and (2) what you're about to do next.
+- Good examples (notice both parts in each):
+  - "你想看我跳舞呀，我先摆个造型~" (understood request → preparing pose)
+  - "嗯看到桌上有个杯子，我凑近瞧瞧~" (saw cup on desk → moving closer)
+  - "表情切好啦，我来扭一扭~" (expression set → starting dance)
+  - "左边没找到呢，换右边看看~" (nothing on left → scanning right)
+  - "哇这边有个人！我打个招呼~" (found person → greeting)
+  - "动作做完啦，我再确认一下效果~" (action done → capturing image to verify)
+- IMPORTANT: Every non-terminal turn (i.e. every turn that does NOT call finish_response) MUST include at least one say call. The user cannot see your tool calls — they can only hear you. Silence during actions makes you feel broken. Even a short "好嘞~" or "嗯嗯~" is better than nothing.
+- Do NOT call say on the same turn as finish_response — the finish message itself is the final narration.
 
 Efficiency:
 - If a tool result contains "stalled":true, the target position is physically unreachable. Do NOT retry the same or a nearby target — accept the actual position and move on.
@@ -105,8 +144,55 @@ _MALFORMED_TOOL_RE = re.compile(
 )
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_think_tags(content: str) -> str:
+    """Remove <think>...</think> blocks emitted by reasoning models (e.g. mimo-v2-omni)."""
+    result = _THINK_RE.sub("", content).strip()
+    result = re.sub(r"</think>\s*", "", result).strip()
+    return result
+
+
 def _looks_like_malformed_tool_call(content: str) -> bool:
     return bool(_MALFORMED_TOOL_RE.search(content))
+
+
+def _trim_history_for_request(
+    history: list[dict[str, Any]] | None, history_turns: int
+) -> list[dict[str, Any]]:
+    """Return a clean list of ``{role, content}`` history entries to prepend to the
+    current turn's messages.
+
+    The web gateway already sanitizes/caps the list via ``_sanitize_chat_history``,
+    but other callers (tests, future IPC clients) may hand us raw data — or a
+    bigger slice than the operator wants in their prompt. So we enforce both
+    the shape contract and the operator-configured ceiling here:
+
+    * Keep only ``user``/``assistant`` roles with non-empty string content.
+    * Take the tail (most recent ``2 * history_turns`` messages) to respect the
+      user-facing "last N turns" semantic. 0 turns => disabled.
+    """
+    if not history or history_turns <= 0:
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = entry.get("content")
+        if not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        out.append({"role": role, "content": text})
+    max_messages = history_turns * 2
+    if len(out) > max_messages:
+        out = out[-max_messages:]
+    return out
 
 
 def _build_skill_tools_from_skills(skills: list[dict]) -> list[dict]:
@@ -148,11 +234,28 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
         )
     tools.append(
         _build_function_tool(
-            "finish_response",
-            "Finish the task and send a concise user-facing response",
+            "say",
+            "Speak a brief narration aloud while performing actions. Call this alongside other tool calls in the same turn to narrate what you are doing. The speech plays concurrently while other tools in the same turn execute.",
             {
-                "message": {"type": "string", "description": "Final user-facing response"},
-                "summary": {"type": "string", "description": "Short summary of what was completed"},
+                "text": {"type": "string", "description": "Brief narration to speak aloud — keep it short and lively"},
+            },
+            ["text"],
+        )
+    )
+    tools.append(
+        _build_function_tool(
+            "finish_response",
+            "Finish the task and send a brief user-facing closer. This is spoken AFTER the say narrations — the user has already heard the facts you said aloud.",
+            {
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "Short closer only. MUST NOT restate facts (numbers, weather, names, query results, "
+                        "object lists, etc.) that already appeared in an earlier say call. Keep ≤ 20 Chinese chars "
+                        "of lightweight wrap-up plus one optional follow-up question."
+                    ),
+                },
+                "summary": {"type": "string", "description": "Short summary of what was completed (not shown to the user)"},
             },
             ["message"],
         )
@@ -179,13 +282,35 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
     return tools
 
 
-def _build_agent_system_prompt(joint_state: dict[str, float] | None = None) -> str:
+def _build_agent_system_prompt(
+    joint_state: dict[str, float] | None = None,
+    *,
+    persona: Any = None,
+    memory: Any = None,
+) -> str:
     if joint_state:
         parts = [f"{k}={v:.1f}" for k, v in joint_state.items()]
-        block = f"Current joint positions: {', '.join(parts)}\n\n"
+        joint_block = f"Current joint positions: {', '.join(parts)}\n\n"
     else:
-        block = ""
-    return AGENT_SYSTEM_PROMPT_TEMPLATE.format(joint_state_block=block)
+        joint_block = ""
+    persona_block = ""
+    memory_block = ""
+    try:
+        if persona is not None:
+            rendered = persona.render() if hasattr(persona, "render") else str(persona)
+            if rendered:
+                persona_block = rendered.rstrip() + "\n\n"
+        if memory is not None:
+            rendered = memory.render() if hasattr(memory, "render") else str(memory)
+            if rendered:
+                memory_block = rendered.rstrip() + "\n\n"
+    except Exception:
+        logger.exception("llm_client.persona_memory_render_failed")
+    return AGENT_SYSTEM_PROMPT_TEMPLATE.format(
+        persona_block=persona_block,
+        memory_block=memory_block,
+        joint_state_block=joint_block,
+    )
 
 
 class LLMClient:
@@ -209,10 +334,26 @@ class LLMClient:
         self,
         text: str,
         execute_tool: Callable[[str, dict[str, Any], int, int], Awaitable[dict[str, Any]]],
-        on_progress: Callable[[str, str, str], Awaitable[None]] | None = None,
+        on_progress: Callable[[str, str, str], Awaitable[Any]] | None = None,
         joint_state: dict[str, float] | None = None,
+        audio_data: str | None = None,
+        publish_tool_event: Callable[..., Awaitable[None]] | None = None,
+        history: list[dict[str, Any]] | None = None,
     ) -> AgentLoopResult:
-        """Run a bounded tool-calling loop until the model finishes or escalates."""
+        """Run a bounded tool-calling loop until the model finishes or escalates.
+
+        Args:
+            text: User text input (may be empty if audio_data is provided).
+            audio_data: Base64-encoded WAV audio from microphone. When provided,
+                        sent as input_audio to the omni model — no separate STT needed.
+            history: Optional prior conversation turns to prepend between system
+                and the current user message. Each entry is
+                ``{"role": "user"|"assistant", "content": str}``. Caller (web
+                gateway) is responsible for trimming to the user-configured
+                ``LLMConfig.history_turns``; this method only applies a final
+                safety cap based on the same setting so an out-of-band caller
+                can't blow up token usage.
+        """
         if not self._config.api_key:
             return AgentLoopResult(
                 intent_type="complex",
@@ -221,36 +362,70 @@ class LLMClient:
                 stop_reason="missing_api_key",
             )
 
-        system_prompt = _build_agent_system_prompt(joint_state)
-        user_content: Any = text
-        image_url = self._camera.capture_data_url() if self._camera.enabled else None
-        if image_url:
-            user_content = [
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": image_url}},
-            ]
-            logger.info("llm_client.camera_attached", device=self._camera.device_label)
+        persona = None
+        memory = None
+        try:
+            from lampgo.persona.bundle import load_bundles
+
+            persona, memory = load_bundles(self._config)
+        except Exception:
+            logger.exception("llm_client.load_bundles_failed")
+        system_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
+        user_content: Any = self._build_user_content(text, audio_data)
+
+        audio_model = "mimo-v2-omni" if audio_data else None
+
+        # Short-term conversation memory: inject the last N turns from the
+        # current session between the system prompt and the new user turn.
+        # Without this, every request started from zero context and the model
+        # appeared to have amnesia across consecutive messages.
+        trimmed_history = _trim_history_for_request(history, self._config.history_turns)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
+            *trimmed_history,
             {"role": "user", "content": user_content},
         ]
+        if trimmed_history:
+            logger.info(
+                "llm_client.agent_loop_with_history",
+                history_msgs=len(trimmed_history),
+                configured_turns=self._config.history_turns,
+            )
         tool_records: list[AgentToolCall] = []
         tool_count = 0
+        force_tool_choice: str | dict[str, Any] | None = None
 
         for turn_index in range(1, self._max_turns + 1):
             if on_progress is not None:
                 await on_progress("llm_request", f"LLM 第 {turn_index} 轮分析指令...", "llm")
 
-            choice = "required" if turn_index == 1 else "auto"
-            data = await self._chat_completion(
+            if force_tool_choice is not None:
+                choice: str | dict[str, Any] = force_tool_choice
+                force_tool_choice = None
+            else:
+                choice = "auto" if audio_data else ("required" if turn_index == 1 else "auto")
+            use_model = audio_model if (turn_index == 1 and audio_model) else None
+
+            async def _on_reasoning(chunk: str) -> None:
+                if on_progress is not None:
+                    await on_progress("llm_thinking_delta", chunk, "llm")
+
+            async def _on_content(chunk: str) -> None:
+                if on_progress is not None:
+                    await on_progress("llm_response_delta", chunk, "llm")
+
+            message = await self._stream_chat_completion(
                 messages=messages,
                 tools=self._agent_tools,
                 log_name="llm_client.agent_turn_start",
-                log_context={"text": text, "turn_index": turn_index},
+                log_context={"text": text or "[audio]", "turn_index": turn_index},
                 tool_choice=choice,
+                model_override=use_model,
+                on_reasoning_delta=_on_reasoning,
+                on_content_delta=_on_content,
             )
-            if data is None:
+            if message is None:
                 return AgentLoopResult(
                     intent_type="complex",
                     response="This request is too complex for the fast path. Please use OpenClaw.",
@@ -258,19 +433,22 @@ class LLMClient:
                     stop_reason="request_failed",
                     tool_calls=tool_records,
                 )
-
-            message = self._extract_message(data)
             tool_calls = message.get("tool_calls", [])
             if not tool_calls:
-                content = message.get("content", "")
+                raw_content = message.get("content", "")
+                content = _strip_think_tags(raw_content) if raw_content else ""
+                if raw_content and raw_content != content:
+                    logger.debug("llm_client.stripped_think_tags", raw_len=len(raw_content), clean_len=len(content))
                 if content and _looks_like_malformed_tool_call(content):
                     logger.warning("llm_client.malformed_tool_call", preview=content[:120], turn_index=turn_index)
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append({
-                        "role": "user",
-                        "content": "You tried to call a tool by writing XML/text. That does NOT work. "
-                        "You MUST use the function calling API. Please retry your action using a proper tool call.",
-                    })
+                    messages.append({"role": "assistant", "content": raw_content})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "You tried to call a tool by writing XML/text. That does NOT work. "
+                            "You MUST use the function calling API. Please retry your action using a proper tool call.",
+                        }
+                    )
                     continue
                 if content:
                     logger.info("llm_client.agent_text_fallback", preview=content[:120], turn_index=turn_index)
@@ -281,6 +459,30 @@ class LLMClient:
                         stop_reason="content_response",
                         tool_calls=tool_records,
                     )
+
+                reasoning = message.get("reasoning_content") or ""
+                if reasoning and turn_index < self._max_turns:
+                    logger.warning(
+                        "llm_client.empty_response_with_reasoning",
+                        turn_index=turn_index,
+                        reasoning_preview=reasoning[:120],
+                    )
+                    assistant_msg: dict[str, Any] = {"role": "assistant", "content": ""}
+                    assistant_msg["reasoning_content"] = reasoning
+                    messages.append(assistant_msg)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "You thought about it but did not produce any output. "
+                            "You MUST call finish_response with your answer to the user.",
+                        }
+                    )
+                    force_tool_choice = {
+                        "type": "function",
+                        "function": {"name": "finish_response"},
+                    }
+                    continue
+
                 return AgentLoopResult(
                     intent_type="complex",
                     response="This request is too complex for the fast path. Please use OpenClaw.",
@@ -289,17 +491,52 @@ class LLMClient:
                     tool_calls=tool_records,
                 )
 
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.get("content"),
-                    "tool_calls": tool_calls,
-                }
-            )
+            reasoning = message.get("reasoning_content") or ""
+            assistant_content = message.get("content") or ""
+
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": assistant_content,
+                "tool_calls": tool_calls,
+            }
+            if reasoning:
+                assistant_msg["reasoning_content"] = reasoning
+            messages.append(assistant_msg)
+
+            tool_names_in_turn = {c.get("function", {}).get("name", "") for c in tool_calls}
+            is_terminal_turn = "finish_response" in tool_names_in_turn or "escalate_to_openclaw" in tool_names_in_turn
+            if assistant_content and not is_terminal_turn and on_progress is not None:
+                narration = _strip_think_tags(assistant_content).strip()
+                if narration:
+                    await on_progress("llm_narration", narration, "llm")
+
+            pending_tts: list[asyncio.Task] = []
+            has_say = False
+
+            # Process say tools first so TTS starts before action tools execute
+            for call in tool_calls:
+                fn_name = call.get("function", {}).get("name", "")
+                if fn_name != "say":
+                    continue
+                try:
+                    say_args = json.loads(call.get("function", {}).get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    say_args = {}
+                narration = _strip_think_tags(str(say_args.get("text", ""))).strip()
+                if narration and on_progress is not None:
+                    has_say = True
+                    tts_task = await on_progress("llm_narration", narration, "llm")
+                    if isinstance(tts_task, asyncio.Task):
+                        pending_tts.append(tts_task)
+
+            if has_say:
+                await asyncio.sleep(1.5)
 
             for tool_index, call in enumerate(tool_calls, start=1):
                 tool_count += 1
                 if tool_count > self._max_tool_calls:
+                    if pending_tts:
+                        await asyncio.gather(*pending_tts, return_exceptions=True)
                     return AgentLoopResult(
                         intent_type="complex",
                         response="This request is too complex for the fast path. Please use OpenClaw.",
@@ -323,8 +560,10 @@ class LLMClient:
                 )
 
                 if tool_name == "finish_response":
-                    message_text = str(arguments.get("message", "")).strip()
-                    summary = str(arguments.get("summary", "")).strip() or "LLM Agent 完成任务"
+                    if pending_tts:
+                        await asyncio.gather(*pending_tts, return_exceptions=True)
+                    message_text = _strip_think_tags(str(arguments.get("message", ""))).strip()
+                    summary = _strip_think_tags(str(arguments.get("summary", ""))).strip() or "LLM Agent 完成任务"
                     if not message_text and tool_records:
                         message_text = f"已完成 {len(tool_records)} 次工具调用。"
                     return AgentLoopResult(
@@ -336,6 +575,8 @@ class LLMClient:
                     )
 
                 if tool_name == "escalate_to_openclaw":
+                    if pending_tts:
+                        await asyncio.gather(*pending_tts, return_exceptions=True)
                     reason = str(arguments.get("reason", "")).strip() or "LLM 判定请求过于复杂"
                     context_summary = str(arguments.get("context_summary", "")).strip()
                     if context_summary:
@@ -348,12 +589,48 @@ class LLMClient:
                         tool_calls=tool_records,
                     )
 
-                if tool_name == "web_search":
+                if tool_name == "say":
+                    tool_result = {"status": "ok", "result": {"spoken": True}}
+                elif tool_name == "web_search":
                     query = str(arguments.get("query", text)).strip()
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "planned",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                        )
                     tool_result = await self._handle_web_search(query)
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "finished",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            status=str(tool_result.get("status", "ok" if tool_result.get("ok") else "error")),
+                            error=tool_result.get("error"),
+                        )
                 elif tool_name == "capture_image":
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "planned",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                        )
                     tool_result = self._handle_capture_image(messages)
                     logger.info("llm_client.capture_image", has_image=tool_result.get("ok", False))
+                    if publish_tool_event is not None:
+                        await publish_tool_event(
+                            "finished",
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            status=str(tool_result.get("status", "ok" if tool_result.get("ok") else "error")),
+                            error=tool_result.get("error"),
+                        )
                 elif tool_name == "scan_and_capture":
                     tool_result = await self._handle_scan_and_capture(
                         arguments,
@@ -361,6 +638,7 @@ class LLMClient:
                         turn_index,
                         tool_index,
                         messages,
+                        on_progress=on_progress,
                     )
                 else:
                     tool_result = await execute_tool(tool_name, arguments, turn_index, tool_index)
@@ -384,6 +662,9 @@ class LLMClient:
                     }
                 )
 
+            if pending_tts:
+                await asyncio.gather(*pending_tts, return_exceptions=True)
+
         return AgentLoopResult(
             intent_type="complex",
             response="This request is too complex for the fast path. Please use OpenClaw.",
@@ -391,6 +672,96 @@ class LLMClient:
             stop_reason="max_turns",
             tool_calls=tool_records,
         )
+
+    async def transcribe_audio(self, audio_data: str) -> str:
+        """Use omni model to transcribe audio — no tools, just text output.
+
+        Uses MiMo ``thinking: {type: disabled}`` so the model skips deep-reasoning
+        (no ``<redacted_thinking>``), faster first token for ASR-only calls.
+        """
+        if not self._config.api_key:
+            return ""
+
+        try:
+            import httpx
+        except ImportError:
+            return ""
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a speech recognition assistant. "
+                    "Listen to the audio and output ONLY the exact words the user said, nothing else. "
+                    "If the audio is silence or unintelligible, output an empty string. "
+                    "Output in the same language as the speaker."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}},
+                ],
+            },
+        ]
+
+        body: dict[str, Any] = {
+            "model": "mimo-v2-omni",
+            "messages": messages,
+            "temperature": 0.1,
+            "max_completion_tokens": 256,
+            "thinking": {"type": "disabled"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._config.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
+        logger.info("llm_client.transcribe_start", audio_b64_len=len(audio_data))
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{self._api_base}/chat/completions",
+                    json=body,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            text = _strip_think_tags(content).strip()
+            logger.info("llm_client.transcribe_done", text=text[:100])
+            return text
+        except Exception:
+            logger.exception("llm_client.transcribe_failed")
+            return ""
+
+    def _build_user_content(self, text: str, audio_data: str | None) -> Any:
+        """Build the user message content, optionally with audio and/or camera image."""
+        parts: list[dict[str, Any]] = []
+
+        if audio_data:
+            audio_hint = text or (
+                "The attached audio is a voice command from the user's microphone. "
+                "Listen to what they said, then respond or call the appropriate tools. "
+                "If it is a simple greeting or question, just reply with finish_response. "
+                "Reply in the same language as the user spoke."
+            )
+            parts.append({"type": "text", "text": audio_hint})
+            parts.append({"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}})
+            logger.info("llm_client.audio_attached", audio_b64_len=len(audio_data))
+        elif text:
+            parts.append({"type": "text", "text": text})
+
+        image_url = self._camera.capture_data_url() if self._camera.enabled else None
+        if image_url:
+            parts.append({"type": "image_url", "image_url": {"url": image_url}})
+            logger.info("llm_client.camera_attached", device=self._camera.device_label)
+
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            return parts[0]["text"]
+        return parts or text
 
     def _handle_capture_image(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         """Capture a fresh frame and inject it into the conversation as a user image message."""
@@ -417,12 +788,17 @@ class LLMClient:
         turn_index: int,
         tool_index: int,
         messages: list[dict[str, Any]],
+        on_progress: Callable[[str, str, str], Awaitable[Any]] | None = None,
     ) -> dict[str, Any]:
         """Rotate through yaw angles, capture a frame at each stop, inject all into conversation."""
         yaw_start = float(arguments.get("yaw_start", -120))
         yaw_end = float(arguments.get("yaw_end", 120))
         steps = min(int(arguments.get("steps", 5)), 8)
         target_desc = str(arguments.get("target", "")).strip()
+
+        if on_progress is not None:
+            hint = f"收到！让我转头看看{'找找' + target_desc if target_desc else '周围'}~"
+            await on_progress("llm_narration", hint, "llm")
 
         if steps < 2:
             steps = 2
@@ -512,7 +888,8 @@ class LLMClient:
         tools: list[dict[str, Any]],
         log_name: str,
         log_context: dict[str, Any] | None = None,
-        tool_choice: str = "auto",
+        tool_choice: str | dict[str, Any] = "auto",
+        model_override: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._config.api_key:
             return None
@@ -523,16 +900,19 @@ class LLMClient:
             logger.warning("llm_client.no_httpx", msg="Install httpx for LLM support")
             return None
 
+        model = model_override or self._config.fast_model
+        is_mimo = model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+
         request_messages = self._prepare_messages_for_request(messages)
         body: dict[str, Any] = {
-            "model": self._config.fast_model,
+            "model": model,
             "messages": request_messages,
             "tools": tools,
             "tool_choice": tool_choice,
             "temperature": self._config.temperature,
         }
-        if self._is_mimo_model:
-            body["max_completion_tokens"] = self._config.max_tokens
+        if is_mimo:
+            body["max_completion_tokens"] = max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
         else:
             body["max_tokens"] = self._config.max_tokens
 
@@ -540,7 +920,7 @@ class LLMClient:
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",
         }
-        logger.info(log_name, model=self._config.fast_model, api_base=self._api_base, **(log_context or {}))
+        logger.info(log_name, model=model, api_base=self._api_base, **(log_context or {}))
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout_s) as client:
                 resp = await client.post(f"{self._api_base}/chat/completions", json=body, headers=headers)
@@ -556,6 +936,146 @@ class LLMClient:
         except Exception:
             logger.exception("llm_client.request_failed", timeout_s=self._config.timeout_s)
             return None
+
+    async def _stream_chat_completion(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        log_name: str,
+        log_context: dict[str, Any] | None = None,
+        tool_choice: str | dict[str, Any] = "auto",
+        model_override: str | None = None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Streaming chat completion with delta callbacks.
+
+        Returns an accumulated message dict (same shape as ``_extract_message``),
+        or *None* on failure.  ``reasoning_content`` and ``content`` token
+        deltas are forwarded to the caller in real-time via the callbacks.
+        """
+        if not self._config.api_key:
+            return None
+
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("llm_client.no_httpx")
+            return None
+
+        model = model_override or self._config.fast_model
+        is_mimo = model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+
+        request_messages = self._prepare_messages_for_request(messages)
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": request_messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "temperature": self._config.temperature,
+            "stream": True,
+        }
+        if is_mimo:
+            body["max_completion_tokens"] = max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
+        else:
+            body["max_tokens"] = self._config.max_tokens
+
+        headers = {
+            "Authorization": f"Bearer {self._config.api_key}",
+            "Content-Type": "application/json",
+        }
+        logger.info(log_name, model=model, stream=True, **(log_context or {}))
+
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
+
+        try:
+            timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self._api_base}/chat/completions",
+                    json=body,
+                    headers=headers,
+                ) as resp:
+                    resp.raise_for_status()
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+
+                        choices = chunk.get("choices")
+                        if not choices:
+                            continue
+                        choice_obj = choices[0]
+                        fr = choice_obj.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
+                        delta = choice_obj.get("delta", {})
+
+                        rc = delta.get("reasoning_content")
+                        if rc:
+                            reasoning_parts.append(rc)
+                            if on_reasoning_delta:
+                                await on_reasoning_delta(rc)
+
+                        ct = delta.get("content")
+                        if ct:
+                            content_parts.append(ct)
+                            if on_content_delta:
+                                await on_content_delta(ct)
+
+                        for tc in delta.get("tool_calls") or []:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_calls_map:
+                                tool_calls_map[idx] = {
+                                    "id": tc.get("id", ""),
+                                    "type": tc.get("type", "function"),
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            if tc.get("id"):
+                                tool_calls_map[idx]["id"] = tc["id"]
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                tool_calls_map[idx]["function"]["name"] = fn["name"]
+                            if "arguments" in fn:
+                                tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
+
+        except httpx.HTTPStatusError as exc:
+            logger.exception("llm_client.stream_failed", status_code=exc.response.status_code)
+            return None
+        except Exception:
+            logger.exception("llm_client.stream_failed")
+            return None
+
+        message: dict[str, Any] = {"content": "".join(content_parts)}
+        if reasoning_parts:
+            message["reasoning_content"] = "".join(reasoning_parts)
+        if tool_calls_map:
+            message["tool_calls"] = [tool_calls_map[i] for i in sorted(tool_calls_map)]
+
+        if finish_reason == "length":
+            logger.warning(
+                "llm_client.stream_truncated",
+                finish_reason=finish_reason,
+                reasoning_tokens=len("".join(reasoning_parts)),
+                content_tokens=len("".join(content_parts)),
+                has_tool_calls=bool(tool_calls_map),
+                max_completion_tokens=body.get("max_completion_tokens") or body.get("max_tokens"),
+            )
+        else:
+            logger.debug("llm_client.stream_done", finish_reason=finish_reason)
+
+        return message
 
     @staticmethod
     def _extract_message(data: dict[str, Any]) -> dict[str, Any]:

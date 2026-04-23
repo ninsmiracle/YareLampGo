@@ -1,78 +1,187 @@
-"""Parametric motion primitives — nod, dance, wave, look_at, idle_sway."""
+"""Parametric motion primitives — nod, dance, wave, look_at, idle_sway.
+
+All rhythmic/oscillatory skills use the pre-computed-frames architecture:
+
+    1. Planning layer: generate a complete frame sequence in one shot
+    2. Control layer: stream_frames() plays frames at fixed FPS without re-planning
+
+This eliminates the "micro-start/stop" stutter caused by high-frequency
+update_target() calls or back-to-back move_to() calls.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import math
+import random
 from typing import Any
 
+import structlog
+
+from lampgo.core.config import DEFAULT_JOINT_LIMITS
+from lampgo.core.trajectory import generate_sine_frames, generate_waypoint_frames
 from lampgo.core.types import MotionTarget, SkillResult
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
+logger = structlog.get_logger(__name__)
+
+_FPS = 50  # matches MotionRuntime's default control rate
+
+
+async def _await_done(done_event, timeout: float) -> bool:
+    """Poll a threading.Event from asyncio until it's set or timeout expires."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not done_event.is_set():
+        if asyncio.get_running_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0.02)
+    return True
+
+
+def _jitter(value: float, ratio: float = 0.15) -> float:
+    """Apply ±ratio uniform random variation so repeated motions aren't identical."""
+    return value * (1.0 + random.uniform(-ratio, ratio))
+
 
 class NodSkill(Skill):
+    """Nod up and down using pre-computed waypoint frames.
+
+    Generates a complete trajectory (down → micro-rebound → … → return)
+    in one shot, then streams it.  ``ease_out_back`` interpolation gives
+    the organic bouncy feel without discrete re-planning steps.
+    """
+
     skill_id = "nod"
     description = "Nod up and down (agreement gesture)."
     parameters = {
-        "amplitude": ParameterSpec(name="amplitude", type="float", required=False, default=15.0, description="Degrees"),
-        "speed": ParameterSpec(name="speed", type="float", required=False, default=80.0, description="Deg/s"),
-        "count": ParameterSpec(name="count", type="int", required=False, default=3, description="Number of nods"),
+        "amplitude": ParameterSpec(
+            name="amplitude", type="float", required=False, default=12.0, description="Degrees"
+        ),
+        "speed": ParameterSpec(
+            name="speed", type="float", required=False, default=55.0, description="Deg/s"
+        ),
+        "count": ParameterSpec(
+            name="count", type="int", required=False, default=3, description="Number of nods"
+        ),
     }
 
+    _motion = None
+
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        amplitude = float(params.get("amplitude", 15.0))
-        speed = float(params.get("speed", 80.0))
+        self._motion = ctx.motion
+        amplitude = _jitter(float(params.get("amplitude", 12.0)))
+        speed = _jitter(float(params.get("speed", 55.0)))
         count = int(params.get("count", 3))
-        base = ctx.state.get("base_pitch", 0.0)
+        base_pitch = ctx.state.get("base_pitch", 0.0)
 
-        for _ in range(count):
-            done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base - amplitude}, max_velocity=speed))
-            while not done.is_set():
-                await asyncio.sleep(0.03)
-            done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base + amplitude * 0.3}, max_velocity=speed))
-            while not done.is_set():
-                await asyncio.sleep(0.03)
+        seg_dur = max(0.04, amplitude / max(speed, 1.0))
 
-        done = ctx.motion.move_to(MotionTarget(joints={"base_pitch": base}, max_velocity=speed))
-        while not done.is_set():
-            await asyncio.sleep(0.03)
+        waypoints: list[tuple[dict[str, float], float]] = [
+            ({"base_pitch": base_pitch}, 0.0),
+        ]
+        for i in range(count):
+            nod_amp = amplitude * (1.0 + random.uniform(-0.1, 0.1))
+            rebound = random.uniform(0.2, 0.4)
+            nod_dur = seg_dur * (1.0 + random.uniform(-0.08, 0.08))
+            waypoints.append(({"base_pitch": base_pitch - nod_amp}, nod_dur))
+            waypoints.append(({"base_pitch": base_pitch + nod_amp * rebound}, nod_dur * 0.5))
+        waypoints.append(({"base_pitch": base_pitch}, seg_dur))
+
+        frames = generate_waypoint_frames(
+            waypoints,
+            fps=_FPS,
+            ease_fn="ease_out_back",
+            ease_overshoot=0.10,
+        )
+
+        try:
+            done = ctx.motion.stream_frames(frames, fps=_FPS)
+            timeout = len(frames) / _FPS + 3.0
+            if not await _await_done(done, timeout=timeout):
+                logger.warning("nod.timeout", frames=len(frames))
+                return SkillResult(status="error", message="Nod timed out")
+        finally:
+            self._motion = None
 
         return SkillResult(status="ok", data={"count": count})
+
+    async def cancel(self) -> None:
+        if self._motion is not None:
+            self._motion.stop_immediate()
 
 
 class HeadShakeSkill(Skill):
+    """Shake head side to side using a pre-computed sinusoidal frame sequence.
+
+    A pure sine wave on ``base_yaw`` is generated up front so the control
+    thread plays it as one continuous stream with no mid-motion re-planning.
+    """
+
     skill_id = "headshake"
     description = "Shake head side to side (disagreement gesture)."
     parameters = {
-        "amplitude": ParameterSpec(name="amplitude", type="float", required=False, default=20.0, description="Degrees"),
-        "speed": ParameterSpec(name="speed", type="float", required=False, default=100.0, description="Deg/s"),
-        "count": ParameterSpec(name="count", type="int", required=False, default=3, description="Number of shakes"),
+        "amplitude": ParameterSpec(
+            name="amplitude", type="float", required=False, default=15.0, description="Degrees"
+        ),
+        "speed": ParameterSpec(
+            name="speed", type="float", required=False, default=65.0, description="Deg/s"
+        ),
+        "count": ParameterSpec(
+            name="count", type="int", required=False, default=3, description="Number of shakes"
+        ),
     }
 
+    _motion = None
+
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        amplitude = float(params.get("amplitude", 20.0))
-        speed = float(params.get("speed", 100.0))
+        self._motion = ctx.motion
+        amplitude = _jitter(float(params.get("amplitude", 15.0)))
+        speed = _jitter(float(params.get("speed", 65.0)))
         count = int(params.get("count", 3))
-        base = ctx.state.get("base_yaw", 0.0)
+        base_yaw = ctx.state.get("base_yaw", 0.0)
+        base_pitch = ctx.state.get("base_pitch", 0.0)
 
-        for _ in range(count):
-            done = ctx.motion.move_to(MotionTarget(joints={"base_yaw": base - amplitude}, max_velocity=speed))
-            while not done.is_set():
-                await asyncio.sleep(0.03)
-            done = ctx.motion.move_to(MotionTarget(joints={"base_yaw": base + amplitude}, max_velocity=speed))
-            while not done.is_set():
-                await asyncio.sleep(0.03)
+        period = (2.0 * math.pi * amplitude) / max(speed, 1.0)
+        duration = count * period
 
-        done = ctx.motion.move_to(MotionTarget(joints={"base_yaw": base}, max_velocity=speed))
-        while not done.is_set():
-            await asyncio.sleep(0.03)
+        pitch_wobble = amplitude * random.uniform(0.06, 0.12)
+        frames = generate_sine_frames(
+            base={"base_yaw": base_yaw, "base_pitch": base_pitch},
+            axes={
+                "base_yaw": {"amplitude": amplitude, "period": period, "phase": 0.0},
+                "base_pitch": {
+                    "amplitude": pitch_wobble,
+                    "period": period * 0.5,
+                    "phase": random.uniform(0.0, math.pi),
+                },
+            },
+            duration=duration,
+            fps=_FPS,
+        )
+
+        try:
+            done = ctx.motion.stream_frames(frames, fps=_FPS)
+            timeout = duration + 3.0
+            if not await _await_done(done, timeout=timeout):
+                logger.warning("headshake.timeout", frames=len(frames))
+                return SkillResult(status="error", message="HeadShake timed out")
+        finally:
+            self._motion = None
 
         return SkillResult(status="ok", data={"count": count})
+
+    async def cancel(self) -> None:
+        if self._motion is not None:
+            self._motion.stop_immediate()
 
 
 class LookAtSkill(Skill):
     skill_id = "look_at"
-    description = "Look in a direction by setting absolute yaw and pitch angles. Positive pitch = tilt forward/look down; negative pitch = tilt backward/look up. Positive yaw = turn right; negative yaw = turn left."
+    description = (
+        "Look in a direction by setting absolute yaw and pitch angles. "
+        "Positive pitch = tilt forward/look down; negative pitch = tilt backward/look up. "
+        "Positive yaw = turn right; negative yaw = turn left."
+    )
     parameters = {
         "yaw": ParameterSpec(
             name="yaw",
@@ -86,7 +195,11 @@ class LookAtSkill(Skill):
             type="float",
             required=False,
             default=None,
-            description="Absolute pitch in degrees (-100~65). Positive=forward/look down, negative=backward/look up. E.g. -60 to look up, 30 to look down. Omit to keep current pitch.",
+            description=(
+                "Absolute pitch in degrees (-100~65). Positive=forward/look down, "
+                "negative=backward/look up. E.g. -60 to look up, 30 to look down. "
+                "Omit to keep current pitch."
+            ),
         ),
         "velocity": ParameterSpec(name="velocity", type="float", required=False, description="Max deg/s"),
     }
@@ -100,6 +213,7 @@ class LookAtSkill(Skill):
         target = MotionTarget(
             joints={"base_yaw": yaw, "base_pitch": pitch},
             max_velocity=float(velocity) if velocity is not None else None,
+            style="confident",
         )
         done = ctx.motion.move_to(target)
         while not done.is_set():
@@ -107,18 +221,36 @@ class LookAtSkill(Skill):
 
         actual_yaw = round(ctx.state.get("base_yaw", yaw), 1)
         actual_pitch = round(ctx.state.get("base_pitch", pitch), 1)
-        data: dict[str, Any] = {"yaw": yaw, "pitch": pitch, "actual_yaw": actual_yaw, "actual_pitch": actual_pitch}
+        data: dict[str, Any] = {
+            "yaw": yaw,
+            "pitch": pitch,
+            "actual_yaw": actual_yaw,
+            "actual_pitch": actual_pitch,
+        }
         if ctx.motion.status.stalled:
             data["stalled"] = True
-            data["warning"] = f"Could not reach target (actual yaw={actual_yaw}, pitch={actual_pitch}). Do NOT retry the same target."
+            data["warning"] = (
+                f"Could not reach target (actual yaw={actual_yaw}, pitch={actual_pitch}). "
+                "Do NOT retry the same target."
+            )
         return SkillResult(status="ok", data=data)
 
 
 class IdleSwaySkill(Skill):
+    """Gentle idle sway using a pre-computed dual-axis sinusoidal frame sequence.
+
+    Both ``base_pitch`` and ``base_yaw`` are oscillated at slightly different
+    frequencies (ratio 1 : 0.7) to produce a natural Lissajous-like organic
+    sway pattern.  The entire trajectory is generated once and streamed, so
+    the control thread never needs to re-plan mid-motion.
+    """
+
     skill_id = "idle_sway"
     description = "Gentle idle swaying motion (breathing/alive feel)."
     parameters = {
-        "amplitude": ParameterSpec(name="amplitude", type="float", required=False, default=5.0, description="Degrees"),
+        "amplitude": ParameterSpec(
+            name="amplitude", type="float", required=False, default=5.0, description="Degrees"
+        ),
         "period": ParameterSpec(
             name="period", type="float", required=False, default=4.0, description="Seconds per cycle"
         ),
@@ -126,71 +258,127 @@ class IdleSwaySkill(Skill):
             name="duration", type="float", required=False, default=20.0, description="Total seconds"
         ),
     }
-    _cancelled = False
+
+    _motion = None
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        self._cancelled = False
+        self._motion = ctx.motion
         amplitude = float(params.get("amplitude", 5.0))
         period = float(params.get("period", 4.0))
         duration = float(params.get("duration", 20.0))
+
         base_pitch = ctx.state.get("base_pitch", 0.0)
         base_yaw = ctx.state.get("base_yaw", 0.0)
 
-        elapsed = 0.0
-        step = 0.1
-        while elapsed < duration and not self._cancelled:
-            t = elapsed / period * 2 * math.pi
-            pitch_offset = amplitude * math.sin(t)
-            yaw_offset = amplitude * 0.3 * math.sin(t * 0.7)
-            ctx.motion.update_target(
-                MotionTarget(
-                    joints={
-                        "base_pitch": base_pitch + pitch_offset,
-                        "base_yaw": base_yaw + yaw_offset,
-                    },
-                    max_velocity=30.0,
-                )
-            )
-            await asyncio.sleep(step)
-            elapsed += step
+        frames = generate_sine_frames(
+            base={"base_pitch": base_pitch, "base_yaw": base_yaw},
+            axes={
+                "base_pitch": {"amplitude": amplitude, "period": period, "phase": 0.0},
+                "base_yaw": {
+                    "amplitude": amplitude * 0.3,
+                    "period": period / 0.7,  # slightly different frequency for Lissajous feel
+                    "phase": 0.0,
+                },
+            },
+            duration=duration,
+            fps=_FPS,
+        )
 
-        ctx.motion.update_target(MotionTarget(joints={"base_pitch": base_pitch, "base_yaw": base_yaw}))
-        return SkillResult(status="ok" if not self._cancelled else "cancelled")
+        try:
+            done = ctx.motion.stream_frames(frames, fps=_FPS)
+            if not await _await_done(done, timeout=duration + 5.0):
+                logger.warning("idle_sway.timeout", frames=len(frames))
+                return SkillResult(status="error", message="IdleSway timed out")
+        finally:
+            self._motion = None
+
+        return SkillResult(status="ok")
 
     async def cancel(self) -> None:
-        self._cancelled = True
+        if self._motion is not None:
+            self._motion.stop_immediate()
 
 
 class DanceSkill(Skill):
+    """Rhythmic dance using pre-computed waypoint frames across three axes.
+
+    All joint movements within a cycle are baked into a single frame sequence
+    so the control thread streams them without replanning.
+    ``ease_out_back`` keeps the bouncy character of the original implementation.
+    """
+
     skill_id = "dance"
     description = "A simple rhythmic dance pattern."
     parameters = {
-        "speed": ParameterSpec(name="speed", type="float", required=False, default=120.0, description="Deg/s"),
-        "cycles": ParameterSpec(name="cycles", type="int", required=False, default=4, description="Dance cycles"),
+        "speed": ParameterSpec(
+            name="speed", type="float", required=False, default=70.0, description="Deg/s"
+        ),
+        "cycles": ParameterSpec(
+            name="cycles", type="int", required=False, default=4, description="Dance cycles"
+        ),
     }
 
+    # Dance offsets per step [yaw_off, pitch_off, roll_off]
+    _STEPS = [(20, -10, 15), (-20, -10, -15), (0, 5, 0)]
+    # Per-joint max absolute offset including ease_out_back overshoot headroom
+    _OVERSHOOT_FACTOR = 1.15
+    _MAX_ABS_OFFSETS = {"base_yaw": 20.0, "base_pitch": 10.0, "wrist_roll": 15.0}
+
+    _motion = None
+
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        speed = float(params.get("speed", 120.0))
+        self._motion = ctx.motion
+        speed = _jitter(float(params.get("speed", 70.0)))
         cycles = int(params.get("cycles", 4))
-        base = {j: ctx.state.get(j, 0.0) for j in ["base_yaw", "base_pitch", "wrist_roll"]}
+        raw_base = {j: ctx.state.get(j, 0.0) for j in ["base_yaw", "base_pitch", "wrist_roll"]}
 
+        base: dict[str, float] = {}
+        for j, cur in raw_base.items():
+            limits = DEFAULT_JOINT_LIMITS.get(j)
+            if limits is None:
+                base[j] = cur
+                continue
+            headroom = self._MAX_ABS_OFFSETS.get(j, 0.0) * self._OVERSHOOT_FACTOR
+            safe_min = limits.min + headroom
+            safe_max = limits.max - headroom
+            base[j] = max(safe_min, min(safe_max, cur))
+
+        max_offset = max(self._MAX_ABS_OFFSETS.values())
+        seg_dur = max(0.06, max_offset / max(speed, 1.0))
+
+        waypoints: list[tuple[dict[str, float], float]] = [
+            (dict(base), 0.0),
+        ]
         for _ in range(cycles):
-            for yaw_off, pitch_off, roll_off in [(20, -10, 15), (-20, -10, -15), (0, 5, 0)]:
-                done = ctx.motion.move_to(
-                    MotionTarget(
-                        joints={
-                            "base_yaw": base["base_yaw"] + yaw_off,
-                            "base_pitch": base["base_pitch"] + pitch_off,
-                            "wrist_roll": base["wrist_roll"] + roll_off,
-                        },
-                        max_velocity=speed,
-                    )
-                )
-                while not done.is_set():
-                    await asyncio.sleep(0.03)
+            for yaw_off, pitch_off, roll_off in self._STEPS:
+                waypoints.append((
+                    {
+                        "base_yaw": base["base_yaw"] + _jitter(yaw_off, 0.12),
+                        "base_pitch": base["base_pitch"] + _jitter(pitch_off, 0.12),
+                        "wrist_roll": base["wrist_roll"] + _jitter(roll_off, 0.12),
+                    },
+                    seg_dur * (1.0 + random.uniform(-0.08, 0.08)),
+                ))
+        waypoints.append((dict(base), seg_dur))
 
-        done = ctx.motion.move_to(MotionTarget(joints=dict(base), max_velocity=speed))
-        while not done.is_set():
-            await asyncio.sleep(0.03)
+        frames = generate_waypoint_frames(
+            waypoints,
+            fps=_FPS,
+            ease_fn="ease_out_back",
+            ease_overshoot=0.10,
+        )
+
+        try:
+            done = ctx.motion.stream_frames(frames, fps=_FPS)
+            timeout = len(frames) / _FPS + 5.0
+            if not await _await_done(done, timeout=timeout):
+                logger.warning("dance.timeout", frames=len(frames))
+                return SkillResult(status="error", message="Dance timed out")
+        finally:
+            self._motion = None
 
         return SkillResult(status="ok", data={"cycles": cycles})
+
+    async def cancel(self) -> None:
+        if self._motion is not None:
+            self._motion.stop_immediate()

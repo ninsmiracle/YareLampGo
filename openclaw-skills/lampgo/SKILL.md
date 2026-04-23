@@ -326,5 +326,5 @@ Set in `~/.openclaw/.env` (auto-configured by setup):
 ```
 LAMPGO_MOTOR_PORT=/dev/ttyUSB0
 LAMPGO_LED_PORT=/dev/ttyUSB1
-LAMPGO_LAMP_ID=AL01
+LAMPGO_LAMP_ID=AL02
 ```

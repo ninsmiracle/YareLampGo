@@ -1,24 +1,27 @@
-"""VoiceLoop — continuous listen-route-act-speak cycle.
+"""VoiceLoop — mic → VAD → audio → agent loop (omni) → TTS → speaker.
 
-Runs as an asyncio task inside the daemon:
-  [listen] -> VAD detects speech -> record segment
-  -> STT (Whisper API) -> text
-  -> IntentRouter -> RoutedIntent
-  -> if skill: invoke + TTS confirm
-  -> if chat: TTS reply
-  -> back to listening
+The audio is sent directly to mimo-v2-omni via the server's agent loop,
+eliminating the separate STT step. The omni model natively understands
+audio input and can call tools just like text input.
+
+Pipeline:
+  [mic] → VAD → PCM → base64 WAV
+  → server.handle_request(cmd="audio") → agent loop (mimo-v2-omni)
+  → response text → MiMoTTS / EdgeTTS → speaker
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import struct
+import uuid
 from typing import TYPE_CHECKING
 
 import structlog
 
-from lampgo.voice.audio import AudioCapture
-from lampgo.voice.stt import WhisperSTT
-from lampgo.voice.tts import EdgeTTS
+from lampgo.voice.audio import AudioCapture, AudioPlayback
+from lampgo.voice.tts import MiMoTTS, EdgeTTS, TTS_SAMPLE_RATE
 from lampgo.voice.vad import EnergyVAD
 
 if TYPE_CHECKING:
@@ -31,26 +34,39 @@ SAMPLE_RATE = 16000
 
 
 class VoiceLoop:
-    """Continuous voice interaction loop."""
+    """Continuous voice interaction loop: mic → omni agent → TTS."""
 
     def __init__(self, server: LampgoServer) -> None:
         self._server = server
         cfg = server.config
-        self._stt = WhisperSTT(
-            api_key=cfg.llm.api_key,
-            api_base=cfg.llm.api_base,
-            fallback_chat_model=cfg.llm.fast_model,
-        )
-        self._tts = EdgeTTS(voice=cfg.voice.tts_voice)
+
+        if cfg.voice.tts_provider == "edge-tts":
+            self._tts: MiMoTTS | EdgeTTS = EdgeTTS(voice=cfg.voice.tts_voice)
+            self._stream_tts = False
+        else:
+            self._tts = MiMoTTS(
+                api_key=cfg.llm.api_key,
+                api_base=cfg.llm.api_base,
+                voice=cfg.voice.tts_voice or "mimo_default",
+                style_prompt=cfg.voice.tts_style_prompt,
+                model=cfg.voice.tts_model,
+            )
+            self._stream_tts = True
+
         self._vad = EnergyVAD()
-        self._capture = AudioCapture(sample_rate=SAMPLE_RATE)
+        mic_dev: int | str | None = None
+        if cfg.voice.mic_device:
+            try:
+                mic_dev = int(cfg.voice.mic_device)
+            except ValueError:
+                mic_dev = cfg.voice.mic_device
+        self._capture = AudioCapture(sample_rate=SAMPLE_RATE, device=mic_dev)
         self._running = False
 
     async def run(self) -> None:
-        """Main voice loop. Call as an asyncio task."""
         self._capture.start()
         self._running = True
-        logger.info("voice.loop_started")
+        logger.info("voice.loop_started", tts=type(self._tts).__name__, stream_tts=self._stream_tts)
 
         try:
             while self._running:
@@ -66,58 +82,90 @@ class VoiceLoop:
         self._running = False
 
     async def _listen_and_respond(self) -> None:
-        """One listen-respond cycle."""
         audio_data = await self._collect_speech()
-        if audio_data is None or len(audio_data) < SAMPLE_RATE:  # < 0.5s
+        if audio_data is None or len(audio_data) < SAMPLE_RATE:
+            if audio_data and len(audio_data) > 0:
+                logger.debug("voice.too_short", bytes=len(audio_data), min_bytes=SAMPLE_RATE)
             return
 
-        text = await self._stt.transcribe(audio_data, sample_rate=SAMPLE_RATE)
-        if not text:
-            return
+        audio_b64 = _pcm_to_wav_b64(audio_data, SAMPLE_RATE)
+        request_id = uuid.uuid4().hex[:12]
+        logger.info("voice.sending_to_agent", request_id=request_id, audio_bytes=len(audio_data))
 
-        logger.info("voice.heard", text=text)
-        response = await self._server.handle_request({"cmd": "text", "input": text})
+        response = await self._server.handle_request({
+            "cmd": "audio",
+            "audio_data": audio_b64,
+            "request_id": request_id,
+        })
 
         result = response.get("result", {})
-        rtype = result.get("type", "")
+        reply = result.get("response") or result.get("chat_response") or ""
+        if not reply:
+            logger.info("voice.no_reply", request_id=request_id, result_type=result.get("type"))
+            return
 
-        if rtype == "chat":
-            reply = result.get("response", "")
-            if reply:
-                await self._tts.speak(reply)
-        elif rtype == "skill":
-            chat = result.get("chat_response", "")
-            if chat:
-                await self._tts.speak(chat)
-        elif rtype in {"complex", "openclaw"}:
-            await self._tts.speak("这个请求需要通过 OpenClaw 来处理")
+        logger.info("voice.speaking", request_id=request_id, reply=reply[:60])
+        await self._speak(reply)
+
+    async def _speak(self, text: str) -> None:
+        if self._stream_tts and isinstance(self._tts, MiMoTTS):
+            player = AudioPlayback(sample_rate=TTS_SAMPLE_RATE)
+            player.start()
+            try:
+                async for pcm_chunk in self._tts.stream_pcm(text):
+                    player.feed(pcm_chunk)
+                player.finish()
+                await player.await_done(timeout=30.0)
+            finally:
+                player.stop()
+        else:
+            await self._tts.speak(text)
 
     async def _collect_speech(self) -> bytes | None:
-        """Listen until speech is detected, then record until silence."""
         buf = bytearray()
         speech_started = False
         max_chunks = int(MAX_RECORDING_SECONDS * SAMPLE_RATE / (SAMPLE_RATE * 0.03))
+        chunks_read = 0
+        none_count = 0
 
         for _ in range(max_chunks * 3):
             chunk = await self._capture.aread_chunk(timeout=0.05)
             if chunk is None:
+                none_count += 1
+                if none_count % 200 == 0:
+                    logger.debug("voice.no_chunks", none_count=none_count, chunks_read=chunks_read)
                 await asyncio.sleep(0.01)
                 continue
 
+            chunks_read += 1
             is_speech = self._vad.process_chunk(chunk)
 
             if is_speech:
                 if not speech_started:
                     speech_started = True
-                    logger.debug("voice.speech_started")
+                    logger.info("voice.speech_started")
                 buf.extend(chunk)
             elif speech_started:
-                logger.debug("voice.speech_ended", bytes=len(buf))
+                logger.info("voice.speech_ended", bytes=len(buf))
                 self._vad.reset()
                 return bytes(buf)
 
             if not self._running:
                 return None
 
+        logger.debug("voice.collect_timeout", chunks_read=chunks_read, buf_bytes=len(buf))
         self._vad.reset()
         return bytes(buf) if buf else None
+
+
+def _pcm_to_wav_b64(pcm: bytes, sample_rate: int) -> str:
+    """Wrap raw PCM16LE mono bytes into WAV format and return base64."""
+    data_len = len(pcm)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + data_len, b"WAVE",
+        b"fmt ", 16, 1, 1,
+        sample_rate, sample_rate * 2, 2, 16,
+        b"data", data_len,
+    )
+    return base64.b64encode(header + pcm).decode()

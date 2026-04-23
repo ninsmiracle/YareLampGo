@@ -1,17 +1,26 @@
-# lampgo 配置文件
-# 复制为 lampgo.toml 并修改为你的实际设备参数
-# 配置优先级: CLI参数 > 环境变量 > .env文件 > lampgo.toml > 内置默认值
+# lampgo 配置字段参考文档（schema reference — lampgo 不会读这个文件）
+#
+# 运行时读取的唯一 TOML 是 ~/.lampgo/config.toml，由 `lampgo onboard` 和
+# Web UI 配置页自动写入/维护。本文件仅作为字段参考（可看字段名、默认值、注释）。
+#
+# 配置优先级（高 → 低）：
+#   CLI 参数  >  环境变量 (LAMPGO_*, 可写在 ./.env 里)
+#             >  ~/.lampgo/config.toml
+#             >  内置默认值
+#
+# 首次安装/迁移旧配置：`uv run lampgo onboard`
 
 [device]
 motor_port = "/dev/ttyUSB0"    # Feetech 电机总线串口 (必填，你的设备可能不同)
 led_port = "/dev/ttyUSB1"      # ESP32 LED 控制器串口 (留空 = 禁用)
-lamp_id = "AL01"               # 设备标识，用于校准文件查找
+lamp_id = "AL02"               # 设备标识，用于校准文件查找
 use_degrees = true             # true = 角度模式, false = 归一化 -100~100
 
 [motion]
 tick_rate_hz = 50.0            # 控制循环频率 (Hz)
-default_max_velocity = 120.0   # 默认最大速度 (度/秒)
-default_max_acceleration = 600.0  # 默认最大加速度 (度/秒²)
+default_max_velocity = 120.0   # 默认最大速度 (度/秒)；仅作为弹簧频率的速度预算上限
+# 注：motion 不存在 default_max_acceleration —— 动力学是弹簧-阻尼，加速度是隐式的。
+#     真正的硬加速度上限在下面的 [safety].max_acceleration。
 
 [safety]
 max_velocity = 180.0           # 安全速度硬上限 (度/秒)
@@ -28,7 +37,15 @@ fast_model = "gpt-4o-mini"     # 快速意图分类模型
 # api_key 不要写在这里！请用 .env 文件或环境变量 LAMPGO_LLM_API_KEY
 api_base = ""                  # 自定义 API 地址 (本地/代理模型)
 temperature = 0.3
-max_tokens = 512
+# 单轮 LLM 回复 token 上限（OpenAI: max_tokens；MiMo: max_completion_tokens）
+# 多轮工具调用建议 ≥ 2048；复杂长回复可到 8192
+max_tokens = 4096
+# 每日记忆 / 会话摘要任务专用预算。推理模型（mimo-v2-omni / o-系列 / deepseek-r1）
+# 会把预算花在思考链上，至少给 4096 才能稳定产出 bullet
+summary_max_tokens = 8192
+# 模型输入上下文窗口；目前仅作信息记录，将来用于历史消息自动裁剪
+# mimo-v2-pro/omni ≈ 128000、Claude Sonnet ≈ 200000、gpt-4o-mini ≈ 128000
+context_window = 128000
 timeout_s = 15.0
 web_search_enabled = true      # MiMo 支持时启用内置联网搜索
 web_search_force = false       # false = 模型自行判断是否联网

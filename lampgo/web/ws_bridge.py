@@ -32,6 +32,7 @@ from lampgo.core.events import (
     SkillStarted,
     ToolCallFinished,
     ToolCallPlanned,
+    TtsAudio,
 )
 
 if TYPE_CHECKING:
@@ -59,6 +60,7 @@ ALL_EVENT_TYPES: list[type[Event]] = [
     AgentFinished,
     SkillProgress,
     ChatMessage,
+    TtsAudio,
 ]
 
 
@@ -82,8 +84,28 @@ class WsBridge:
             self._clients.discard(ws)
         logger.info("ws_bridge.client_disconnected", total=len(self._clients))
 
+    # Events whose payload is huge and ephemeral (e.g. base64 audio buffers)
+    # must NOT be persisted to ~/.lampgo/events.log:
+    #   * one TtsAudio line ≈ 1 MB → 10 MB rotation fills in minutes.
+    #   * replay has no meaning: the browser plays audio live; rehydrating a
+    #     stale audio buffer on a reopened page would just blast old sound.
+    #   * older versions did persist them, causing `_recover_last_seq` to land
+    #     inside a mid-line slice on restart and silently reset the counter,
+    #     which in turn made the UI event log appear stuck on old timestamps.
+    _NON_PERSISTED_EVENTS: set[str] = {"TtsAudio"}
+
     async def _on_event(self, event: Event) -> None:
         msg = self._serialize(event)
+        # Persist first — if the broadcast dies or the process crashes, the
+        # reconnecting client can still replay through /api/events.
+        if msg.get("event") not in self._NON_PERSISTED_EVENTS:
+            try:
+                from lampgo import eventstore
+
+                seq = await eventstore.get_store().append(msg)
+                msg["seq"] = seq
+            except Exception:
+                logger.exception("ws_bridge.eventstore_append_failed", event=msg.get("event"))
         await self.broadcast(msg)
 
     async def broadcast(self, msg: dict[str, Any]) -> None:
@@ -102,7 +124,11 @@ class WsBridge:
                     self._clients.discard(ws)
 
     async def broadcast_status(self, status: dict[str, Any]) -> None:
-        """Push a periodic status snapshot to all clients."""
+        """Push a periodic status snapshot to all clients.
+
+        Status frames are not persisted — they are lightweight heartbeats and
+        would otherwise dominate the event log without adding history value.
+        """
         await self.broadcast({"type": "status", "data": status, "ts": time.time()})
 
     @staticmethod
