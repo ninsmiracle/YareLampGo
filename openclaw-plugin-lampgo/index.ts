@@ -4,15 +4,39 @@ import type { OpenClawPluginModule } from "openclaw/plugin-sdk";
 type TextContent = { type: "text"; text: string };
 
 function getLampgoApiBase(pluginConfig: Record<string, unknown> | null | undefined): string {
-  const base = pluginConfig?.["lampgoApiBase"];
-  if (typeof base === "string" && base.trim()) return base.trim().replace(/\/+$/, "");
+  // The gateway URL is supplied exclusively via pluginConfig.lampgoApiBase,
+  // which `lampgo install-openclaw` writes into ~/.openclaw/openclaw.json at
+  // install time based on the lampgo daemon port. This avoids any runtime
+  // environment reads that would trip OpenClaw's plugin-sandbox scanner.
+  const configured = pluginConfig?.["lampgoApiBase"];
+  if (typeof configured === "string" && configured.trim()) {
+    return configured.trim().replace(/\/+$/, "");
+  }
   return "http://127.0.0.1:8420";
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
+function getLampgoPluginToken(pluginConfig: Record<string, unknown> | null | undefined): string {
+  // Shared secret for memory/persona write ops. Issued once by
+  // `lampgo install-openclaw` and stored both in ~/.lampgo/credentials.json
+  // and in this plugin's config block. Required on PUT/POST against
+  // /api/persona and /api/memory.
+  const configured = pluginConfig?.["lampgoPluginToken"];
+  if (typeof configured === "string" && configured.trim()) {
+    return configured.trim();
+  }
+  return "";
+}
+
+function authHeaders(token: string): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (token) headers["x-lampgo-plugin-token"] = token;
+  return headers;
+}
+
+async function postJson<T>(url: string, body: unknown, token = ""): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authHeaders(token),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -22,8 +46,21 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { method: "GET" });
+async function putJson<T>(url: string, body: unknown, token = ""): Promise<T> {
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`lampgo http ${res.status}: ${text || res.statusText}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function getJson<T>(url: string, token = ""): Promise<T> {
+  const res = await fetch(url, { method: "GET", headers: authHeaders(token) });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`lampgo http ${res.status}: ${text || res.statusText}`);
@@ -45,6 +82,7 @@ const plugin: OpenClawPluginModule = {
 
   register(api) {
     const getBase = () => getLampgoApiBase(api.pluginConfig as Record<string, unknown> | null | undefined);
+    const getToken = () => getLampgoPluginToken(api.pluginConfig as Record<string, unknown> | null | undefined);
 
     api.registerTool({
       name: "lampgo_move",
@@ -182,6 +220,143 @@ const plugin: OpenClawPluginModule = {
         if (!result.ok) throw new Error(result.error || "save recording failed");
         const r = result.result!;
         return toolOk(`Saved: ${r.path}${r.alias ? `\nAlias registered: "${r.alias}" → ${r.name}` : ""}`);
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_get_persona",
+      label: "Read lampgo persona",
+      description:
+        "Read lampgo's persona markdown files (SOUL / AGENTS / PROFILE). Useful for OpenClaw agents that want to " +
+        "mirror the lamp's identity, tone, or user profile.",
+      parameters: Type.Object({
+        which: Type.Optional(
+          Type.Union(
+            [
+              Type.Literal("SOUL"),
+              Type.Literal("AGENTS"),
+              Type.Literal("PROFILE"),
+              Type.Literal("all"),
+            ],
+            { description: "Persona file to read, or 'all' (default)." },
+          ),
+        ),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const which = (params.which ?? "all").toString();
+        if (which === "all") {
+          const data = await getJson<unknown>(`${base}/api/persona`);
+          return toolOk(JSON.stringify(data, null, 2));
+        }
+        const data = await getJson<unknown>(`${base}/api/persona/${encodeURIComponent(which)}`);
+        return toolOk(JSON.stringify(data, null, 2));
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_get_memory",
+      label: "Read lampgo memory",
+      description:
+        "Read lampgo's memory. date='core' returns MEMORY.md; date='YYYY-MM-DD' or 'today' returns that day's journal; " +
+        "no date returns the list of available dates + today's journal.",
+      parameters: Type.Object({
+        date: Type.Optional(
+          Type.String({ description: "'core', 'today', or an ISO date (YYYY-MM-DD)." }),
+        ),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const date = (params.date ?? "").toString().trim();
+        if (date === "core") {
+          const data = await getJson<unknown>(`${base}/api/memory/core`);
+          return toolOk(JSON.stringify(data, null, 2));
+        }
+        const url = date
+          ? `${base}/api/memory/daily?date=${encodeURIComponent(date)}`
+          : `${base}/api/memory/daily`;
+        const data = await getJson<unknown>(url);
+        return toolOk(JSON.stringify(data, null, 2));
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_save_memory",
+      label: "Write lampgo memory",
+      description:
+        "Append bullet(s) to lampgo's daily memory. If promote=true, also upsert the bullet(s) into the permanent " +
+        "core MEMORY.md. Requires the plugin token configured at install time.",
+      parameters: Type.Object({
+        bullets: Type.Array(Type.String({ description: "Single-line fact to remember." })),
+        date: Type.Optional(
+          Type.String({ description: "ISO date (YYYY-MM-DD). Omit for today." }),
+        ),
+        promote: Type.Optional(
+          Type.Boolean({ description: "Also write to core MEMORY.md (default false)." }),
+        ),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const token = getToken();
+        if (!token) {
+          throw new Error(
+            "lampgo_save_memory requires a plugin token. Run `lampgo install-openclaw --yes` to refresh the integration.",
+          );
+        }
+        const bullets = (params.bullets ?? []).filter((b) => typeof b === "string" && b.trim());
+        if (!bullets.length) throw new Error("bullets must be a non-empty array of strings");
+        const result = await postJson<{ ok: boolean; result?: { path: string; promoted: boolean }; error?: string }>(
+          `${base}/api/memory/daily`,
+          {
+            bullets,
+            date: params.date ?? undefined,
+            promote: params.promote ?? false,
+          },
+          token,
+        );
+        if (!result.ok) throw new Error(result.error || "save memory failed");
+        const r = result.result!;
+        return toolOk(`Saved to ${r.path}${r.promoted ? " (also promoted to MEMORY.md)" : ""}`);
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_save_persona",
+      label: "Write lampgo persona",
+      description:
+        "Overwrite one of lampgo's persona markdown files (SOUL / AGENTS / PROFILE) in ~/.lampgo/. " +
+        "IMPORTANT: This writes to the LAMP's files, not OpenClaw's own persona — when the user (via the lamp) " +
+        "says things like 'remember to call me XXX' or 'update my profile', edit lampgo's PROFILE.md here " +
+        "instead of using generic file-write tools on ~/.openclaw/. Requires the plugin token configured at install time.",
+      parameters: Type.Object({
+        which: Type.Union(
+          [
+            Type.Literal("SOUL"),
+            Type.Literal("AGENTS"),
+            Type.Literal("PROFILE"),
+          ],
+          { description: "Which persona file to overwrite." },
+        ),
+        content: Type.String({ description: "Full new markdown content for the file." }),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const token = getToken();
+        if (!token) {
+          throw new Error(
+            "lampgo_save_persona requires a plugin token. Run `lampgo install-openclaw --yes` to refresh the integration.",
+          );
+        }
+        const which = params.which;
+        const content = params.content ?? "";
+        const result = await putJson<{ ok: boolean; result?: { name: string; bytes: number }; error?: string }>(
+          `${base}/api/persona/${encodeURIComponent(which)}`,
+          { content },
+          token,
+        );
+        if (!result.ok) throw new Error(result.error || "save persona failed");
+        const r = result.result!;
+        return toolOk(`Saved ~/.lampgo/${r.name}.md (${r.bytes} bytes).`);
       },
     });
 

@@ -46,7 +46,7 @@ def detect_ports() -> dict:
     return {"motor_port": None, "led_port": None, "messages": ["Detection failed"]}
 
 
-def check_calibration(lamp_id: str = "AL01") -> dict:
+def check_calibration(lamp_id: str = "AL02") -> dict:
     paths = [
         Path(f"assets/calibration/{lamp_id}.json"),
         Path.home() / f".cache/huggingface/lerobot/calibration/robots/lelamp_follower/{lamp_id}.json",
@@ -57,7 +57,7 @@ def check_calibration(lamp_id: str = "AL01") -> dict:
     return {"found": False, "path": None}
 
 
-def write_env(motor_port: str | None, led_port: str | None, lamp_id: str = "AL01") -> str:
+def write_env(motor_port: str | None, led_port: str | None, lamp_id: str = "AL02") -> str:
     env_path = Path.home() / ".openclaw" / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -138,7 +138,7 @@ def main():
     if not ports.get("motor_port"):
         needs_input.append("motor_port (serial port for servos, e.g. /dev/ttyUSB0)")
     if not calib.get("found"):
-        needs_input.append("calibration file (AL01.json)")
+        needs_input.append("calibration file (AL02.json)")
 
     if needs_input:
         result["action_required"] = f"Please provide: {', '.join(needs_input)}"
