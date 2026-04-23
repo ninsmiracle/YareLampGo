@@ -21,8 +21,8 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from lampgo.core.config import LLMConfig, WebConfig
-from lampgo.core.led import LED_EXPRESSIONS
 from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, IntentRouting
+from lampgo.core.led import LED_EXPRESSIONS
 from lampgo.perception.camera import CameraCapture
 from lampgo.web.ws_bridge import WsBridge
 
@@ -132,6 +132,9 @@ class WebGateway:
             Route("/api/invoke", self.api_invoke, methods=["POST"]),
             Route("/api/status", self.api_status),
             Route("/api/skills", self.api_skills),
+            Route("/api/skills/save", self.api_skills_save, methods=["POST"]),
+            Route("/api/skills/delete", self.api_skills_delete, methods=["POST"]),
+            Route("/api/skills/reload", self.api_skills_reload, methods=["POST"]),
             Route("/api/recordings", self.api_recordings),
             Route("/api/recordings/save", self.api_recordings_save, methods=["POST"]),
             Route("/api/recordings/aliases", self.api_recording_aliases, methods=["GET", "POST"]),
@@ -263,6 +266,41 @@ class WebGateway:
 
     async def api_skills(self, request: Request) -> JSONResponse:
         result = self.server._handle_skills()
+        return JSONResponse(result)
+
+    async def api_skills_save(self, request: Request) -> JSONResponse:
+        """POST /api/skills/save — create or update a user composed skill.
+
+        Body: ``{"definition": {...}, "overwrite": true}``
+
+        Thin pass-through to ``Server._handle_skills_save`` — all the validation
+        / persistence / live-registration happens there so OpenClaw (going via
+        IPC) and the Web UI (going via HTTP) exercise the exact same path.
+        """
+        body = await request.json()
+        result = self.server._handle_skills_save(body)
+        status = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=status)
+
+    async def api_skills_delete(self, request: Request) -> JSONResponse:
+        """POST /api/skills/delete — remove a user composed skill.
+
+        Body: ``{"skill_id": "..."}``.  Factory skills are refused with HTTP 400.
+        """
+        body = await request.json()
+        result = self.server._handle_skills_delete(body)
+        if result.get("ok"):
+            return JSONResponse(result)
+        reason = (result.get("result") or {}).get("reason")
+        status = 404 if reason == "not_found" else 400
+        return JSONResponse(result, status_code=status)
+
+    async def api_skills_reload(self, request: Request) -> JSONResponse:
+        """POST /api/skills/reload — rescan ``~/.lampgo/skills/user/`` from disk.
+
+        Useful if the user hand-edits a JSON file; no daemon restart needed.
+        """
+        result = self.server._handle_skills_reload()
         return JSONResponse(result)
 
     async def api_recordings(self, request: Request) -> JSONResponse:
@@ -462,65 +500,119 @@ class WebGateway:
 
     # ---- user-editable config / persona / memory ----
 
+    # Each preset exposes ``api_urls`` keyed by message_type so the frontend
+    # can re-derive Base URL from the (provider, message_type) pair — most
+    # modern providers publish both an OpenAI-compatible endpoint and an
+    # Anthropic-compatible one on different paths, so baking the URL into
+    # the provider alone is wrong.  ``default_message_type`` is what we
+    # switch to when the user first picks this provider.
+    #
+    # Legacy top-level ``base_url`` / ``message_type`` are kept because
+    # older server-side code paths (and pinned tests) still read them;
+    # they mirror the entry at ``api_urls[default_message_type]``.
     _PROVIDER_PRESETS = {
         "mimo": {
             "label": "MiMo（小米）",
-            "base_url": "https://api.xiaomimimo.com/v1",
+            # MiMo 在两个独立端点上分别暴露两种协议：
+            #   OpenAI   : https://api.xiaomimimo.com/v1/chat/completions
+            #   Anthropic: https://api.xiaomimimo.com/anthropic/v1/messages
+            # 鉴权：官方 curl 用 `api-key` 头；社区 SDK 文档里又有 `Bearer`。
+            # 我们在 Anthropic 路径上把 x-api-key / api-key / Bearer 三个
+            # 一起发，所以同一把 key 两个端点都能通。
+            "api_urls": {
+                "openai": "https://api.xiaomimimo.com/v1",
+                "anthropic": "https://api.xiaomimimo.com/anthropic/v1",
+            },
+            "default_message_type": "openai",
             # mimo-v2.5：通用新一代模型，同时作为 agent 主模型和 fast_model（摘要/意图）。
             # 如需分工：主模型可选 mimo-v2-omni（强推理），fast_model 建议保持非推理模型
-            # （mimo-v2.5 / mimo-v2-pro），避免推理模型把预算花在思考链上导致空返
-            # （参见 _summarize_messages 里的注释）。
+            # （mimo-v2.5 / mimo-v2-pro），避免推理模型把预算花在思考链上导致空返。
             "default_model": "mimo-v2.5",
             "default_fast_model": "mimo-v2.5",
+            # legacy mirrors (see comment above)
+            "base_url": "https://api.xiaomimimo.com/v1",
             "message_type": "openai",
         },
         "openrouter": {
             "label": "OpenRouter",
-            "base_url": "https://openrouter.ai/api/v1",
+            # OpenRouter 同一 base 既暴露 OpenAI 的 /chat/completions
+            # 又暴露 Anthropic 的 /messages（按你发的 tool 请求路由模型）。
+            "api_urls": {
+                "openai": "https://openrouter.ai/api/v1",
+                "anthropic": "https://openrouter.ai/api/v1",
+            },
+            "default_message_type": "openai",
             "default_model": "anthropic/claude-3.5-sonnet",
             "default_fast_model": "anthropic/claude-3.5-haiku",
+            "base_url": "https://openrouter.ai/api/v1",
             "message_type": "openai",
         },
         "anthropic": {
             "label": "Anthropic",
-            "base_url": "https://api.anthropic.com/v1",
+            # 真 Anthropic 只提供 Messages API；官方没有 OpenAI 兼容层。
+            "api_urls": {
+                "anthropic": "https://api.anthropic.com/v1",
+            },
+            "default_message_type": "anthropic",
             "default_model": "claude-sonnet-4-20250514",
             "default_fast_model": "claude-haiku-4-20250514",
+            "base_url": "https://api.anthropic.com/v1",
             "message_type": "anthropic",
         },
         "openai": {
             "label": "OpenAI",
-            "base_url": "https://api.openai.com/v1",
+            # OpenAI 官方不提供 Anthropic 兼容端点。
+            "api_urls": {
+                "openai": "https://api.openai.com/v1",
+            },
+            "default_message_type": "openai",
             "default_model": "gpt-4o-mini",
             "default_fast_model": "gpt-4o-mini",
+            "base_url": "https://api.openai.com/v1",
             "message_type": "openai",
         },
         "deepseek": {
             "label": "DeepSeek",
-            "base_url": "https://api.deepseek.com/v1",
+            "api_urls": {
+                "openai": "https://api.deepseek.com/v1",
+            },
+            "default_message_type": "openai",
             "default_model": "deepseek-chat",
             "default_fast_model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1",
             "message_type": "openai",
         },
         "google": {
             "label": "Google Gemini",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            # Google 的 OpenAI 兼容层，原生 Gemini REST 另算（这里不暴露）。
+            "api_urls": {
+                "openai": "https://generativelanguage.googleapis.com/v1beta/openai",
+            },
+            "default_message_type": "openai",
             "default_model": "gemini-2.5-flash",
             "default_fast_model": "gemini-2.5-flash",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
             "message_type": "openai",
         },
         "ollama": {
             "label": "Ollama（本地）",
-            "base_url": "http://127.0.0.1:11434/v1",
+            "api_urls": {
+                "openai": "http://127.0.0.1:11434/v1",
+            },
+            "default_message_type": "openai",
             "default_model": "qwen2.5:7b-instruct",
             "default_fast_model": "qwen2.5:7b-instruct",
+            "base_url": "http://127.0.0.1:11434/v1",
             "message_type": "openai",
         },
         "custom": {
             "label": "自定义",
-            "base_url": "",
+            # 自定义时不预置 URL，让前端把 Base URL 留给用户自己填。
+            "api_urls": {},
+            "default_message_type": "openai",
             "default_model": "",
             "default_fast_model": "",
+            "base_url": "",
             "message_type": "openai",
         },
     }
@@ -817,6 +909,18 @@ class WebGateway:
                         "history_turns": cfg.history_turns,
                         "share_openclaw_memory": share_memory,
                         "provider_presets": self._PROVIDER_PRESETS,
+                        # MiMo web search sub-service (see LLMConfig docstring).
+                        "web_search_enabled": bool(cfg.web_search_enabled),
+                        "web_search_force": bool(cfg.web_search_force),
+                        "web_search_limit": cfg.web_search_limit,
+                        "web_search_max_keyword": cfg.web_search_max_keyword,
+                        "web_search_country": cfg.web_search_country,
+                        "web_search_region": cfg.web_search_region,
+                        "web_search_city": cfg.web_search_city,
+                        "web_search_api_key_preview": personastore.mask_api_key(
+                            cfg.web_search_api_key
+                        ),
+                        "web_search_api_key_is_set": bool(cfg.web_search_api_key),
                     },
                 }
             )
@@ -840,6 +944,14 @@ class WebGateway:
                     "temperature",
                     "timeout_s",
                     "history_turns",
+                    "web_search_enabled",
+                    "web_search_force",
+                    "web_search_limit",
+                    "web_search_max_keyword",
+                    "web_search_country",
+                    "web_search_region",
+                    "web_search_city",
+                    "web_search_api_key",
                 )
             )
         ):
@@ -853,14 +965,31 @@ class WebGateway:
 
         validate = bool(body.get("validate", True))
         dry_run = bool(body.get("dry_run", False))
-        provider = str(body.get("provider") or "").strip() or self.server.config.llm.provider
+        # PATCH-like semantics: when the client omits a key from the body,
+        # keep the current value.  This matters because the "MiMo 联网搜索"
+        # card saves with a subset of fields and MUST NOT clobber the main
+        # LLM's api_base / message_type / fast_model.  The short-circuit at
+        # the top of this handler already covers the share-memory-only POST;
+        # every other partial-update path goes through here.
+        current_llm = self.server.config.llm
+        provider = str(body.get("provider") or "").strip() or current_llm.provider
         provider = str(LLMConfig.normalize_provider_alias(provider) or "")
-        api_base = str(body.get("api_base") or "").strip()
+        api_base = (
+            str(body.get("api_base") or "").strip()
+            if "api_base" in body
+            else current_llm.api_base
+        )
         api_key_raw = body.get("api_key")
         api_key = str(api_key_raw).strip() if api_key_raw is not None else ""
-        model = str(body.get("model") or "").strip() or self.server.config.llm.model
-        fast_model = str(body.get("fast_model") or "").strip() or model
-        message_type = str(body.get("message_type") or "").strip() or "openai"
+        model = str(body.get("model") or "").strip() or current_llm.model
+        fast_model = (
+            str(body.get("fast_model") or "").strip()
+            or (model if "model" in body else current_llm.fast_model)
+        )
+        message_type = (
+            str(body.get("message_type") or "").strip()
+            or (current_llm.message_type or "openai")
+        )
         share_memory = body.get("share_openclaw_memory")
 
         def _coerce_positive_int(raw: Any, fallback: int) -> int:
@@ -890,7 +1019,7 @@ class WebGateway:
                 return float(fallback)
             return max(5.0, min(600.0, v))
 
-        current_llm = self.server.config.llm
+        # ``current_llm`` was already hoisted above for PATCH-like fallbacks.
         max_tokens_val = _coerce_positive_int(body.get("max_tokens"), current_llm.max_tokens)
         summary_max_tokens_val = _coerce_positive_int(
             body.get("summary_max_tokens"), current_llm.summary_max_tokens
@@ -913,6 +1042,70 @@ class WebGateway:
         history_turns_val = _coerce_history_turns(
             body.get("history_turns"), current_llm.history_turns
         )
+
+        # ------------------------------------------------------------------
+        # MiMo web search sub-service fields.
+        #
+        # These travel alongside the main LLM settings because (a) the UI
+        # surfaces them in the same card and (b) ``web_search`` falls back
+        # to reusing the main ``api_key`` when ``provider == "mimo"`` (see
+        # ``_resolve_web_search_api_key``).  But they are logically
+        # **independent** of the main LLM path — web search always talks
+        # MiMo OpenAI-compat no matter what ``provider`` / ``message_type``
+        # the primary LLM is set to.  Keep that invariant when touching
+        # this block.
+        # ------------------------------------------------------------------
+        def _coerce_bounded_int(raw: Any, fallback: int, *, lo: int, hi: int) -> int:
+            if raw is None or raw == "":
+                return int(fallback)
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return int(fallback)
+            return max(lo, min(hi, v))
+
+        def _opt_bool(raw: Any, fallback: bool) -> bool:
+            if raw is None:
+                return bool(fallback)
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(raw)
+            s = str(raw).strip().lower()
+            if s in {"true", "1", "yes", "on"}:
+                return True
+            if s in {"false", "0", "no", "off", ""}:
+                return False
+            return bool(fallback)
+
+        ws_enabled = _opt_bool(
+            body.get("web_search_enabled"), current_llm.web_search_enabled
+        )
+        ws_force = _opt_bool(body.get("web_search_force"), current_llm.web_search_force)
+        ws_limit = _coerce_bounded_int(
+            body.get("web_search_limit"), current_llm.web_search_limit, lo=1, hi=10
+        )
+        ws_max_keyword = _coerce_bounded_int(
+            body.get("web_search_max_keyword"),
+            current_llm.web_search_max_keyword,
+            lo=1,
+            hi=10,
+        )
+        ws_country = (
+            str(body.get("web_search_country") or current_llm.web_search_country).strip()
+        )
+        ws_region = (
+            str(body.get("web_search_region") or current_llm.web_search_region).strip()
+        )
+        ws_city = str(body.get("web_search_city") or current_llm.web_search_city).strip()
+
+        ws_key_raw = body.get("web_search_api_key")
+        ws_key_in = str(ws_key_raw).strip() if ws_key_raw is not None else ""
+        if ws_key_in == "" or set(ws_key_in) <= {"•", "*"}:
+            # empty / placeholder → keep existing.
+            effective_ws_key = current_llm.web_search_api_key
+        else:
+            effective_ws_key = ws_key_in
 
         if api_key == "":
             # empty string is a no-op (keep existing); client sends new key only when rotating.
@@ -948,6 +1141,13 @@ class WebGateway:
                 "temperature": temperature_val,
                 "timeout_s": timeout_s_val,
                 "history_turns": history_turns_val,
+                "web_search_enabled": ws_enabled,
+                "web_search_force": ws_force,
+                "web_search_limit": ws_limit,
+                "web_search_max_keyword": ws_max_keyword,
+                "web_search_country": ws_country,
+                "web_search_region": ws_region,
+                "web_search_city": ws_city,
             },
         }
         if share_memory is not None:
@@ -967,6 +1167,14 @@ class WebGateway:
             if existing != effective_key:
                 personastore.set_credentials({"llm_api_key": effective_key})
 
+        # Web-search key lives in credentials.json under its own slot.
+        # Only persist when the user actually typed a new key — an empty
+        # or placeholder input must NOT overwrite an existing credential.
+        if ws_key_in and not set(ws_key_in) <= {"•", "*"}:
+            existing_ws = personastore.get_credentials().get("llm_web_search_api_key")
+            if existing_ws != effective_ws_key:
+                personastore.set_credentials({"llm_web_search_api_key": effective_ws_key})
+
         # Apply to running config and hot-reload LLM client.
         cfg = self.server.config
         cfg.llm.provider = provider
@@ -980,6 +1188,14 @@ class WebGateway:
         cfg.llm.temperature = temperature_val
         cfg.llm.timeout_s = timeout_s_val
         cfg.llm.history_turns = history_turns_val
+        cfg.llm.web_search_enabled = ws_enabled
+        cfg.llm.web_search_force = ws_force
+        cfg.llm.web_search_limit = ws_limit
+        cfg.llm.web_search_max_keyword = ws_max_keyword
+        cfg.llm.web_search_country = ws_country
+        cfg.llm.web_search_region = ws_region
+        cfg.llm.web_search_city = ws_city
+        cfg.llm.web_search_api_key = effective_ws_key
         if share_memory is not None:
             cfg.share_openclaw_memory = bool(share_memory)
 
@@ -1012,6 +1228,17 @@ class WebGateway:
                     "history_turns": history_turns_val,
                     "api_key_preview": personastore.mask_api_key(effective_key),
                     "api_key_is_set": bool(effective_key),
+                    "web_search_enabled": ws_enabled,
+                    "web_search_force": ws_force,
+                    "web_search_limit": ws_limit,
+                    "web_search_max_keyword": ws_max_keyword,
+                    "web_search_country": ws_country,
+                    "web_search_region": ws_region,
+                    "web_search_city": ws_city,
+                    "web_search_api_key_preview": personastore.mask_api_key(
+                        effective_ws_key
+                    ),
+                    "web_search_api_key_is_set": bool(effective_ws_key),
                     "share_openclaw_memory": bool(cfg.share_openclaw_memory),
                     "hot_reloaded": True,
                 },
@@ -1042,8 +1269,15 @@ class WebGateway:
 
         if message_type == "anthropic":
             url = f"{base}/messages"
+            # Triple-auth: real Anthropic uses `x-api-key`, MiMo's official
+            # curl uses `api-key`, and third-party Anthropic-compat proxies
+            # (including some MiMo wrappers) use `Authorization: Bearer`.
+            # Sending all three keeps a single probe working across all of
+            # them — each server picks up the header it understands.
             headers = {
                 "x-api-key": api_key,
+                "api-key": api_key,
+                "Authorization": f"Bearer {api_key}",
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             }

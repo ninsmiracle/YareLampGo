@@ -948,6 +948,13 @@ button.device-chip.is-active {
   color: var(--text);
 }
 
+.view-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .view-subtitle {
   font-size: 13px;
   color: var(--text-soft);
@@ -2084,6 +2091,61 @@ button.device-chip.is-active {
   transform: translateY(-1px);
   border-color: var(--accent);
   box-shadow: 0 8px 20px rgba(221, 147, 136, 0.14);
+}
+
+/* User-authored composed skills carry a subtle left-border tint so users
+   can tell at a glance which skills they (or OpenClaw) can safely delete /
+   modify, and which ones are factory-locked.  The accent colour matches
+   the "AI-touched" treatment used in the OpenClaw task list. */
+.skill-card--user {
+  position: relative;
+  border-left: 3px solid #b5a1dc;
+  background: linear-gradient(180deg, #fbf9ff 0%, #ffffff 40%);
+}
+
+.skill-card-action {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0);
+  color: #a08bc7;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.skill-card-action:hover {
+  opacity: 1;
+  background: rgba(229, 115, 115, 0.12);
+  color: #c14d4d;
+}
+
+.skill-card-action--delete:hover {
+  background: rgba(229, 115, 115, 0.18);
+}
+
+/* Empty-state helper shown below the "我的技能" grid when the user has
+   not created any composed skills yet — explains *how* the grid gets
+   populated, instead of a generic "暂无技能" message which would just
+   look like something is broken. */
+.skill-section-empty {
+  padding: 14px 16px;
+  margin-top: 6px;
+  background: #faf7ff;
+  border: 1px dashed #d8cff0;
+  border-radius: 10px;
+  color: #6d5aa0;
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .skill-card-icon {

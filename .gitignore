@@ -18,3 +18,4 @@ assets/recordings/aliases.json
 .env_backup
 lampgo.toml_backup
 scripts/
+tests/

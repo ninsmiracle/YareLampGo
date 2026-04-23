@@ -142,63 +142,96 @@ def _print_dim(ctx: InstallContext, msg: str) -> None:
 
 # ---------- provider presets (mirror of gateway.py) ------------------------
 
-PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+# Kept intentionally in sync with ``gateway.py::_PROVIDER_PRESETS``.
+# See the long comment there for why each entry has both ``api_urls``
+# (keyed by message_type) and legacy top-level ``base_url`` / ``message_type``.
+PROVIDER_PRESETS: dict[str, dict[str, object]] = {
     "mimo": {
         "label": "MiMo（小米）",
-        "base_url": "https://api.xiaomimimo.com/v1",
-        # mimo-v2.5：新一代通用模型，主模型 & fast_model 共用一个。
-        # 如需分工见 gateway.py PROVIDER_PRESETS 的注释。
+        "api_urls": {
+            "openai": "https://api.xiaomimimo.com/v1",
+            "anthropic": "https://api.xiaomimimo.com/anthropic/v1",
+        },
+        "default_message_type": "openai",
         "default_model": "mimo-v2.5",
         "default_fast_model": "mimo-v2.5",
+        "base_url": "https://api.xiaomimimo.com/v1",
         "message_type": "openai",
     },
     "openrouter": {
         "label": "OpenRouter",
-        "base_url": "https://openrouter.ai/api/v1",
+        "api_urls": {
+            "openai": "https://openrouter.ai/api/v1",
+            "anthropic": "https://openrouter.ai/api/v1",
+        },
+        "default_message_type": "openai",
         "default_model": "anthropic/claude-3.5-sonnet",
         "default_fast_model": "anthropic/claude-3.5-haiku",
+        "base_url": "https://openrouter.ai/api/v1",
         "message_type": "openai",
     },
     "anthropic": {
         "label": "Anthropic",
-        "base_url": "https://api.anthropic.com/v1",
+        "api_urls": {
+            "anthropic": "https://api.anthropic.com/v1",
+        },
+        "default_message_type": "anthropic",
         "default_model": "claude-sonnet-4-20250514",
         "default_fast_model": "claude-haiku-4-20250514",
+        "base_url": "https://api.anthropic.com/v1",
         "message_type": "anthropic",
     },
     "openai": {
         "label": "OpenAI",
-        "base_url": "https://api.openai.com/v1",
+        "api_urls": {
+            "openai": "https://api.openai.com/v1",
+        },
+        "default_message_type": "openai",
         "default_model": "gpt-4o-mini",
         "default_fast_model": "gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1",
         "message_type": "openai",
     },
     "deepseek": {
         "label": "DeepSeek",
-        "base_url": "https://api.deepseek.com/v1",
+        "api_urls": {
+            "openai": "https://api.deepseek.com/v1",
+        },
+        "default_message_type": "openai",
         "default_model": "deepseek-chat",
         "default_fast_model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com/v1",
         "message_type": "openai",
     },
     "google": {
         "label": "Google Gemini",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_urls": {
+            "openai": "https://generativelanguage.googleapis.com/v1beta/openai",
+        },
+        "default_message_type": "openai",
         "default_model": "gemini-2.5-flash",
         "default_fast_model": "gemini-2.5-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "message_type": "openai",
     },
     "ollama": {
         "label": "Ollama（本地）",
-        "base_url": "http://127.0.0.1:11434/v1",
+        "api_urls": {
+            "openai": "http://127.0.0.1:11434/v1",
+        },
+        "default_message_type": "openai",
         "default_model": "qwen2.5:7b-instruct",
         "default_fast_model": "qwen2.5:7b-instruct",
+        "base_url": "http://127.0.0.1:11434/v1",
         "message_type": "openai",
     },
     "custom": {
         "label": "自定义",
-        "base_url": "",
+        "api_urls": {},
+        "default_message_type": "openai",
         "default_model": "",
         "default_fast_model": "",
+        "base_url": "",
         "message_type": "openai",
     },
 }

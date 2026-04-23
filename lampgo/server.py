@@ -21,7 +21,7 @@ import structlog
 
 from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.bridge.state_writer import MinimalState, StateWriter
-from lampgo.core.config import LampgoConfig
+from lampgo.core.config import LampgoConfig, LEDConfig
 from lampgo.core.events import (
     AgentFinished,
     ChatMessage,
@@ -35,11 +35,9 @@ from lampgo.core.events import (
     TtsAudio,
 )
 from lampgo.core.hal import HardwareAbstraction
-from lampgo.core.config import LEDConfig
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
-from lampgo.core.config import WebConfig
 from lampgo.ipc import IPCServer
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.skills.base import SkillContext
@@ -53,9 +51,19 @@ from lampgo.skills.builtin.parametric_skills import (
     NodSkill,
 )
 from lampgo.skills.builtin.playback_skills import PlayRecordingSkill
-from lampgo.skills.recorder import TeachRecorder
+from lampgo.skills.composed import ComposedSkill
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.fsm import StateMachine
+from lampgo.skills.loader import (
+    LoadReport,
+    SkillDefinitionError,
+    delete_user_skill,
+    load_user_skills,
+    save_user_skill,
+    user_skills_dir,
+    validate_definition,
+)
+from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.registry import SkillRegistry
 
 logger = structlog.get_logger(__name__)
@@ -107,6 +115,53 @@ class LampgoServer:
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
         self.registry.register(DanceSkill())
+
+    # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
+
+    def _lampgo_home(self) -> Path:
+        """Resolve ~/.lampgo (or $LAMPGO_HOME).  Deferred import to keep the
+        server module import-free of personastore at module load time."""
+        from lampgo import personastore
+
+        return personastore.lampgo_home()
+
+    def _user_skills_dir(self) -> Path:
+        return user_skills_dir(self._lampgo_home())
+
+    def _load_user_skills(self) -> LoadReport:
+        """Scan ``~/.lampgo/skills/user/`` and register every valid JSON skill.
+
+        Safe to call repeatedly — it's additive only (existing user skills
+        with the same id keep working; this method does not purge stale
+        registrations on its own).  For full reload semantics use
+        :meth:`_reload_user_skills`.
+        """
+        report = load_user_skills(self._user_skills_dir(), self.registry)
+        if report.errors:
+            logger.warning(
+                "server.user_skills_partial",
+                loaded=report.loaded,
+                errors=report.errors,
+            )
+        else:
+            logger.info("server.user_skills_loaded", skills=report.loaded)
+        return report
+
+    def _reload_user_skills(self) -> LoadReport:
+        """Drop every registered user skill then re-scan disk.
+
+        Used when the user edits a definition out-of-band (e.g. via the
+        editor) and wants the daemon to pick up the change without a full
+        restart.  Factory skills are untouched.
+        """
+        current_user_ids = [
+            s.skill_id
+            for s in self.registry.list_skills()
+            if getattr(s, "source", "factory") == "user"
+        ]
+        for sid in current_user_ids:
+            self.registry.unregister(sid)
+        return self._load_user_skills()
 
     def make_context(self) -> SkillContext:
         return SkillContext(
@@ -173,6 +228,15 @@ class LampgoServer:
         if cmd == "list_mics":
             return self._handle_list_mics()
 
+        if cmd == "skills_save":
+            return self._handle_skills_save(data)
+
+        if cmd == "skills_delete":
+            return self._handle_skills_delete(data)
+
+        if cmd == "skills_reload":
+            return self._handle_skills_reload()
+
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
     async def openclaw_ask_user(
@@ -194,7 +258,7 @@ class LampgoServer:
 
         try:
             reply = await asyncio.wait_for(fut, timeout=timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             reply = ""
         finally:
             async with self._openclaw_asks_lock:
@@ -835,7 +899,9 @@ class LampgoServer:
     @staticmethod
     def _measure_audio_rms(audio_b64: str) -> float:
         """Decode base64 WAV and compute RMS to check if audio has content."""
-        import base64, struct, math
+        import base64
+        import math
+        import struct
         try:
             raw = base64.b64decode(audio_b64)
             if len(raw) < 46:
@@ -859,7 +925,6 @@ class LampgoServer:
             result = await synthesize_for_web(
                 text,
                 api_key=self.config.llm.api_key,
-                api_base=self.config.llm.api_base,
                 voice=self.config.voice.tts_voice,
                 provider=self.config.voice.tts_provider,
                 model=self.config.voice.tts_model,
@@ -964,6 +1029,7 @@ class LampgoServer:
             names = {}
 
         import os
+
         import cv2
         cameras: list[dict[str, str]] = []
         for idx in range(4):
@@ -1068,22 +1134,160 @@ class LampgoServer:
     def _handle_skills(self) -> dict:
         skills = []
         for skill in self.registry.list_skills():
-            skills.append(
-                {
-                    "skill_id": skill.skill_id,
-                    "description": skill.description,
-                    "parameters": {
-                        name: {
-                            "type": spec.type,
-                            "description": spec.description,
-                            "required": spec.required,
-                            "default": spec.default,
-                        }
-                        for name, spec in skill.parameters.items()
-                    },
-                }
-            )
+            entry: dict[str, Any] = {
+                "skill_id": skill.skill_id,
+                "description": skill.description,
+                "source": getattr(skill, "source", "factory"),
+                "label": getattr(skill, "label", "") or "",
+                "parameters": {
+                    name: {
+                        "type": spec.type,
+                        "description": spec.description,
+                        "required": spec.required,
+                        "default": spec.default,
+                    }
+                    for name, spec in skill.parameters.items()
+                },
+            }
+            # For user skills we also surface the step plan so the UI can
+            # show "这个技能会做什么" without needing a second round-trip.
+            if isinstance(skill, ComposedSkill):
+                entry["steps"] = [
+                    {"skill_id": s["skill_id"], "params": dict(s.get("params") or {})}
+                    for s in skill.definition.get("steps", [])
+                ]
+            skills.append(entry)
         return {"ok": True, "result": {"skills": skills}}
+
+    def _handle_skills_save(self, data: dict) -> dict:
+        """Validate + persist + register a user-authored composed skill.
+
+        Called from:
+          - OpenClaw (``lampgo_save_skill`` tool)
+          - Web UI (``POST /api/skills/save``)
+
+        Body: ``{definition: {...JSON skill spec...}, overwrite?: bool}``
+
+        Update semantics: if the skill already exists as a user skill it is
+        rewritten in place.  Factory skill_ids are rejected in validation.
+        """
+        definition_raw = data.get("definition")
+        overwrite = bool(data.get("overwrite", True))
+
+        existing_user_ids = {
+            s.skill_id
+            for s in self.registry.list_skills()
+            if getattr(s, "source", "factory") == "user"
+        }
+        try:
+            normalised = validate_definition(
+                definition_raw,
+                registry=self.registry,
+                existing_user_skills=existing_user_ids,
+            )
+        except SkillDefinitionError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "result": {"reason": exc.reason},
+            }
+
+        skill_id = normalised["skill_id"]
+        already_exists = skill_id in existing_user_ids
+        if already_exists and not overwrite:
+            return {
+                "ok": False,
+                "error": f"skill '{skill_id}' already exists; set overwrite=true to replace",
+                "result": {"reason": "already_exists"},
+            }
+
+        path = save_user_skill(self._user_skills_dir(), normalised)
+
+        # Swap the in-memory registration.  Unregister first so the new
+        # instance gets a fresh cancellation state if an update happened
+        # mid-execution (rare but not impossible).
+        if already_exists:
+            self.registry.unregister(skill_id)
+        self.registry.register(ComposedSkill(normalised, self.registry))
+        # Push a fresh skills list to any LLM client so the new tool is
+        # exposed on the next turn without a daemon restart.
+        self._refresh_llm_skill_tools()
+
+        return {
+            "ok": True,
+            "result": {
+                "skill_id": skill_id,
+                "path": str(path),
+                "updated": already_exists,
+            },
+        }
+
+    def _handle_skills_delete(self, data: dict) -> dict:
+        """Delete a user-authored composed skill.  Factory skills are refused."""
+        skill_id = str(data.get("skill_id", "") or "").strip()
+        if not skill_id:
+            return {"ok": False, "error": "skill_id required"}
+
+        existing = self.registry.get(skill_id)
+        if existing is None:
+            return {
+                "ok": False,
+                "error": f"skill '{skill_id}' not found",
+                "result": {"reason": "not_found"},
+            }
+        if getattr(existing, "source", "factory") != "user":
+            return {
+                "ok": False,
+                "error": f"skill '{skill_id}' is a factory skill and cannot be deleted",
+                "result": {"reason": "factory_protected"},
+            }
+
+        # Remove from registry + disk.  Order matters: registry first so a
+        # late IPC invoke can't race an already-deleted JSON file.
+        self.registry.unregister(skill_id)
+        file_removed = delete_user_skill(self._user_skills_dir(), skill_id)
+        self._refresh_llm_skill_tools()
+        return {
+            "ok": True,
+            "result": {"skill_id": skill_id, "file_removed": file_removed},
+        }
+
+    def _handle_skills_reload(self) -> dict:
+        """Drop all user skills and re-scan ~/.lampgo/skills/user/ from disk."""
+        report = self._reload_user_skills()
+        self._refresh_llm_skill_tools()
+        return {
+            "ok": True,
+            "result": {"loaded": report.loaded, "errors": report.errors},
+        }
+
+    def _refresh_llm_skill_tools(self) -> None:
+        """Rebuild the LLM client's tool specs after a registry mutation.
+
+        The LLMClient caches the tool JSON at construction time; without
+        this nudge, newly-saved user skills wouldn't be visible to the
+        agent until the next daemon restart — which is the exact pain this
+        whole feature is meant to remove.  We reuse the same construction
+        path as :meth:`_setup_llm_router` (handles "no API key" gracefully).
+        Silently no-ops on any failure — the skill save itself succeeded,
+        a stale agent tool list is not worth rolling that back.
+        """
+        if not getattr(self.config.llm, "api_key", ""):
+            return
+        try:
+            from lampgo.perception.llm_client import LLMClient
+
+            skill_specs = self._handle_skills()["result"]["skills"]
+            client = LLMClient(
+                self.config.llm, skill_specs, camera_config=self.config.camera
+            )
+            self.router.set_llm_client(client)
+            logger.info(
+                "server.llm_router_skills_refreshed",
+                count=len(skill_specs),
+            )
+        except Exception:
+            logger.exception("server.refresh_llm_skill_tools_failed")
 
     async def start(self) -> None:
         logger.info("server.starting")
@@ -1121,6 +1325,10 @@ class LampgoServer:
                     set_calibration_home(home)
 
         self._register_builtin_skills()
+        # Load any user-authored / OpenClaw-authored composed skills from
+        # ~/.lampgo/skills/user/ AFTER factory skills so their step targets
+        # resolve during validation.
+        self._load_user_skills()
         if self.config.home_on_start:
             await self._home_on_start()
         await self._ipc.start()

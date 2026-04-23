@@ -134,6 +134,14 @@ class Skill(ABC):
     parameters: dict[str, ParameterSpec] = {}
     priority: int = 0  # 0 = normal, higher = higher priority
 
+    # Provenance / display metadata.  Used by the Web UI to split "出厂技能"
+    # (hardcoded Python classes, read-only) from "我的技能" (JSON-defined
+    # composed skills the user / OpenClaw authored at runtime, editable /
+    # deletable).  ``label`` is an optional Chinese display name; when empty
+    # the UI falls back to the SKILL_LABELS_CN dictionary keyed by skill_id.
+    source: str = "factory"  # "factory" | "user"
+    label: str = ""
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if not cls.skill_id and cls.__name__ != "Skill":

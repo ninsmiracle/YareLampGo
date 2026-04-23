@@ -14,6 +14,11 @@
   const btnClearEvents = document.getElementById("btn-clear-events");
   const emptyStateTemplate = document.getElementById("empty-state");
   const skillGrid = document.getElementById("skill-grid");
+  const userSkillGrid = document.getElementById("user-skill-grid");
+  const userSkillEmpty = document.getElementById("user-skill-empty");
+  const userSkillCountEl = document.getElementById("user-skill-count");
+  const userSkillSearchEl = document.getElementById("user-skill-search");
+  const btnUserSkillsReload = document.getElementById("btn-user-skills-reload");
   const recordingGrid = document.getElementById("recording-grid");
   const expressionGrid = document.getElementById("expression-grid");
   const skillCountEl = document.getElementById("skill-count");
@@ -1179,7 +1184,12 @@
     if (conn === "running" && isHealthy && !needsRefresh) {
       title += `（${result.running_tasks || 0} 个任务进行中）`;
     } else if (conn === "not_installed" || overall === "missing") {
-      title += "（请在终端运行 `lampgo install-openclaw --yes`）";
+      // 点开详情卡里有更完整的引导；tooltip 这里只给一句话摘要。
+      if (integ && integ.binary && integ.binary.ok === false) {
+        title += "（请先到 https://openclaw.ai/ 安装 openclaw CLI，再跑 `lampgo install-openclaw --yes`）";
+      } else {
+        title += "（请在终端运行 `lampgo install-openclaw --yes`）";
+      }
     } else if (overall === "degraded") {
       title += "（配置齐全，但 gateway 守护进程无响应；点我查看如何拉起）";
     } else if (overall === "basic") {
@@ -1224,6 +1234,11 @@
     if (!openclawHealthCard || !result) return;
     const integ = result.integration || {};
     // step 对象里多一个 level 字段："bad"=红色阻塞, "warn"=黄色建议, 默认按 ok 推导。
+    // 当 openclaw CLI 本身都没装时，plugin_freshness / plugin_token 的 warn 语气
+    // 是误导性的——这两项跟所有其它项一样根本跑不起来。把它们升级成 bad 让整张
+    // 详情卡读起来就是一面统一的红 ✗，用户不会误以为"有俩项还挺健康"。
+    const noCli = !integ.binary?.ok;
+    const softLevel = noCli ? "bad" : "warn";
     const steps = [
       integ.binary,
       integ.config_file,
@@ -1231,8 +1246,8 @@
       integ.plugin,
       integ.trusted,
       integ.gateway,
-      integ.plugin_freshness && { ...integ.plugin_freshness, level: "warn" },
-      integ.plugin_token && { ...integ.plugin_token, level: "warn" },
+      integ.plugin_freshness && { ...integ.plugin_freshness, level: softLevel },
+      integ.plugin_token && { ...integ.plugin_token, level: softLevel },
     ].filter(Boolean);
 
     const stepHtml = steps
@@ -1266,7 +1281,16 @@
       (integ.plugin_freshness && integ.plugin_freshness.ok === false) ||
       (integ.plugin_token && integ.plugin_token.ok === false);
     let hintHtml;
-    if (needsInstall) {
+    if (noCli) {
+      // openclaw CLI 自己没装的时候，`lampgo install-openclaw --yes` 必然报错，
+      // 所以要先把用户引导到官网装 CLI，再跑 lampgo 这边的一键集成。
+      hintHtml =
+        `<div class="oc-health-hint is-warn">还没安装 <code>openclaw</code> CLI，所有集成步骤都跑不起来。` +
+        `<br>1. 先访问 <a href="https://openclaw.ai/" target="_blank" rel="noopener noreferrer">https://openclaw.ai/</a> 安装 openclaw；` +
+        `<br>2. 再在终端运行 <code>uv run lampgo install-openclaw --yes</code>，把 lampgo 集成注册进去；` +
+        `<br>3. 回来点 <em>刷新</em>。` +
+        `</div>`;
+    } else if (needsInstall) {
       hintHtml = `<div class="oc-health-hint">一键修复：在终端运行 <code>uv run lampgo install-openclaw --yes</code>，再点 <em>刷新</em>。</div>`;
     } else if (gatewayDown) {
       hintHtml =
@@ -1277,10 +1301,60 @@
         `<br>• <code>openclaw gateway</code>（前台运行，方便看日志排查）` +
         `</div>`;
     } else if (needsRefresh) {
+      // 动态地把"需要同步的 tool"和"已经同步的 tool"都列出来，避免把
+      // 具体名字硬编码在前端代码里——每次 plugin 新增/删除 tool 都得来
+      // 改这里。后端 `tool_sync` 已经算好了 source / installed 的对称差。
+      const sync = integ.tool_sync || {};
+      const missing = Array.isArray(sync.missing_in_installed) ? sync.missing_in_installed : [];
+      const extra = Array.isArray(sync.extra_in_installed) ? sync.extra_in_installed : [];
+      const installed = Array.isArray(sync.installed_tools) ? sync.installed_tools : [];
+      // Token-out-of-sync alone can trigger this branch without any tool
+      // diff — detect it so we don't tell the user "3 tools will be
+      // registered" when actually it's just a token rotation.
+      const tokenStale = integ.plugin_token && integ.plugin_token.ok === false;
+      const freshnessStale = integ.plugin_freshness && integ.plugin_freshness.ok === false;
+
+      const toolListHtml = (names) =>
+        names.map((n) => `<code>${escapeHtml(n)}</code>`).join(" / ");
+
+      const detailLines = [];
+      if (missing.length) {
+        detailLines.push(
+          `<br>• <strong>需要同步进去</strong>（${missing.length} 个）：` +
+          toolListHtml(missing),
+        );
+      }
+      if (extra.length) {
+        // Rare but worth surfacing: source removed a tool, installed
+        // still has it.  Reinstall cleans it out.
+        detailLines.push(
+          `<br>• <strong>源码已移除、插件仍残留</strong>（${extra.length} 个）：` +
+          toolListHtml(extra),
+        );
+      }
+      if (installed.length && !missing.length && !extra.length && freshnessStale) {
+        // Freshness says "source newer" but our tool diff is empty — the
+        // change must be inside existing tools' schemas/descriptions, not
+        // the tool list itself.  Be honest about that so the user doesn't
+        // wonder why "needs sync" but "0 tools missing".
+        detailLines.push(
+          `<br>• 现有 ${installed.length} 个 tool 的 schema 或描述有更新，名字没变。`,
+        );
+      }
+      if (installed.length) {
+        detailLines.push(
+          `<br>• <strong>已同步</strong>（${installed.length} 个）：` +
+          toolListHtml(installed),
+        );
+      }
+      if (tokenStale) {
+        detailLines.push(`<br>• <strong>鉴权 token</strong> 需要重新写入。`);
+      }
+
       hintHtml =
         `<div class="oc-health-hint is-warn">核心组件已装好，但 plugin 需要刷新一下：` +
         `<br>在终端运行 <code>uv run lampgo install-openclaw --yes</code>，再点 <em>刷新</em>。` +
-        `<br>这会把最新 tool（<code>lampgo_get_persona</code> / <code>lampgo_get_memory</code> / <code>lampgo_save_memory</code>）重新注册，并同步鉴权 token。` +
+        detailLines.join("") +
         `</div>`;
     } else {
       hintHtml = `<div class="oc-health-hint">所有组件已就绪。</div>`;
@@ -2462,9 +2536,11 @@
   }
 
   let latestSkills = [];
+  let latestUserSkills = [];
   let latestRecordings = [];
   let latestExpressions = [];
   let skillQuery = "";
+  let userSkillQuery = "";
   let recordingQuery = "";
   let expressionQuery = "";
 
@@ -2482,8 +2558,21 @@
 
   function renderSkills(skills) {
     if (Array.isArray(skills)) {
-      latestSkills = skills.filter((s) => !["estop", "play_recording"].includes(s.skill_id));
+      // Split by provenance so the UI can show factory (locked) vs user
+      // (editable) separately; ``source`` is set by the server — default
+      // to "factory" for any skill that pre-dates the feature flag, so
+      // older daemons stay backwards-compatible on UI refresh.
+      const visible = skills.filter(
+        (s) => !["estop", "play_recording"].includes(s.skill_id),
+      );
+      latestSkills = visible.filter((s) => (s.source || "factory") === "factory");
+      latestUserSkills = visible.filter((s) => s.source === "user");
     }
+    renderFactorySkills();
+    renderUserSkills();
+  }
+
+  function renderFactorySkills() {
     skillGrid.innerHTML = "";
     const q = skillQuery.trim().toLowerCase();
     const filtered = q
@@ -2509,6 +2598,146 @@
     });
     if (!filtered.length) renderEmptyCell(skillGrid, q ? `无匹配「${q}」的技能` : "暂无技能");
     updateCount(skillCountEl, filtered.length, latestSkills.length);
+  }
+
+  function renderUserSkills() {
+    if (!userSkillGrid) return;
+    userSkillGrid.innerHTML = "";
+    const q = userSkillQuery.trim().toLowerCase();
+    const filtered = q
+      ? latestUserSkills.filter((s) => {
+          const title = s.label || s.skill_id || "";
+          return (
+            title.toLowerCase().includes(q) ||
+            (s.skill_id || "").toLowerCase().includes(q) ||
+            (s.description || "").toLowerCase().includes(q)
+          );
+        })
+      : latestUserSkills;
+
+    filtered.forEach((skill) => {
+      const title = skill.label || skill.skill_id;
+      const steps = Array.isArray(skill.steps) ? skill.steps : [];
+      const stepCount = steps.length;
+      // Count trajectory steps separately — they're the Level 2 feature and
+      // worth flagging so the user knows the skill includes a custom motion,
+      // not just a chain of built-ins.
+      const trajCount = steps.filter((s) => s && s.trajectory).length;
+      const metaParts = [];
+      if (stepCount) metaParts.push(`${stepCount} 步`);
+      if (trajCount) metaParts.push(`含 ${trajCount} 段轨迹`);
+      const meta = skill.description || metaParts.join(" · ");
+
+      // Plan summary — one line per step.  Factory steps show the target
+      // skill_id; trajectory steps show "[轨迹: N 个关键帧]" so the reader
+      // can tell the two shapes apart without opening the JSON.
+      const planPreview = steps
+        .slice(0, 4)
+        .map((s) => {
+          if (s && s.trajectory) {
+            const wpCount = Array.isArray(s.trajectory.waypoints)
+              ? s.trajectory.waypoints.length
+              : 0;
+            return `[轨迹:${wpCount}帧]`;
+          }
+          return s && s.skill_id ? s.skill_id : "?";
+        })
+        .join(" → ") + (stepCount > 4 ? " → …" : "");
+      const tooltip = `${skill.description || ""}\n流程：${planPreview}\n(${skill.skill_id})`;
+
+      const card = makeSkillCard({
+        title,
+        meta,
+        tooltip,
+        onClick: () => invokeSkill(skill.skill_id),
+      });
+      card.classList.add("skill-card--user");
+
+      // Overlay a delete button in the top-right corner; stopPropagation
+      // so clicking it never also fires the card's invoke handler.
+      const del = document.createElement("button");
+      del.className = "skill-card-action skill-card-action--delete";
+      del.type = "button";
+      del.title = "删除这个技能";
+      del.textContent = "✕";
+      del.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        void deleteUserSkill(skill);
+      });
+      card.appendChild(del);
+      userSkillGrid.appendChild(card);
+    });
+
+    if (!filtered.length && !q) {
+      // Empty state: show the friendly "让 AI 帮你攒一个" hint instead of
+      // the generic "无技能" so users know this grid is *meant* to start
+      // empty and fill up over time.
+      if (userSkillEmpty) userSkillEmpty.classList.remove("hidden");
+    } else {
+      if (userSkillEmpty) userSkillEmpty.classList.add("hidden");
+      if (!filtered.length) {
+        renderEmptyCell(userSkillGrid, `无匹配「${q}」的技能`);
+      }
+    }
+    updateCount(userSkillCountEl, filtered.length, latestUserSkills.length);
+  }
+
+  async function deleteUserSkill(skill) {
+    const title = skill.label || skill.skill_id;
+    if (!window.confirm(`确认删除"${title}"（skill_id=${skill.skill_id}）？此操作不可恢复。`)) {
+      return;
+    }
+    try {
+      const resp = await fetch("/api/skills/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ skill_id: skill.skill_id }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        window.alert(`删除失败：${data.error || resp.statusText}`);
+        return;
+      }
+      await refreshSkillsAndRecordings();
+    } catch (err) {
+      window.alert(`删除失败：${err && err.message ? err.message : err}`);
+    }
+  }
+
+  async function reloadUserSkills() {
+    try {
+      const resp = await fetch("/api/skills/reload", { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        window.alert(`重新加载失败：${data.error || resp.statusText}`);
+        return;
+      }
+      const errs = (data.result && data.result.errors) || [];
+      if (errs.length) {
+        const preview = errs.slice(0, 3).map(([p, m]) => `• ${p}: ${m}`).join("\n");
+        window.alert(`重新加载完成，但 ${errs.length} 个文件有问题：\n${preview}`);
+      }
+      await refreshSkillsAndRecordings();
+    } catch (err) {
+      window.alert(`重新加载失败：${err && err.message ? err.message : err}`);
+    }
+  }
+
+  async function refreshSkillsAndRecordings() {
+    // Delete/reload paths don't emit events today — pull /api/skills once
+    // directly so the grid reflects disk truth without waiting for the
+    // next status broadcast.
+    try {
+      const resp = await fetch("/api/skills", { cache: "no-store" });
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.ok && data.result && Array.isArray(data.result.skills)) {
+        renderSkills(data.result.skills);
+      }
+    } catch (err) {
+      // Non-fatal: grid will catch up on the next websocket status tick.
+      console.warn("refreshSkillsAndRecordings failed", err);
+    }
   }
 
   function renderRecordings(recordings) {
@@ -2577,9 +2806,13 @@
     });
   }
 
-  wireSkillSearch(skillSearchEl, (v) => { skillQuery = v; renderSkills(); });
+  wireSkillSearch(skillSearchEl, (v) => { skillQuery = v; renderFactorySkills(); });
+  wireSkillSearch(userSkillSearchEl, (v) => { userSkillQuery = v; renderUserSkills(); });
   wireSkillSearch(recordingSearchEl, (v) => { recordingQuery = v; renderRecordings(); });
   wireSkillSearch(expressionSearchEl, (v) => { expressionQuery = v; renderExpressions(); });
+  if (btnUserSkillsReload) {
+    btnUserSkillsReload.addEventListener("click", () => { void reloadUserSkills(); });
+  }
 
   document.querySelectorAll(".skill-search-clear").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -4409,20 +4642,117 @@
     return data.result || {};
   }
 
-  function applyProviderPreset(provider) {
+  // Pick the Base URL for a (provider, message_type) pair from the
+  // presets the backend handed us.  Returns an empty string if the
+  // provider doesn't advertise a URL for that format (happens e.g. for
+  // Anthropic + OpenAI-compat combo, since real Anthropic has no OpenAI
+  // endpoint) — callers treat empty as "don't touch the field".
+  function resolveBaseUrl(provider, messageType) {
+    const preset = settingsProviderPresets && settingsProviderPresets[provider];
+    if (!preset) return "";
+    const urls = preset.api_urls || {};
+    if (messageType && urls[messageType]) return urls[messageType];
+    const fallbackType = preset.default_message_type;
+    if (fallbackType && urls[fallbackType]) return urls[fallbackType];
+    // Legacy top-level base_url mirrors api_urls[default_message_type]
+    // on new-style presets, and is the only URL we have on old-style
+    // presets loaded from pinned configs.
+    return preset.base_url || "";
+  }
+
+  // Does this provider actually expose the requested message_type?
+  // Used to flag "Anthropic provider + OpenAI format" style mismatches
+  // inline instead of letting the user hit a 404 on test connection.
+  function providerSupportsMessageType(provider, messageType) {
+    const preset = settingsProviderPresets && settingsProviderPresets[provider];
+    if (!preset) return true; // unknown presets (custom) → don't warn
+    const urls = preset.api_urls || {};
+    // If the preset predates the api_urls field, fall back to trusting
+    // the old top-level message_type.
+    if (!urls || Object.keys(urls).length === 0) {
+      return !preset.message_type || preset.message_type === messageType;
+    }
+    return !!urls[messageType];
+  }
+
+  // Apply the Base URL / model defaults whenever Provider or Message
+  // Type changes.  `source` tells us which dropdown fired so we know
+  // whether to also re-default the other one (Provider → apply its
+  // default_message_type if the user hasn't locked a choice yet).
+  function applyProviderPreset(provider, { source = "provider" } = {}) {
     if (!settingsProviderPresets || !settingsProviderPresets[provider]) return;
     const preset = settingsProviderPresets[provider];
     const baseEl = document.getElementById("cfg-llm-base-url");
     const mtEl = document.getElementById("cfg-llm-message-type");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
-    if (baseEl && (!baseEl.value.trim() || baseEl.dataset.autofilled === "1")) {
-      baseEl.value = preset.base_url || "";
-      baseEl.dataset.autofilled = "1";
+
+    // Custom provider: leave everything to the user — we have no URL
+    // to suggest, and overwriting a user-typed Base URL would be
+    // surprising.
+    if (provider === "custom") {
+      if (modelEl && !modelEl.value.trim() && preset.default_model) modelEl.value = preset.default_model;
+      if (fastEl && !fastEl.value.trim() && preset.default_fast_model) fastEl.value = preset.default_fast_model;
+      return;
     }
-    if (mtEl && preset.message_type) mtEl.value = preset.message_type;
+
+    // Message Type: when the user switches Provider, adopt the new
+    // provider's default format UNLESS the provider also supports the
+    // user's current choice (then keep the choice — the user may have
+    // deliberately picked a format the provider supports as an
+    // alternative).  When the user changed Message Type directly, never
+    // re-override it here.
+    if (mtEl && source === "provider") {
+      const currentMt = mtEl.value;
+      if (!providerSupportsMessageType(provider, currentMt) && preset.default_message_type) {
+        mtEl.value = preset.default_message_type;
+      } else if (!currentMt && preset.default_message_type) {
+        mtEl.value = preset.default_message_type;
+      }
+    }
+
+    // Base URL: recomputed from the final (provider, message_type) pair.
+    if (baseEl) {
+      const mt = mtEl ? mtEl.value : preset.default_message_type;
+      const url = resolveBaseUrl(provider, mt);
+      if (url) {
+        baseEl.value = url;
+        baseEl.dataset.autofilled = "1";
+      }
+      // If the provider genuinely doesn't support this message_type
+      // (empty url), we intentionally leave the field alone so the user
+      // can still test a hand-crafted endpoint — the validation layer
+      // below surfaces the mismatch.
+    }
+
     if (modelEl && !modelEl.value.trim() && preset.default_model) modelEl.value = preset.default_model;
     if (fastEl && !fastEl.value.trim() && preset.default_fast_model) fastEl.value = preset.default_fast_model;
+  }
+
+  // Surface a soft warning in the LLM status strip when the chosen
+  // (provider, message_type) pair is known not to work without a custom
+  // Base URL, so the user sees the problem before they click Save.
+  function refreshLlmFormatMismatchWarning() {
+    const provEl = document.getElementById("cfg-llm-provider");
+    const mtEl = document.getElementById("cfg-llm-message-type");
+    const status = document.getElementById("cfg-llm-status");
+    if (!provEl || !mtEl || !status) return;
+    const provider = provEl.value;
+    const mt = mtEl.value;
+    if (!provider || provider === "custom" || !mt) {
+      if (status.dataset.kind === "format-warn") setSettingsStatus(status, "");
+      return;
+    }
+    if (!providerSupportsMessageType(provider, mt)) {
+      setSettingsStatus(
+        status,
+        `提示：${provider} 未官方支持 ${mt === "anthropic" ? "Anthropic Messages" : "OpenAI chat.completions"} 格式，需要你自己填一个能用的 Base URL。`,
+      );
+      status.dataset.kind = "format-warn";
+    } else if (status.dataset.kind === "format-warn") {
+      setSettingsStatus(status, "");
+      delete status.dataset.kind;
+    }
   }
 
   function syncCustomProviderField(selectedProvider, customValue) {
@@ -4451,6 +4781,22 @@
     return customValue;
   }
 
+  // --- MiMo 联网搜索子服务 DOM 引用 ---------------------------------
+  // 这些字段隶属于 LLM 卡片，但语义独立（见 index.html 注释）。统一放
+  // 在一个 helper 里避免 load/save/test 三处重复获取。
+  function _wsEls() {
+    return {
+      enabled: document.getElementById("cfg-llm-web-search-enabled"),
+      force: document.getElementById("cfg-llm-web-search-force"),
+      key: document.getElementById("cfg-llm-web-search-api-key"),
+      limit: document.getElementById("cfg-llm-web-search-limit"),
+      maxKeyword: document.getElementById("cfg-llm-web-search-max-keyword"),
+      country: document.getElementById("cfg-llm-web-search-country"),
+      region: document.getElementById("cfg-llm-web-search-region"),
+      city: document.getElementById("cfg-llm-web-search-city"),
+    };
+  }
+
   async function loadLlmConfig() {
     const provEl = document.getElementById("cfg-llm-provider");
     const customProvEl = document.getElementById("cfg-llm-provider-custom");
@@ -4466,6 +4812,7 @@
     const timeoutEl = document.getElementById("cfg-llm-timeout");
     const historyEl = document.getElementById("cfg-llm-history-turns");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
+    const ws = _wsEls();
     const status = document.getElementById("cfg-llm-status");
     setSettingsStatus(status, "加载中…");
     try {
@@ -4512,6 +4859,23 @@
         settingsHistoryTurns = result.history_turns;
       }
       if (shareEl) shareEl.checked = !!result.share_openclaw_memory;
+      if (ws.enabled) ws.enabled.checked = !!result.web_search_enabled;
+      if (ws.force) ws.force.checked = !!result.web_search_force;
+      if (ws.limit && typeof result.web_search_limit === "number") {
+        ws.limit.value = String(result.web_search_limit);
+      }
+      if (ws.maxKeyword && typeof result.web_search_max_keyword === "number") {
+        ws.maxKeyword.value = String(result.web_search_max_keyword);
+      }
+      if (ws.country) ws.country.value = result.web_search_country || "";
+      if (ws.region) ws.region.value = result.web_search_region || "";
+      if (ws.city) ws.city.value = result.web_search_city || "";
+      if (ws.key) {
+        ws.key.value = "";
+        ws.key.placeholder = result.web_search_api_key_is_set
+          ? (result.web_search_api_key_preview || "已设置（留空保持不变）")
+          : "留空则复用上方 API Key（仅当 Provider=MiMo 时）";
+      }
       setSettingsStatus(status, "");
     } catch (err) {
       setSettingsStatus(status, `加载失败：${err.message}`, "error");
@@ -4567,6 +4931,9 @@
           })()
         : null,
       share_openclaw_memory: shareEl ? shareEl.checked : undefined,
+      // MiMo 联网搜索字段现在归属独立的 "MiMo 联网搜索" 卡片。
+      // 主 LLM 保存按钮不再捎带它们，避免误覆盖 —— web_search
+      // 子服务的变更请用它自己的保存按钮（saveWebSearchConfig）。
     };
     setSettingsStatus(status, validate ? "正在测试连接…" : "保存中…");
     if (btnSave) btnSave.disabled = true;
@@ -4637,6 +5004,70 @@
       }
     } catch (err) {
       setSettingsStatus(status, `连接失败：${err.message}`, "error");
+    }
+  }
+
+  // ----------------------------------------------------------------------
+  // MiMo 联网搜索子服务的独立保存。
+  //
+  // 只 POST web_search_* 字段 + validate:false（本 card 不做 ping，因为
+  // 真要 ping 得拿 MiMo key 去打 xiaomimimo.com，主 LLM 的 /api/config/llm
+  // probe 是按主 Provider 的 base_url 跑的，对这张 card 意义不大）。
+  // 后端在 body 没带主 LLM 字段时会沿用当前运行时 config（见 gateway.py
+  // api_config_llm 里的 `str(body.get(...)) or current_llm.xxx` 模式），
+  // 所以这里安全。
+  // ----------------------------------------------------------------------
+  async function saveWebSearchConfig() {
+    const ws = _wsEls();
+    const status = document.getElementById("cfg-web-search-status");
+    const btn = document.getElementById("btn-cfg-web-search-save");
+    const parseIntOrNull = (el) => {
+      if (!el || el.value === "" || el.value == null) return null;
+      const v = parseInt(el.value, 10);
+      return Number.isFinite(v) && v > 0 ? v : null;
+    };
+    const body = {
+      validate: false,
+      web_search_enabled: ws.enabled ? !!ws.enabled.checked : undefined,
+      web_search_force: ws.force ? !!ws.force.checked : undefined,
+      web_search_api_key: ws.key && ws.key.value ? ws.key.value : "",
+      web_search_limit: parseIntOrNull(ws.limit),
+      web_search_max_keyword: parseIntOrNull(ws.maxKeyword),
+      web_search_country: ws.country ? ws.country.value.trim() : "",
+      web_search_region: ws.region ? ws.region.value.trim() : "",
+      web_search_city: ws.city ? ws.city.value.trim() : "",
+    };
+    setSettingsStatus(status, "保存中…");
+    if (btn) btn.disabled = true;
+    try {
+      const result = await fetchJson("/api/config/llm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (ws.key) {
+        ws.key.value = "";
+        ws.key.placeholder = result.web_search_api_key_is_set
+          ? (result.web_search_api_key_preview || "已设置（留空保持不变）")
+          : "留空则复用主 API Key（仅当主 Provider=MiMo 时）";
+      }
+      if (ws.enabled && typeof result.web_search_enabled === "boolean") {
+        ws.enabled.checked = !!result.web_search_enabled;
+      }
+      if (ws.force && typeof result.web_search_force === "boolean") {
+        ws.force.checked = !!result.web_search_force;
+      }
+      if (ws.limit && typeof result.web_search_limit === "number") {
+        ws.limit.value = String(result.web_search_limit);
+      }
+      if (ws.maxKeyword && typeof result.web_search_max_keyword === "number") {
+        ws.maxKeyword.value = String(result.web_search_max_keyword);
+      }
+      setSettingsStatus(status, "已保存，下一条消息即生效。", "ok");
+    } catch (err) {
+      setSettingsStatus(status, `失败：${err.message}`, "error");
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -4934,7 +5365,8 @@
   }
 
   function bootSettingsPanes() {
-    // Provider change
+    // Provider change — apply the new provider's preset (Base URL,
+    // default_message_type if incompatible, default model/fast_model).
     const provEl = document.getElementById("cfg-llm-provider");
     if (provEl && !provEl._bound) {
       provEl._bound = true;
@@ -4944,7 +5376,26 @@
         if (baseEl) baseEl.dataset.autofilled = "1";
         const customValue = provEl.value === "custom" ? (customProvEl ? customProvEl.value : "") : "";
         syncCustomProviderField(provEl.value, customValue);
-        if (provEl.value !== "custom") applyProviderPreset(provEl.value);
+        applyProviderPreset(provEl.value, { source: "provider" });
+        refreshLlmFormatMismatchWarning();
+      });
+    }
+
+    // Message Type change — re-derive Base URL from the CURRENT
+    // provider paired with the new format.  This is what lets the user
+    // switch "OpenAI 兼容 ↔ Anthropic Messages" and have the Base URL
+    // follow automatically (MiMo is the canonical case, but OpenRouter
+    // and any other dual-protocol provider benefits for free).
+    const mtEl = document.getElementById("cfg-llm-message-type");
+    if (mtEl && !mtEl._bound) {
+      mtEl._bound = true;
+      mtEl.addEventListener("change", () => {
+        const curProvEl = document.getElementById("cfg-llm-provider");
+        const provider = curProvEl ? curProvEl.value : "";
+        if (provider && provider !== "custom") {
+          applyProviderPreset(provider, { source: "message_type" });
+        }
+        refreshLlmFormatMismatchWarning();
       });
     }
     const btnSave = document.getElementById("btn-cfg-llm-save");
@@ -4956,6 +5407,11 @@
     if (btnTest && !btnTest._bound) {
       btnTest._bound = true;
       btnTest.addEventListener("click", () => testLlmConfig());
+    }
+    const btnWebSearchSave = document.getElementById("btn-cfg-web-search-save");
+    if (btnWebSearchSave && !btnWebSearchSave._bound) {
+      btnWebSearchSave._bound = true;
+      btnWebSearchSave.addEventListener("click", () => saveWebSearchConfig());
     }
     // Persona file switches
     document.querySelectorAll(".persona-file").forEach((btn) => {

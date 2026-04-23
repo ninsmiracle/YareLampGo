@@ -1,0 +1,18 @@
+{
+  "skill_id": "welcome_home",
+  "label": "欢迎回家",
+  "description": "当主人到家时执行一段欢迎动作：先抬头看人，切换笑脸，再点头两下。",
+  "parameters": {
+    "mood": {
+      "type": "str",
+      "required": false,
+      "default": "smiley",
+      "description": "使用的 LED 表情名。"
+    }
+  },
+  "steps": [
+    { "skill_id": "look_at", "params": { "yaw": 0, "pitch": -20 } },
+    { "skill_id": "set_expression", "params": { "expression": "{mood}" } },
+    { "skill_id": "nod", "params": { "count": 2, "amplitude": 10 } }
+  ]
+}

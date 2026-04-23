@@ -167,6 +167,13 @@ class LLMConfig(BaseModel):
         "xiaomi": "mimo",
         "mi": "mimo",
         "gemini": "google",
+        # Migration: earlier builds briefly exposed `mimo-anthropic` as a
+        # separate provider preset.  That turned out to be wrong — the
+        # provider IS MiMo, what varies is just the message_type.  Users
+        # who saved the short-lived key get normalised back to `mimo`,
+        # and their persisted `message_type: "anthropic"` keeps them on
+        # the Anthropic endpoint automatically.
+        "mimo-anthropic": "mimo",
     }
 
     provider: str = Field(default="openai", description="LLM provider: openai, anthropic, gemini, local")
@@ -231,13 +238,61 @@ class LLMConfig(BaseModel):
             "运行时会从最旧消息开始裁剪。"
         ),
     )
-    web_search_enabled: bool = Field(default=True, description="Enable MiMo built-in web search when supported")
-    web_search_force: bool = Field(default=False, description="Force MiMo web search on every request")
-    web_search_limit: int = Field(default=3, ge=1, le=10, description="Max web pages used per MiMo web search")
-    web_search_max_keyword: int = Field(default=3, ge=1, le=10, description="Max keywords per MiMo web search")
-    web_search_country: str = Field(default="", description="Approximate country for MiMo web search")
-    web_search_region: str = Field(default="", description="Approximate region for MiMo web search")
-    web_search_city: str = Field(default="", description="Approximate city for MiMo web search")
+    # -------------------------------------------------------------------
+    # Web search — MiMo-only, implemented as an **independent sub-service**.
+    # -------------------------------------------------------------------
+    #
+    # Design note (important, read before touching):
+    #
+    # Web search is exposed to the agent as a plain ``function`` tool named
+    # ``web_search``.  The agent/runtime decides when to call it; the lamp
+    # itself executes each call by opening a **dedicated** HTTP connection
+    # to MiMo's OpenAI-compatible ``chat.completions`` endpoint and handing
+    # MiMo its **private** ``{"type":"web_search"}`` tool type.  That tool
+    # type does NOT exist on any other provider — not on OpenAI, not on
+    # Anthropic, not on real Anthropic's ``/v1/messages`` surface.
+    #
+    # Consequences of that design, encoded here:
+    #
+    # * Web search is always **MiMo OpenAI-compat wire format** regardless
+    #   of what the primary LLM ``provider`` / ``message_type`` is set to.
+    #   You can run the main loop against Anthropic / OpenAI / local Ollama
+    #   and still get web search, as long as the user provides a MiMo key.
+    # * Credentials are intentionally **separate** from ``api_key``.  If
+    #   ``web_search_api_key`` is empty we fall back to reusing ``api_key``
+    #   **only when** the main ``provider`` is ``mimo`` (i.e. that same key
+    #   is already known to be a MiMo key).  For any other provider the
+    #   user must supply a dedicated MiMo key or the feature stays off.
+    # * The base URL and model are deliberately **not** user-configurable:
+    #   the endpoint is fixed at ``https://api.xiaomimimo.com/v1`` and the
+    #   model at ``mimo-v2.5-pro`` (see ``MIMO_WEB_SEARCH_BASE_URL`` /
+    #   ``MIMO_WEB_SEARCH_MODEL`` in :mod:`lampgo.perception.llm_client`).
+    #   Exposing them as settings would invite users to break the feature
+    #   by pointing it at an endpoint that doesn't implement MiMo's private
+    #   tool type.
+    web_search_enabled: bool = Field(
+        default=True,
+        description=(
+            "启用独立的 MiMo 联网搜索子服务。关闭后 web_search 工具不会暴露给 LLM。"
+        ),
+    )
+    web_search_api_key: str = Field(
+        default="",
+        description=(
+            "MiMo 联网搜索专用 API key（OpenAI-compat）。留空时，若主 LLM provider=mimo "
+            "则自动复用 LLMConfig.api_key，否则本功能被静默禁用（不会注册 web_search 工具）。"
+            "与主 LLM key 一样，建议通过 credentials.json 持久化而不是写进 config 文件。"
+        ),
+    )
+    web_search_force: bool = Field(
+        default=False,
+        description="True = 对每次调用都强制 force_search；False = 交给模型自行判断。",
+    )
+    web_search_limit: int = Field(default=3, ge=1, le=10, description="单次联网搜索最多使用的网页数")
+    web_search_max_keyword: int = Field(default=3, ge=1, le=10, description="单次联网搜索最多使用的关键词数")
+    web_search_country: str = Field(default="", description="近似地理位置-国家（用于搜索结果本地化，可留空）")
+    web_search_region: str = Field(default="", description="近似地理位置-省/州（用于搜索结果本地化，可留空）")
+    web_search_city: str = Field(default="", description="近似地理位置-城市（用于搜索结果本地化，可留空）")
     max_agent_turns: int = Field(default=20, ge=1, le=50, description="Max LLM agent loop turns")
     max_agent_tool_calls: int = Field(default=50, ge=1, le=100, description="Max total tool calls per agent loop")
 
@@ -374,6 +429,10 @@ def load_config_with_provenance(
             if llm_key:
                 config.llm.api_key = llm_key
                 provenance["llm.api_key"] = "credentials"
+            ws_key = str(creds.get("llm_web_search_api_key") or "").strip()
+            if ws_key:
+                config.llm.web_search_api_key = ws_key
+                provenance["llm.web_search_api_key"] = "credentials"
     except Exception:
         # Never let a bad user file block startup.
         pass
@@ -438,6 +497,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_FAST_MODEL": ("llm", "fast_model"),
         "LAMPGO_LLM_TIMEOUT_S": ("llm", "timeout_s"),
         "LAMPGO_LLM_WEB_SEARCH_ENABLED": ("llm", "web_search_enabled"),
+        "LAMPGO_LLM_WEB_SEARCH_API_KEY": ("llm", "web_search_api_key"),
         "LAMPGO_LLM_WEB_SEARCH_FORCE": ("llm", "web_search_force"),
         "LAMPGO_LLM_WEB_SEARCH_LIMIT": ("llm", "web_search_limit"),
         "LAMPGO_LLM_WEB_SEARCH_MAX_KEYWORD": ("llm", "web_search_max_keyword"),

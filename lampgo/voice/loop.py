@@ -46,7 +46,6 @@ class VoiceLoop:
         else:
             self._tts = MiMoTTS(
                 api_key=cfg.llm.api_key,
-                api_base=cfg.llm.api_base,
                 voice=cfg.voice.tts_voice or "mimo_default",
                 style_prompt=cfg.voice.tts_style_prompt,
                 model=cfg.voice.tts_model,

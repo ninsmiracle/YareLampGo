@@ -179,7 +179,7 @@
         <div class="view-header">
           <div>
             <div class="view-title">技能</div>
-            <div class="view-subtitle">内置技能、录制动作与灯光表情</div>
+            <div class="view-subtitle">出厂技能（代码写死）、我的技能（AI 帮你新造）、录制动作与灯光表情</div>
           </div>
         </div>
 
@@ -187,16 +187,42 @@
           <div class="skill-section">
             <div class="skill-section-head">
               <div>
-                <div class="skill-section-title">内置技能</div>
-                <div class="skill-section-desc">服务端注册的确定性技能，可直接调用。</div>
+                <div class="skill-section-title">出厂技能</div>
+                <div class="skill-section-desc">
+                  Lampgo 自带、写在代码里的核心能力，你和 AI 助手都可以调用，但不能修改或删除。
+                </div>
               </div>
               <div class="skill-section-count" id="skill-count">0</div>
             </div>
             <div class="skill-section-search">
-              <input id="skill-search" type="search" class="skill-search-input" placeholder="搜索技能（名称 / 描述）" autocomplete="off" />
+              <input id="skill-search" type="search" class="skill-search-input" placeholder="搜索出厂技能（名称 / 描述）" autocomplete="off" />
               <button type="button" class="skill-search-clear" data-target="skill-search" aria-label="清空搜索">×</button>
             </div>
             <div id="skill-grid" class="skill-card-grid"></div>
+          </div>
+
+          <div class="skill-section">
+            <div class="skill-section-head">
+              <div>
+                <div class="skill-section-title">我的技能</div>
+                <div class="skill-section-desc">
+                  由 OpenClaw 或你自己新建的组合技能（串联若干出厂技能）。
+                  让 AI 说"帮我造一个'欢迎回家'技能"，它就会出现在这里；点击卡片上的 ✕ 可以删除。
+                </div>
+              </div>
+              <div class="skill-section-actions">
+                <button id="btn-user-skills-reload" class="ghost-button" type="button" title="从 ~/.lampgo/skills/user/ 重新加载">重新加载</button>
+                <div class="skill-section-count" id="user-skill-count">0</div>
+              </div>
+            </div>
+            <div class="skill-section-search">
+              <input id="user-skill-search" type="search" class="skill-search-input" placeholder="搜索我的技能（名称 / 描述）" autocomplete="off" />
+              <button type="button" class="skill-search-clear" data-target="user-skill-search" aria-label="清空搜索">×</button>
+            </div>
+            <div id="user-skill-grid" class="skill-card-grid"></div>
+            <div id="user-skill-empty" class="skill-section-empty hidden">
+              还没有"我的技能"。可以让 AI 说："帮我攒一个 [场景] 技能"，它会自动保存到这里。
+            </div>
           </div>
 
           <div class="skill-section">
@@ -245,14 +271,16 @@
       <section class="view hidden" data-view="openclaw">
         <div class="view-header">
           <div>
-            <div class="view-title">OpenClaw</div>
+            <div class="view-title-row">
+              <div class="view-title">OpenClaw</div>
+              <button id="btn-openclaw-health-details" class="device-chip is-clickable" type="button" title="查看连接详情">
+                <span class="device-chip-dot" id="oc-health-dot"></span>
+                <span class="device-chip-label">检测中…</span>
+              </button>
+            </div>
             <div class="view-subtitle">复杂任务的规划、沉淀与执行历史</div>
           </div>
           <div class="view-header-actions">
-            <button id="btn-openclaw-health-details" class="device-chip is-clickable" type="button" title="查看连接详情">
-              <span class="device-chip-dot" id="oc-health-dot"></span>
-              <span class="device-chip-label">检测中…</span>
-            </button>
             <button id="btn-refresh-openclaw" class="ghost-button" type="button">刷新</button>
           </div>
         </div>
@@ -360,6 +388,9 @@
                 <label class="settings-field">
                   <span class="settings-field-label">Base URL</span>
                   <input id="cfg-llm-base-url" class="settings-input" type="text" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off">
+                  <span class="settings-field-hint">
+                    切换 <b>Provider</b> 或 <b>消息格式</b> 时会自动填入对应的 Base URL。选择"自定义"时请自行填写完整前缀（OpenAI 会拼 <code>/chat/completions</code>，Anthropic 会拼 <code>/messages</code>）。
+                  </span>
                 </label>
 
                 <label class="settings-field">
@@ -386,7 +417,7 @@
                     <option value="openai">OpenAI 兼容（chat.completions）</option>
                     <option value="anthropic">Anthropic Messages</option>
                   </select>
-                  <span class="settings-field-hint">多数 Provider 选 OpenAI 兼容即可。</span>
+                  <span class="settings-field-hint">多数 Provider 选 OpenAI 兼容即可；切到 Anthropic 会自动把 Base URL 换成对应端点（<code>/v1/messages</code>），并自动翻译 system / tool_calls / 图像 data URL。<code>input_audio</code> 在 Anthropic 下会自动降级；<code>web_search</code> 作为独立子服务总是走 MiMo OpenAI-compat，不受消息格式影响（见下方"MiMo 联网搜索子服务"配置）。</span>
                 </label>
 
                 <label class="settings-field">
@@ -452,6 +483,91 @@
               </div>
             </div>
 
+            <!--
+              ==============================================================
+              MiMo 联网搜索子服务（与主 LLM 独立的一张 card）
+              ==============================================================
+              架构摘要：
+              · 暴露给 agent 的是一个名为 web_search 的普通 function tool；
+              · 命中时后端会**独立**发一条请求到 MiMo 的 OpenAI-compat
+                端点（api.xiaomimimo.com/v1/chat/completions），并附带
+                MiMo 私有的 {"type":"web_search"} tool type；
+              · 这意味着即便主 LLM 选了 Anthropic / OpenAI / Ollama，
+                联网搜索仍然走 MiMo。
+              API key 取用规则（见 lampgo/perception/llm_client.py
+              _resolve_web_search_api_key）：
+                1. 本卡片下方填了专用 key → 用它；
+                2. 没填，但上一张卡片 Provider=MiMo → 复用主 API Key；
+                3. 否则本功能静默禁用（web_search 工具不会注册给 agent）。
+              因为这一套逻辑独立于主 LLM，UI 上单独一张 card 也更直观。
+              ==============================================================
+            -->
+            <div class="settings-card">
+              <div class="settings-card-title">MiMo 联网搜索</div>
+              <div class="settings-card-desc">
+                独立子服务，总是走 MiMo OpenAI 兼容端点
+                <code>api.xiaomimimo.com/v1/chat/completions</code>。
+                不论上方主 LLM 选哪个 Provider / 消息格式，联网搜索都会单独调用 MiMo，
+                并对模型暴露成一个普通的 <code>web_search(query)</code> 函数工具。
+              </div>
+
+              <div class="settings-form">
+                <label class="settings-field">
+                  <span class="settings-field-label">
+                    <input id="cfg-llm-web-search-enabled" type="checkbox" style="margin-right:6px;"> 启用联网搜索
+                  </span>
+                  <span class="settings-field-hint">关闭后 agent 不会看到 <code>web_search</code> 工具，实时类问题会完全靠模型训练语料。</span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">MiMo 联网搜索 API Key</span>
+                  <input id="cfg-llm-web-search-api-key" class="settings-input" type="password" placeholder="留空则复用主 API Key（仅当主 Provider=MiMo 时）" autocomplete="new-password">
+                  <span class="settings-field-hint">
+                    · 若上方主 Provider 选 <b>MiMo</b>，此处可留空 → 自动复用主 API Key。<br>
+                    · 若上方是 OpenAI / Anthropic / 自定义 等非 MiMo Provider，<strong>必须</strong>在这里单独填一个 MiMo key，否则 <code>web_search</code> 工具不会注册到 agent。<br>
+                    · 该 key 保存在 <code>~/.lampgo/credentials.json</code>（权限 0600），不会写进 config 文件。
+                  </span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">
+                    <input id="cfg-llm-web-search-force" type="checkbox" style="margin-right:6px;"> 强制每次请求都联网（force_search）
+                  </span>
+                  <span class="settings-field-hint">关闭 = 由模型自行决定是否联网；开启 = 每次都抓网页，延迟更高但新鲜度更好。</span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">单次最多抓取网页数（limit）</span>
+                  <input id="cfg-llm-web-search-limit" class="settings-input" type="number" min="1" max="10" step="1" placeholder="3" autocomplete="off">
+                  <span class="settings-field-hint">MiMo 返回结果里最多参考多少条网页。值越大上下文越丰富，也越耗 token。</span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">单次最多关键词数（max_keyword）</span>
+                  <input id="cfg-llm-web-search-max-keyword" class="settings-input" type="number" min="1" max="10" step="1" placeholder="3" autocomplete="off">
+                  <span class="settings-field-hint">MiMo 从用户 query 里提炼的搜索关键词上限。</span>
+                </label>
+
+                <label class="settings-field">
+                  <span class="settings-field-label">近似地理位置（可选）</span>
+                  <div style="display:flex; gap:8px;">
+                    <input id="cfg-llm-web-search-country" class="settings-input" type="text" placeholder="Country（如 China）" autocomplete="off" style="flex:1;">
+                    <input id="cfg-llm-web-search-region" class="settings-input" type="text" placeholder="Region（如 Hubei）" autocomplete="off" style="flex:1;">
+                    <input id="cfg-llm-web-search-city" class="settings-input" type="text" placeholder="City（如 Wuhan）" autocomplete="off" style="flex:1;">
+                  </div>
+                  <span class="settings-field-hint">
+                    用于本地化搜索（比如"明天天气/周边咖啡馆"）。三项全空时不会给 MiMo 发 <code>user_location</code> 字段；
+                    任一非空就会连同发出。字段是<b>近似</b>的（省/市级即可），不涉及精确定位。
+                  </span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-web-search-status" class="settings-status" aria-live="polite"></span>
+                <button id="btn-cfg-web-search-save" class="send-button" type="button">保存联网搜索设置</button>
+              </div>
+            </div>
+
             <div class="settings-card">
               <div class="settings-card-title">语音链路</div>
               <div class="settings-card-desc">TTS 语音合成相关。大多数字段热改即可生效。</div>
@@ -464,8 +580,9 @@
                     <option value="edge-tts">edge-tts（微软 Edge，免费无 Key）</option>
                   </select>
                   <span class="settings-field-hint" data-cfg-tts-provider-hint>
-                    选择 <code>mimo</code> 时会复用「LLM」卡片里的 <code>api_key</code> + <code>api_base</code>，
-                    <b>必须是 xiaomimimo.com 的密钥</b>；选择 <code>edge-tts</code> 则完全本地调用，无需 Key。
+                    选择 <code>mimo</code> 时会复用「LLM」卡片里的 <code>api_key</code>（<b>必须是 xiaomimimo.com 的密钥</b>，否则 TTS 会 401）；
+                    Base URL 固定为 <code>https://api.xiaomimimo.com/v1</code>（OpenAI 兼容端点，不受主 LLM <code>api_base</code> 影响）。
+                    选择 <code>edge-tts</code> 则完全本地调用，无需 Key。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
                 </label>

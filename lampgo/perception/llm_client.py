@@ -13,11 +13,47 @@ from typing import Any
 import structlog
 
 from lampgo.core.config import CameraConfig, LLMConfig
+from lampgo.perception import anthropic_adapter
 from lampgo.perception.camera import CameraCapture
 
 logger = structlog.get_logger(__name__)
 
 MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash", "mimo-v2.5"}
+
+# -----------------------------------------------------------------------------
+# MiMo web search sub-service — always uses MiMo OpenAI-compat wire format.
+# -----------------------------------------------------------------------------
+#
+# Web search is a self-contained feature: the agent sees a plain function tool
+# named ``web_search``; when it calls that tool, we open a **dedicated** HTTP
+# connection to MiMo's OpenAI-compat endpoint and attach MiMo's private
+# ``{"type": "web_search"}`` tool.  Because MiMo's private tool type only
+# exists on this specific surface, the endpoint + model are hard-coded here
+# (same rationale as the TTS module).  See ``LLMConfig.web_search_*`` in
+# ``lampgo.core.config`` for the full design note.
+MIMO_WEB_SEARCH_BASE_URL = "https://api.xiaomimimo.com/v1"
+MIMO_WEB_SEARCH_MODEL = "mimo-v2.5-pro"
+
+
+def _resolve_web_search_api_key(config: LLMConfig) -> str:
+    """Return the MiMo-compatible API key for the web search sub-service.
+
+    Priority:
+      1. ``web_search_api_key`` if the user filled it in explicitly.
+      2. ``api_key`` ONLY if ``provider == "mimo"`` (same key is known to
+         authenticate against ``api.xiaomimimo.com``).
+      3. Empty string → sub-service disabled (tool won't be registered).
+
+    Keeping this a free function makes it easy to unit-test in isolation
+    and makes the reuse semantics explicit for future readers.
+    """
+    dedicated = (config.web_search_api_key or "").strip()
+    if dedicated:
+        return dedicated
+    provider = LLMConfig.normalize_provider_alias(config.provider or "")
+    if isinstance(provider, str) and provider.strip().lower() == "mimo":
+        return (config.api_key or "").strip()
+    return ""
 
 _MIMO_MIN_COMPLETION_TOKENS = 4096
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are lampgo, a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
@@ -270,7 +306,18 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
             },
         )
     )
-    if config.web_search_enabled and config.fast_model.strip().lower() in MIMO_WEB_SEARCH_MODELS:
+    # ``web_search`` is implemented as an **independent sub-service** that
+    # always talks to MiMo over OpenAI-compat — see ``_handle_web_search``
+    # and ``MIMO_WEB_SEARCH_BASE_URL``.  Because the sub-service is wire-
+    # format-independent of the primary LLM, we expose it as a plain
+    # function tool for every envelope (OpenAI AND Anthropic), provided:
+    #   * the user hasn't disabled it, AND
+    #   * we actually have a MiMo key to authenticate the sub-call with
+    #     (either a dedicated ``web_search_api_key`` OR the main ``api_key``
+    #     when ``provider == "mimo"``).
+    # If neither key source is available, surfacing the tool would only
+    # lead to 401s from MiMo, so keep it hidden.
+    if config.web_search_enabled and _resolve_web_search_api_key(config):
         tools.append(
             _build_function_tool(
                 "web_search",
@@ -373,7 +420,20 @@ class LLMClient:
         system_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
         user_content: Any = self._build_user_content(text, audio_data)
 
-        audio_model = "mimo-v2-omni" if audio_data else None
+        # Anthropic Messages API rejects ``input_audio`` parts and has no
+        # equivalent of MiMo's omni audio-in model; drop the override so
+        # turn-1 uses the configured ``fast_model`` and the adapter quietly
+        # strips the audio content.
+        audio_model = (
+            "mimo-v2-omni"
+            if (audio_data and not self._is_anthropic_message_type())
+            else None
+        )
+        if audio_data and self._is_anthropic_message_type():
+            logger.info(
+                "llm_client.audio_dropped_for_anthropic",
+                reason="message_type_anthropic_does_not_accept_input_audio",
+            )
 
         # Short-term conversation memory: inject the last N turns from the
         # current session between the system prompt and the new user turn.
@@ -678,7 +738,19 @@ class LLMClient:
 
         Uses MiMo ``thinking: {type: disabled}`` so the model skips deep-reasoning
         (no ``<redacted_thinking>``), faster first token for ASR-only calls.
+
+        This uses MiMo's OpenAI-compatible ``input_audio`` extension which
+        does not exist on the Anthropic ``/v1/messages`` endpoint — even
+        MiMo's own Anthropic-compat endpoint drops audio parts.  We refuse
+        early in that configuration so callers get a clear "no transcription"
+        signal instead of a 404.
         """
+        if self._is_anthropic_message_type():
+            logger.info(
+                "llm_client.transcribe_skipped",
+                reason="anthropic_message_type_does_not_support_input_audio",
+            )
+            return ""
         if not self._config.api_key:
             return ""
 
@@ -844,35 +916,110 @@ class LLMClient:
         }
 
     def _build_web_search_tools(self) -> list[dict[str, Any]]:
-        """Build MiMo-native web_search tool list for a dedicated search request."""
+        """Build the MiMo-native ``web_search`` tool payload for the sub-service.
+
+        Honours the config's ``web_search_force`` flag and attaches the
+        optional ``user_location`` block only when the user actually set
+        at least one of country/region/city (MiMo is picky about empty
+        fields inside ``user_location``).
+        """
         tool: dict[str, Any] = {
             "type": "web_search",
             "max_keyword": self._config.web_search_max_keyword,
-            "force_search": True,
+            "force_search": bool(self._config.web_search_force),
             "limit": self._config.web_search_limit,
         }
-        location = {
-            "type": "approximate",
-            "country": self._config.web_search_country,
-            "region": self._config.web_search_region,
-            "city": self._config.web_search_city,
-        }
-        if any((self._config.web_search_country, self._config.web_search_region, self._config.web_search_city)):
-            tool["user_location"] = location
+        if any(
+            (
+                self._config.web_search_country,
+                self._config.web_search_region,
+                self._config.web_search_city,
+            )
+        ):
+            tool["user_location"] = {
+                "type": "approximate",
+                "country": self._config.web_search_country,
+                "region": self._config.web_search_region,
+                "city": self._config.web_search_city,
+            }
         return [tool]
 
     async def _handle_web_search(self, query: str) -> dict[str, Any]:
-        """Perform web search via a dedicated MiMo API call with only the web_search tool."""
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": query},
-        ]
-        data = await self._chat_completion(
-            messages=messages,
-            tools=self._build_web_search_tools(),
-            log_name="llm_client.web_search",
-            log_context={"query": query},
+        """Execute one web_search call via the dedicated MiMo sub-service.
+
+        Critically, this method is **independent** of the primary LLM's
+        ``provider`` / ``message_type`` / ``api_base``.  It always opens a
+        fresh HTTP connection to ``MIMO_WEB_SEARCH_BASE_URL`` and speaks
+        MiMo's OpenAI-compat wire protocol, because MiMo's
+        ``{"type": "web_search"}`` tool type only exists on that surface.
+        The main agent can be running against Anthropic / OpenAI / local
+        Ollama and this still works — provided the user supplied a MiMo
+        key (see :func:`_resolve_web_search_api_key`).
+        """
+        api_key = _resolve_web_search_api_key(self._config)
+        if not api_key:
+            return {
+                "ok": False,
+                "status": "error",
+                "result": None,
+                "error": "web_search_no_mimo_api_key",
+            }
+
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("llm_client.no_httpx", msg="Install httpx for LLM support")
+            return {
+                "ok": False,
+                "status": "error",
+                "result": None,
+                "error": "httpx_not_installed",
+            }
+
+        body: dict[str, Any] = {
+            "model": MIMO_WEB_SEARCH_MODEL,
+            "messages": [{"role": "user", "content": query}],
+            "tools": self._build_web_search_tools(),
+            "max_completion_tokens": max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS),
+            "temperature": self._config.temperature,
+            "top_p": 0.95,
+            "stream": False,
+            "thinking": {"type": "disabled"},
+        }
+        # Send both auth header variants so we work against both the
+        # OpenAI-compat Bearer convention and MiMo's legacy ``api-key``
+        # header documented in their cookbook.
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "api-key": api_key,
+            "Content-Type": "application/json",
+        }
+        url = f"{MIMO_WEB_SEARCH_BASE_URL}/chat/completions"
+        logger.info(
+            "llm_client.web_search",
+            query=query,
+            api_base=MIMO_WEB_SEARCH_BASE_URL,
+            model=MIMO_WEB_SEARCH_MODEL,
         )
-        if data is None:
+        try:
+            async with httpx.AsyncClient(timeout=self._config.timeout_s) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                "llm_client.web_search_failed",
+                status_code=exc.response.status_code,
+                response_text=exc.response.text[:1000],
+            )
+            return {
+                "ok": False,
+                "status": "error",
+                "result": None,
+                "error": f"web_search_http_{exc.response.status_code}",
+            }
+        except Exception:
+            logger.exception("llm_client.web_search_failed", timeout_s=self._config.timeout_s)
             return {"ok": False, "status": "error", "result": None, "error": "web_search_request_failed"}
 
         message = self._extract_message(data)
@@ -881,6 +1028,14 @@ class LLMClient:
             logger.info("llm_client.web_search_result", preview=content[:200])
             return {"ok": True, "status": "ok", "result": {"answer": content}, "error": None}
         return {"ok": False, "status": "error", "result": None, "error": "web_search_empty_response"}
+
+    def _is_anthropic_message_type(self) -> bool:
+        """Config says we must speak Anthropic ``/v1/messages`` instead of
+        OpenAI ``chat.completions``.  Kept as a method (not a cached property)
+        because ``self._config`` is swapped live when the user re-saves the
+        LLM settings from the UI and we don't want stale dispatch.
+        """
+        return (self._config.message_type or "openai").strip().lower() == "anthropic"
 
     async def _chat_completion(
         self,
@@ -891,6 +1046,16 @@ class LLMClient:
         tool_choice: str | dict[str, Any] = "auto",
         model_override: str | None = None,
     ) -> dict[str, Any] | None:
+        if self._is_anthropic_message_type():
+            return await self._chat_completion_anthropic(
+                messages=messages,
+                tools=tools,
+                log_name=log_name,
+                log_context=log_context,
+                tool_choice=tool_choice,
+                model_override=model_override,
+            )
+
         if not self._config.api_key:
             return None
 
@@ -937,6 +1102,81 @@ class LLMClient:
             logger.exception("llm_client.request_failed", timeout_s=self._config.timeout_s)
             return None
 
+    async def _chat_completion_anthropic(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        log_name: str,
+        log_context: dict[str, Any] | None,
+        tool_choice: str | dict[str, Any],
+        model_override: str | None,
+    ) -> dict[str, Any] | None:
+        """Non-streaming Anthropic Messages API path.
+
+        Returns the same ``{"choices": [{"message": {...}}]}`` shape the
+        OpenAI path produces so that :meth:`_extract_message` keeps working
+        without branching.  The inner message is already translated to our
+        canonical ``{content, tool_calls?, reasoning_content?}`` form by
+        :func:`anthropic_adapter.anthropic_response_to_openai_message`.
+        """
+        if not self._config.api_key:
+            return None
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("llm_client.no_httpx", msg="Install httpx for LLM support")
+            return None
+
+        model = model_override or self._config.fast_model
+        request_messages = self._prepare_messages_for_request(messages)
+        body = anthropic_adapter.build_request_body(
+            model=model,
+            openai_messages=request_messages,
+            openai_tools=tools,
+            openai_tool_choice=tool_choice,
+            max_tokens=max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
+            if model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+            else self._config.max_tokens,
+            temperature=self._config.temperature,
+            stream=False,
+        )
+        headers = anthropic_adapter.build_request_headers(self._config.api_key)
+        logger.info(
+            log_name,
+            model=model,
+            api_base=self._api_base,
+            message_type="anthropic",
+            **(log_context or {}),
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._config.timeout_s) as client:
+                resp = await client.post(
+                    f"{self._api_base}/messages", json=body, headers=headers
+                )
+                resp.raise_for_status()
+                raw = resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                "llm_client.request_failed",
+                status_code=exc.response.status_code,
+                response_text=exc.response.text[:1000],
+                message_type="anthropic",
+            )
+            return None
+        except Exception:
+            logger.exception(
+                "llm_client.request_failed",
+                timeout_s=self._config.timeout_s,
+                message_type="anthropic",
+            )
+            return None
+
+        msg = anthropic_adapter.anthropic_response_to_openai_message(raw)
+        # Wrap in OpenAI-shaped response so _extract_message(data) keeps
+        # returning the message dict unchanged.
+        return {"choices": [{"message": msg}]}
+
     async def _stream_chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -954,6 +1194,18 @@ class LLMClient:
         or *None* on failure.  ``reasoning_content`` and ``content`` token
         deltas are forwarded to the caller in real-time via the callbacks.
         """
+        if self._is_anthropic_message_type():
+            return await self._stream_chat_completion_anthropic(
+                messages=messages,
+                tools=tools,
+                log_name=log_name,
+                log_context=log_context,
+                tool_choice=tool_choice,
+                model_override=model_override,
+                on_reasoning_delta=on_reasoning_delta,
+                on_content_delta=on_content_delta,
+            )
+
         if not self._config.api_key:
             return None
 
@@ -1075,6 +1327,113 @@ class LLMClient:
         else:
             logger.debug("llm_client.stream_done", finish_reason=finish_reason)
 
+        return message
+
+    async def _stream_chat_completion_anthropic(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        log_name: str,
+        log_context: dict[str, Any] | None,
+        tool_choice: str | dict[str, Any],
+        model_override: str | None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None,
+        on_content_delta: Callable[[str], Awaitable[None]] | None,
+    ) -> dict[str, Any] | None:
+        """Streaming Anthropic ``/v1/messages`` path.
+
+        Parses Anthropic SSE events via :class:`AnthropicStreamAccumulator`
+        and returns the same canonical OpenAI-shaped message dict our agent
+        loop expects — so the rest of this class doesn't need to know which
+        provider actually replied.
+        """
+        if not self._config.api_key:
+            return None
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("llm_client.no_httpx")
+            return None
+
+        model = model_override or self._config.fast_model
+        request_messages = self._prepare_messages_for_request(messages)
+        body = anthropic_adapter.build_request_body(
+            model=model,
+            openai_messages=request_messages,
+            openai_tools=tools,
+            openai_tool_choice=tool_choice,
+            max_tokens=max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
+            if model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+            else self._config.max_tokens,
+            temperature=self._config.temperature,
+            stream=True,
+        )
+        headers = anthropic_adapter.build_request_headers(self._config.api_key)
+        logger.info(
+            log_name,
+            model=model,
+            stream=True,
+            message_type="anthropic",
+            **(log_context or {}),
+        )
+
+        accumulator = anthropic_adapter.AnthropicStreamAccumulator(
+            on_reasoning_delta=on_reasoning_delta,
+            on_content_delta=on_content_delta,
+        )
+        try:
+            timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self._api_base}/messages",
+                    json=body,
+                    headers=headers,
+                ) as resp:
+                    resp.raise_for_status()
+                    async for event in anthropic_adapter.iter_sse_events(
+                        resp.aiter_lines()
+                    ):
+                        await accumulator.consume_event(event.event, event.data)
+                        if accumulator.error:
+                            # Anthropic emitted a fatal ``event: error`` —
+                            # bail rather than wait for the stream to close
+                            # on its own.
+                            logger.warning(
+                                "llm_client.stream_anthropic_error",
+                                error=accumulator.error,
+                            )
+                            return None
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                "llm_client.stream_failed",
+                status_code=exc.response.status_code,
+                message_type="anthropic",
+            )
+            return None
+        except Exception:
+            logger.exception(
+                "llm_client.stream_failed", message_type="anthropic"
+            )
+            return None
+
+        message = accumulator.finalize()
+        if message.get("_finish_reason") == "length":
+            logger.warning(
+                "llm_client.stream_truncated",
+                finish_reason="length",
+                content_tokens=len(message.get("content", "")),
+                has_tool_calls=bool(message.get("tool_calls")),
+                max_tokens=body.get("max_tokens"),
+                message_type="anthropic",
+            )
+        else:
+            logger.debug(
+                "llm_client.stream_done",
+                finish_reason=message.get("_finish_reason"),
+                message_type="anthropic",
+            )
         return message
 
     @staticmethod

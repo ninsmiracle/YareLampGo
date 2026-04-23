@@ -223,6 +223,222 @@ const plugin: OpenClawPluginModule = {
       },
     });
 
+    // ------------------------------------------------------------------
+    // User-authored composed skills
+    // ------------------------------------------------------------------
+    // These three tools let OpenClaw crystallise a *new skill* (not just a
+    // motion recording) into lampgo's registry.  The saved definition is a
+    // JSON sequence of existing factory skills — OpenClaw reads what's
+    // available via lampgo_status / GET /api/skills, drafts the sequence,
+    // writes it through lampgo_save_skill, and from the next turn onward
+    // that skill appears to the fast-path LLM agent and the Web UI as a
+    // first-class skill alongside factory built-ins.
+    //
+    // Safety rails are enforced on the lampgo side (see
+    // ``lampgo/skills/loader.py``):
+    //   • skill_id may not shadow a factory skill
+    //   • each step.skill_id must reference a factory skill (no
+    //     composed-calls-composed — eliminates recursion risk)
+    //   • ``estop`` is never allowed in a step
+    //   • total step count is capped (default 20)
+    //
+    // Design note: we deliberately expose `lampgo_save_skill` as a single
+    // upsert (not separate create/update) — OpenClaw's reasoning does
+    // better when it doesn't have to pre-check existence.  The "updated"
+    // flag in the response tells downstream UI whether the call edited
+    // an existing skill or created a fresh one.
+
+    api.registerTool({
+      name: "lampgo_save_skill",
+      label: "Save lampgo composed skill",
+      description:
+        "Create or update a user composed skill in lampgo.  A skill is an ordered list of steps; " +
+        "each step is either (a) a call to an existing factory skill, or (b) a custom joint-trajectory " +
+        "described by keyframes.  Once saved, the skill appears in lampgo's skill registry and the Web " +
+        "UI's '我的技能' section immediately — no daemon restart needed.  " +
+        "Call this when the user asks for a repeatable routine or 'teach me a new trick'-style request.\n\n" +
+        "STEP SHAPES — each step object has *exactly one* of:\n" +
+        "  • `skill_id` (+ optional `params`): invoke a factory skill.  Factory ids: move_to, nod, headshake, " +
+        "look_at, idle_sway, dance, set_expression, play_recording, return_safe.  (`estop` is forbidden.)  " +
+        "String params support `{placeholder}` substitution from the outer skill's declared parameters.\n" +
+        "  • `trajectory`: play a custom keyframe sequence.  Use this ONLY when no factory skill matches " +
+        "the motion shape — e.g. a weird bobbing pattern, a pose the robot should hold, or a choreo that " +
+        "mixes multiple joints in a way nod/dance/etc. can't express.  Prefer factory-skill steps when " +
+        "they suffice: they encode carefully tuned velocity/ease profiles.\n\n" +
+        "TRAJECTORY SAFETY — each waypoint joint value must be within hardware limits: " +
+        "base_yaw ∈ [-150, 150], base_pitch ∈ [-100, 65], elbow_pitch ∈ [-90, 100], " +
+        "wrist_roll ∈ [-75, 75], wrist_pitch ∈ [-45, 100].  Values outside these ranges make the save fail.  " +
+        "Segment durations that would require unsafe joint velocity are auto-extended at runtime (not rejected).  " +
+        "Interpolation is whitelisted: linear, ease_in_out_cubic (default), ease_in_out_quad, ease_out_cubic, " +
+        "ease_in_cubic, ease_out_back.  Caps: ≤ 50 waypoints, ≤ 30 s total duration, fps ∈ [10, 100].\n\n" +
+        "`skill_id` must match /^[a-z][a-z0-9_]{0,63}$/ and may NOT collide with a factory skill.",
+      parameters: Type.Object({
+        skill_id: Type.String({
+          description: "Unique identifier, lowercase alphanumeric + underscore (e.g. welcome_home).",
+        }),
+        label: Type.Optional(
+          Type.String({ description: "Chinese display name shown in the Web UI (e.g. '欢迎回家')." }),
+        ),
+        description: Type.String({
+          description: "One-line summary — surfaced to the fast-path LLM agent as the skill's tool description.",
+        }),
+        parameters: Type.Optional(
+          Type.Record(
+            Type.String(),
+            Type.Object({
+              type: Type.String({ description: "One of: str | int | float | bool." }),
+              description: Type.Optional(Type.String()),
+              required: Type.Optional(Type.Boolean()),
+              default: Type.Optional(Type.Any()),
+            }),
+            { description: "Outer parameters exposed to callers (optional)." },
+          ),
+        ),
+        steps: Type.Array(
+          Type.Object({
+            // Both keys are optional in the TypeBox schema — the server-side
+            // validator enforces "exactly one of skill_id / trajectory" and
+            // returns a structured error if both or neither are present.
+            skill_id: Type.Optional(
+              Type.String({
+                description:
+                  "Factory skill to invoke (nod, move_to, set_expression, …).  Mutually exclusive with `trajectory`.",
+              }),
+            ),
+            params: Type.Optional(
+              Type.Record(Type.String(), Type.Any(), {
+                description:
+                  "Params for the factory skill; strings may use {placeholder} to reference outer params.",
+              }),
+            ),
+            trajectory: Type.Optional(
+              Type.Object(
+                {
+                  waypoints: Type.Array(
+                    Type.Object({
+                      joints: Type.Record(Type.String(), Type.Number(), {
+                        description:
+                          "Target joint angles in degrees.  Unspecified joints hold their previous value " +
+                          "(for the first waypoint: the robot's current live pose).",
+                      }),
+                      duration: Type.Optional(
+                        Type.Number({
+                          description:
+                            "Seconds to travel from the PREVIOUS waypoint to this one.  " +
+                            "Ignored on the first waypoint (it's the starting pose).  ≥ 0.",
+                        }),
+                      ),
+                    }),
+                    {
+                      description:
+                        "Ordered keyframes (≥ 2, ≤ 50).  First is the starting pose; each subsequent one " +
+                        "is a target the robot eases into over `duration` seconds.",
+                    },
+                  ),
+                  fps: Type.Optional(
+                    Type.Integer({
+                      description:
+                        "Frame streaming rate in Hz.  Default 50; valid range [10, 100].  " +
+                        "Higher = smoother but more bus traffic.",
+                    }),
+                  ),
+                  interpolation: Type.Optional(
+                    Type.String({
+                      description:
+                        "Easing function between waypoints.  One of: linear | ease_in_out_cubic (default) | " +
+                        "ease_in_out_quad | ease_out_cubic | ease_in_cubic | ease_out_back.",
+                    }),
+                  ),
+                  ease_overshoot: Type.Optional(
+                    Type.Number({
+                      description:
+                        "Overshoot factor for ease_out_back ∈ [0.0, 0.5], default 0.10.  Ignored for other eases.",
+                    }),
+                  ),
+                },
+                {
+                  description:
+                    "Custom joint-trajectory step.  Use only when no factory skill matches the motion shape. " +
+                    "Mutually exclusive with `skill_id`.",
+                },
+              ),
+            ),
+          }),
+          { description: "Ordered step list — executed sequentially, aborts on first error." },
+        ),
+        overwrite: Type.Optional(
+          Type.Boolean({ description: "Default true; set false to fail fast when skill_id already exists." }),
+        ),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const definition: Record<string, unknown> = {
+          skill_id: params.skill_id,
+          description: params.description,
+          steps: params.steps,
+        };
+        if (params.label !== undefined) definition.label = params.label;
+        if (params.parameters !== undefined) definition.parameters = params.parameters;
+
+        const result = await postJson<{
+          ok: boolean;
+          result?: { skill_id: string; path: string; updated: boolean; reason?: string };
+          error?: string;
+        }>(`${base}/api/skills/save`, {
+          definition,
+          overwrite: params.overwrite ?? true,
+        });
+        if (!result.ok) {
+          throw new Error(result.error || "save skill failed");
+        }
+        const r = result.result!;
+        return toolOk(
+          `${r.updated ? "Updated" : "Created"} skill '${r.skill_id}' at ${r.path}.\n` +
+            `It is now registered and callable via lampgo's standard invoke path.`,
+        );
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_delete_skill",
+      label: "Delete lampgo composed skill",
+      description:
+        "Remove a user-authored composed skill.  Factory skills cannot be deleted (the server rejects the call). " +
+        "Use this when the user explicitly asks to drop a skill they previously had you create.",
+      parameters: Type.Object({
+        skill_id: Type.String({ description: "Identifier of the user skill to remove." }),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const result = await postJson<{
+          ok: boolean;
+          result?: { skill_id: string; file_removed: boolean; reason?: string };
+          error?: string;
+        }>(`${base}/api/skills/delete`, { skill_id: params.skill_id });
+        if (!result.ok) throw new Error(result.error || "delete skill failed");
+        const r = result.result!;
+        return toolOk(
+          `Deleted skill '${r.skill_id}'${r.file_removed ? " (file removed)" : " (file was already missing)"}.`,
+        );
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_list_skills",
+      label: "List lampgo skills",
+      description:
+        "Return the full lampgo skill registry with provenance (`source: factory | user`), description, " +
+        "and parameter schema for each skill.  Call this *before* `lampgo_save_skill` so you know which " +
+        "factory skills are available as step primitives — their `skill_id` values are the only values " +
+        "allowed inside `steps[*].skill_id`.",
+      parameters: Type.Object({}),
+      async execute() {
+        const base = getBase();
+        const data = await getJson<unknown>(`${base}/api/skills`);
+        return toolOk(JSON.stringify(data, null, 2));
+      },
+    });
+
     api.registerTool({
       name: "lampgo_get_persona",
       label: "Read lampgo persona",
