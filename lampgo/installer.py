@@ -146,9 +146,10 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "mimo": {
         "label": "MiMo（小米）",
         "base_url": "https://api.xiaomimimo.com/v1",
-        "default_model": "mimo-v2-omni",
-        # mimo-v2-pro 是非推理对话模型，作为 fast_model 更合适（见 gateway.py）
-        "default_fast_model": "mimo-v2-pro",
+        # mimo-v2.5：新一代通用模型，主模型 & fast_model 共用一个。
+        # 如需分工见 gateway.py PROVIDER_PRESETS 的注释。
+        "default_model": "mimo-v2.5",
+        "default_fast_model": "mimo-v2.5",
         "message_type": "openai",
     },
     "openrouter": {

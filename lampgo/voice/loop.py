@@ -49,6 +49,7 @@ class VoiceLoop:
                 api_base=cfg.llm.api_base,
                 voice=cfg.voice.tts_voice or "mimo_default",
                 style_prompt=cfg.voice.tts_style_prompt,
+                model=cfg.voice.tts_model,
             )
             self._stream_tts = True
 

@@ -69,6 +69,52 @@ def _coerce_value(current: Any, value: Any) -> Any:
     return value
 
 
+# Max bytes of history we accept from the browser per request. The UI caps
+# history_turns at 200 (= 400 messages), but we still want a hard wall so a
+# malicious or buggy client can't push MB-scale blobs through the socket.
+_MAX_HISTORY_BYTES = 256 * 1024
+_MAX_HISTORY_ITEMS = 400
+
+
+def _sanitize_chat_history(raw: Any) -> list[dict[str, str]]:
+    """Normalize a chat-history payload from the frontend into a safe list of
+    ``{role, content}`` dicts for the LLM prompt.
+
+    The browser sends this alongside each /api/text and /api/audio call so the
+    agent loop can see the last N turns of the current session (see
+    LLMConfig.history_turns). We can't trust it blindly:
+
+    * Only ``user`` and ``assistant`` roles are forwarded — system prompts
+      stay server-owned.
+    * Empty or non-string content is dropped.
+    * The whole payload is capped in item count and total bytes so a runaway
+      client can't bloat prompt tokens or spike request latency.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    total_bytes = 0
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = entry.get("content")
+        if not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        total_bytes += len(text.encode("utf-8", errors="replace"))
+        if total_bytes > _MAX_HISTORY_BYTES:
+            break
+        out.append({"role": role, "content": text})
+        if len(out) >= _MAX_HISTORY_ITEMS:
+            break
+    return out
+
+
 class WebGateway:
     """HTTP + WebSocket gateway that wraps a LampgoServer."""
 
@@ -174,7 +220,10 @@ class WebGateway:
         request_id = body.get("request_id", uuid.uuid4().hex[:12])
         await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
 
-        result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id})
+        history = _sanitize_chat_history(body.get("history"))
+        result = await self.server.handle_request(
+            {"cmd": "text", "input": text, "request_id": request_id, "history": history}
+        )
 
         intent_type = result.get("result", {}).get("type", "unknown")
         skill_id = result.get("result", {}).get("skill_id")
@@ -417,11 +466,12 @@ class WebGateway:
         "mimo": {
             "label": "MiMo（小米）",
             "base_url": "https://api.xiaomimimo.com/v1",
-            "default_model": "mimo-v2-omni",
-            # mimo-v2-pro：非推理的对话模型，更适合"记忆总结/意图分类"这类
-            # 轻量短输出任务。mimo-v2-omni 是推理模型，会把预算全花在 reasoning
-            # 上导致正式 content 空返（参见 _summarize_messages 里的注释）。
-            "default_fast_model": "mimo-v2-pro",
+            # mimo-v2.5：通用新一代模型，同时作为 agent 主模型和 fast_model（摘要/意图）。
+            # 如需分工：主模型可选 mimo-v2-omni（强推理），fast_model 建议保持非推理模型
+            # （mimo-v2.5 / mimo-v2-pro），避免推理模型把预算花在思考链上导致空返
+            # （参见 _summarize_messages 里的注释）。
+            "default_model": "mimo-v2.5",
+            "default_fast_model": "mimo-v2.5",
             "message_type": "openai",
         },
         "openrouter": {
@@ -516,6 +566,7 @@ class WebGateway:
         ),
         "voice": (
             "voice.tts_provider",
+            "voice.tts_model",
             "voice.tts_voice",
             "voice.mic_device",
             "camera.port",
@@ -762,6 +813,8 @@ class WebGateway:
                         "summary_max_tokens": cfg.summary_max_tokens,
                         "context_window": cfg.context_window,
                         "temperature": cfg.temperature,
+                        "timeout_s": cfg.timeout_s,
+                        "history_turns": cfg.history_turns,
                         "share_openclaw_memory": share_memory,
                         "provider_presets": self._PROVIDER_PRESETS,
                     },
@@ -785,6 +838,8 @@ class WebGateway:
                     "summary_max_tokens",
                     "context_window",
                     "temperature",
+                    "timeout_s",
+                    "history_turns",
                 )
             )
         ):
@@ -826,6 +881,15 @@ class WebGateway:
                 return float(fallback)
             return max(0.0, min(2.0, v))
 
+        def _coerce_timeout(raw: Any, fallback: float) -> float:
+            if raw is None or raw == "":
+                return float(fallback)
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                return float(fallback)
+            return max(5.0, min(600.0, v))
+
         current_llm = self.server.config.llm
         max_tokens_val = _coerce_positive_int(body.get("max_tokens"), current_llm.max_tokens)
         summary_max_tokens_val = _coerce_positive_int(
@@ -835,6 +899,20 @@ class WebGateway:
             body.get("context_window"), current_llm.context_window
         )
         temperature_val = _coerce_temperature(body.get("temperature"), current_llm.temperature)
+        timeout_s_val = _coerce_timeout(body.get("timeout_s"), current_llm.timeout_s)
+
+        def _coerce_history_turns(raw: Any, fallback: int) -> int:
+            if raw is None or raw == "":
+                return int(fallback)
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return int(fallback)
+            return max(0, min(200, v))
+
+        history_turns_val = _coerce_history_turns(
+            body.get("history_turns"), current_llm.history_turns
+        )
 
         if api_key == "":
             # empty string is a no-op (keep existing); client sends new key only when rotating.
@@ -868,6 +946,8 @@ class WebGateway:
                 "summary_max_tokens": summary_max_tokens_val,
                 "context_window": context_window_val,
                 "temperature": temperature_val,
+                "timeout_s": timeout_s_val,
+                "history_turns": history_turns_val,
             },
         }
         if share_memory is not None:
@@ -898,6 +978,8 @@ class WebGateway:
         cfg.llm.summary_max_tokens = summary_max_tokens_val
         cfg.llm.context_window = context_window_val
         cfg.llm.temperature = temperature_val
+        cfg.llm.timeout_s = timeout_s_val
+        cfg.llm.history_turns = history_turns_val
         if share_memory is not None:
             cfg.share_openclaw_memory = bool(share_memory)
 
@@ -926,6 +1008,8 @@ class WebGateway:
                     "summary_max_tokens": summary_max_tokens_val,
                     "context_window": context_window_val,
                     "temperature": temperature_val,
+                    "timeout_s": timeout_s_val,
+                    "history_turns": history_turns_val,
                     "api_key_preview": personastore.mask_api_key(effective_key),
                     "api_key_is_set": bool(effective_key),
                     "share_openclaw_memory": bool(cfg.share_openclaw_memory),
@@ -1460,7 +1544,10 @@ class WebGateway:
 
             try:
                 await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
-                result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id})
+                history = _sanitize_chat_history(msg.get("history"))
+                result = await self.server.handle_request(
+                    {"cmd": "text", "input": text, "request_id": request_id, "history": history}
+                )
 
                 intent_type = result.get("result", {}).get("type", "unknown")
                 skill_id = result.get("result", {}).get("skill_id")
@@ -1491,7 +1578,15 @@ class WebGateway:
                 return
 
             try:
-                result = await self.server.handle_request({"cmd": "audio", "audio_data": audio_data, "request_id": request_id})
+                history = _sanitize_chat_history(msg.get("history"))
+                result = await self.server.handle_request(
+                    {
+                        "cmd": "audio",
+                        "audio_data": audio_data,
+                        "request_id": request_id,
+                        "history": history,
+                    }
+                )
                 result["request_id"] = request_id
                 await ws.send_json(result)
             except asyncio.CancelledError:

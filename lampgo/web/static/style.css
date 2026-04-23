@@ -1567,6 +1567,13 @@ button.device-chip.is-active {
   animation: route-pulse 1.2s ease-in-out infinite;
 }
 
+/* 兜底：activity-log 一旦 finalized，路由节点脉冲必须停。
+   防止 JS 路径没把 is-active 降级时，用户看到一个已结束对话里还在闪的 LLM Agent 标签。 */
+.activity-log.is-finalized .route-node.is-active::before {
+  animation: none;
+  opacity: 0.7;
+}
+
 .route-node.is-done {
   background: rgba(125, 180, 146, 0.10);
   color: #3c7a55;
@@ -2596,6 +2603,9 @@ button.device-chip.is-active {
 
 .event-item {
   display: block;
+  /* flex-shrink: 0 防止在 .event-log(flex column) 里被压缩成 2px 只剩边框。
+     事件多时应由 .event-log 自己 overflow-y 滚动，而不是让子项坍缩。 */
+  flex: 0 0 auto;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface-soft, rgba(0, 0, 0, 0.02));
@@ -3000,6 +3010,20 @@ section.view[data-view="settings"] .view-header {
   outline: none;
   border-color: #de9388;
   box-shadow: 0 0 0 3px rgba(222, 147, 136, 0.15);
+}
+
+/* Visual cue for inputs that are currently non-applicable because another
+   field selected a different mode (e.g. voice.tts_model while tts_provider
+   is edge-tts). The `disabled` attribute is what actually gates submission;
+   this rule just makes the "why is this grayed out" answer self-evident. */
+.settings-input:disabled {
+  background: #f6f1ec;
+  color: #a1998f;
+  cursor: not-allowed;
+}
+
+.settings-field.is-disabled .settings-field-hint {
+  opacity: 0.65;
 }
 
 .settings-textarea {
