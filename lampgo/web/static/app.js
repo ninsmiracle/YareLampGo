@@ -1710,7 +1710,14 @@
     popover.innerHTML = parts.join("");
     const listEl = popover.querySelector(".device-popover-list");
     if (!listEl) return;
+    let prevGroup = undefined;
     items.forEach((item) => {
+      if (item.group !== undefined && prevGroup !== undefined && item.group !== prevGroup) {
+        const hr = document.createElement("hr");
+        hr.className = "device-popover-sep";
+        listEl.appendChild(hr);
+      }
+      prevGroup = item.group;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "device-popover-item";
@@ -1772,16 +1779,21 @@
   function renderMicPopover() {
     if (!micPopoverEl) return;
     const granted = micDevicesCache.some((d) => d.label);
+    const esp = cameraCache.esp32;
+    const espOnline = esp && esp.online;
+    const espHost = (esp && esp.host) || "";
     const items = [
-      { id: "", label: "系统默认麦克风", meta: "跟随浏览器/操作系统设置" },
+      { id: "", label: "系统默认麦克风", meta: "跟随浏览器/操作系统设置", group: "browser" },
+      { id: "esp32", label: "ESP32 无线麦克风", meta: espOnline ? `${espHost} · 在线` : "离线", group: "esp32" },
       ...micDevicesCache.map((d, i) => ({
         id: d.deviceId,
         label: d.label || `麦克风 ${d.deviceId.slice(0, 8) || i + 1}`,
         meta: d.deviceId ? d.deviceId.slice(0, 24) + (d.deviceId.length > 24 ? "…" : "") : "",
+        group: "browser",
       })),
     ];
     const subtitle = granted
-      ? `检测到 ${micDevicesCache.length} 个输入设备`
+      ? `检测到 ${micDevicesCache.length} 个本地 + ESP32`
       : "设备名称需要麦克风授权后显示";
     renderDevicePopover(micPopoverEl, {
       title: "麦克风输入",
@@ -1814,8 +1826,12 @@
       else localStorage.removeItem(MIC_DEVICE_KEY);
     } catch (_) { /* ignore */ }
     window.dispatchEvent(new CustomEvent("lampgo:mic-selected", { detail: { deviceId: preferredMicId } }));
-    const selected = micDevicesCache.find((d) => d.deviceId === id);
-    if (chipMic) chipMic.title = selected && selected.label ? `麦克风：${selected.label}` : "系统默认麦克风";
+    if (id === "esp32") {
+      if (chipMic) chipMic.title = "麦克风：ESP32 无线麦克风";
+    } else {
+      const selected = micDevicesCache.find((d) => d.deviceId === id);
+      if (chipMic) chipMic.title = selected && selected.label ? `麦克风：${selected.label}` : "系统默认麦克风";
+    }
     closeMicPopover();
   }
 
@@ -1832,7 +1848,7 @@
   /* ---- Camera popover ---- */
 
   let cameraPopoverEl = null;
-  let cameraCache = { cameras: [], active: "", available: true, reason: "" };
+  let cameraCache = { cameras: [], active: "", available: true, reason: "", esp32: null };
   let cameraPendingRequest = 0;
 
   function ensureCameraPopover() {
@@ -1860,18 +1876,29 @@
 
   function renderCameraPopover(loading) {
     if (!cameraPopoverEl) return;
-    const { cameras, active, available, reason } = cameraCache;
-    const items = cameras.map((c) => ({
-      id: c.port,
-      label: c.name ? `${c.name} (port ${c.port})` : `摄像头 ${c.port}`,
-      meta: `port = ${c.port}`,
-    }));
-    items.unshift({ id: "", label: "关闭摄像头", meta: "禁用视觉输入" });
+    const { cameras, active, available, reason, esp32 } = cameraCache;
+    const items = [];
+    items.push({ id: "", label: "关闭摄像头", meta: "禁用视觉输入", group: "off" });
+    if (esp32 && esp32.enabled !== false) {
+      const status = esp32.online ? "在线" : "离线";
+      const host = esp32.host || "自动发现";
+      items.push({ id: "esp32", label: "ESP32 无线摄像头", meta: `${host} · ${status}`, group: "esp32" });
+    } else {
+      items.push({ id: "esp32", label: "ESP32 无线摄像头", meta: "未启用 · 点击启用", group: "esp32" });
+    }
+    cameras.forEach((c) => {
+      items.push({
+        id: c.port,
+        label: c.name ? `${c.name} (port ${c.port})` : `摄像头 ${c.port}`,
+        meta: `port = ${c.port}`,
+        group: "local",
+      });
+    });
+    const localCount = cameras.length;
     let subtitle = "";
     if (loading) subtitle = "正在探测可用摄像头...";
     else if (!available) subtitle = reason || "摄像头探测不可用";
-    else if (!cameras.length) subtitle = "未在 port 0-3 探测到设备";
-    else subtitle = `已探测 ${cameras.length} 个设备 · 运行时切换`;
+    else subtitle = `已探测 ${localCount} 个本地 + ESP32 · 运行时切换`;
     renderDevicePopover(cameraPopoverEl, {
       title: "摄像头设备",
       subtitle,
@@ -1886,7 +1913,8 @@
     cameraCache.active = port || "";
     send({ type: "set_camera", port: port || "", request_id: `cam_set_${Date.now()}` });
     if (chipCamera) {
-      chipCamera.title = port ? `摄像头 port = ${port}` : "摄像头已关闭";
+      if (port === "esp32") chipCamera.title = "ESP32 无线摄像头";
+      else chipCamera.title = port ? `摄像头 port = ${port}` : "摄像头已关闭";
     }
     closeCameraPopover();
   }
@@ -1953,6 +1981,7 @@
           active: msg.result.active || "",
           available: msg.result.available !== false,
           reason: msg.result.reason || "",
+          esp32: msg.result.esp32 || null,
         };
         // Share the server's camera list with the settings dropdown so both
         // surfaces stay consistent without a second probe.
@@ -1969,8 +1998,10 @@
     if (msg.type === "set_camera") {
       if (msg.ok && msg.result) {
         cameraCache.active = msg.result.active || "";
+        if (msg.result.esp32) cameraCache.esp32 = msg.result.esp32;
         // Mirror the chip's runtime switch into the settings dropdown.
-        repopulateCameraPortSelect(msg.result.active || "");
+        const displayPort = msg.result.active === "esp32" ? "" : (msg.result.active || "");
+        repopulateCameraPortSelect(displayPort);
         if (isCameraPopoverOpen()) renderCameraPopover(false);
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
       }
@@ -3149,6 +3180,10 @@
     void unlockTtsPlayback();
 
     if (isVoiceMode) {
+      if (esp32Recording) {
+        stopEsp32VoiceMode();
+        return;
+      }
       if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
       stopVoiceMode();
       return;
@@ -4149,6 +4184,9 @@
   /* ---- Voice Recording ---- */
   let mediaRecorder = null;
   let audioChunks = [];
+  let voiceHintEl = document.querySelector(".voice-hint");
+  let voiceTimerId = null;
+  let voiceStartTime = 0;
   let audioContext = null;
   let analyserNode = null;
   let sourceNode = null;
@@ -4166,13 +4204,19 @@
       const mics = devices.filter((d) => d.kind === "audioinput");
       if (micSelect) {
         micSelect.innerHTML = '<option value="">默认麦克风</option>';
+        const espOpt = document.createElement("option");
+        espOpt.value = "esp32";
+        espOpt.textContent = "ESP32 无线麦克风";
+        micSelect.appendChild(espOpt);
         mics.forEach((d) => {
           const opt = document.createElement("option");
           opt.value = d.deviceId;
           opt.textContent = d.label || `麦克风 ${d.deviceId.slice(0, 8)}`;
           micSelect.appendChild(opt);
         });
-        if (selectedMicId && mics.some((m) => m.deviceId === selectedMicId)) {
+        if (selectedMicId === "esp32") {
+          micSelect.value = "esp32";
+        } else if (selectedMicId && mics.some((m) => m.deviceId === selectedMicId)) {
           micSelect.value = selectedMicId;
         }
       }
@@ -4208,15 +4252,27 @@
 
   const micGroup = document.querySelector(".mic-group");
 
+  let esp32Recording = false;
+
   btnMic.addEventListener("click", () => {
     stopAllTts();
     void unlockTtsPlayback();
-    if (!isVoiceMode) startVoiceMode();
+    if (!isVoiceMode) {
+      if (selectedMicId === "esp32") {
+        startEsp32VoiceMode();
+      } else {
+        startVoiceMode();
+      }
+    }
   });
 
   btnVoiceCancel.addEventListener("click", () => {
     if (!isVoiceMode) return;
     voiceCancelled = true;
+    if (esp32Recording) {
+      fetch("/api/device/capture-audio/cancel", { method: "POST" }).catch(() => {});
+      esp32Recording = false;
+    }
     if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
     stopVoiceMode();
   });
@@ -4257,6 +4313,7 @@
     const settings = tracks[0]?.getSettings() || {};
     console.log("[voice] mic started:", tracks[0]?.label, "sampleRate:", settings.sampleRate, "state:", audioContext.state);
 
+    startVoiceTimer();
     requestAnimationFrame(() => drawWaveform());
 
     audioChunks = [];
@@ -4268,12 +4325,32 @@
     mediaRecorder.start();
   }
 
+  function startVoiceTimer() {
+    voiceStartTime = Date.now();
+    if (voiceHintEl) voiceHintEl.textContent = "0:00";
+    voiceTimerId = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - voiceStartTime) / 1000);
+      const m = Math.floor(elapsed / 60);
+      const s = elapsed % 60;
+      if (voiceHintEl) voiceHintEl.textContent = `${m}:${s.toString().padStart(2, "0")}`;
+    }, 500);
+  }
+
+  function stopVoiceTimer() {
+    if (voiceTimerId) {
+      clearInterval(voiceTimerId);
+      voiceTimerId = null;
+    }
+    if (voiceHintEl) voiceHintEl.textContent = "聆听中…";
+  }
+
   function stopVoiceMode() {
     isVoiceMode = false;
     micGroup.style.display = "";
     voiceWave.classList.add("hidden");
     btnVoiceCancel.classList.add("hidden");
     chatInput.style.display = "";
+    stopVoiceTimer();
 
     if (waveAnimId) {
       cancelAnimationFrame(waveAnimId);
@@ -4287,6 +4364,91 @@
       audioContext.close();
       audioContext = null;
     }
+  }
+
+  async function startEsp32VoiceMode() {
+    try {
+      const resp = await fetch("/api/device/capture-audio/start", { method: "POST" });
+      const data = await resp.json();
+      if (!data.ok) {
+        addSystemMessage("ESP32 录音启动失败：" + (data.error || "未知错误"));
+        return;
+      }
+    } catch (err) {
+      console.error("[voice] ESP32 start error:", err);
+      addSystemMessage("ESP32 录音出错，请检查设备连接");
+      return;
+    }
+
+    esp32Recording = true;
+    isVoiceMode = true;
+    voiceCancelled = false;
+    micGroup.style.display = "none";
+    chatInput.style.display = "none";
+    voiceWave.classList.remove("hidden");
+    btnVoiceCancel.classList.remove("hidden");
+
+    startVoiceTimer();
+    drawEsp32Waveform();
+    console.log("[voice] ESP32 recording started — press send to stop");
+  }
+
+  async function stopEsp32VoiceMode() {
+    if (!esp32Recording) return;
+    esp32Recording = false;
+    stopVoiceMode();
+
+    if (voiceCancelled) {
+      console.log("[voice] ESP32 recording cancelled");
+      return;
+    }
+
+    try {
+      const resp = await fetch("/api/device/capture-audio/stop", { method: "POST" });
+      const data = await resp.json();
+      if (!data.ok || !data.result || !data.result.audio_data) {
+        addSystemMessage("ESP32 录音太短或失败：" + (data.error || "未知错误"));
+        return;
+      }
+      submitAudioData(data.result.audio_data);
+    } catch (err) {
+      console.error("[voice] ESP32 stop error:", err);
+      addSystemMessage("ESP32 录音停止出错");
+    }
+  }
+
+  function drawEsp32Waveform() {
+    if (!voiceCanvas) return;
+    const ctx = voiceCanvas.getContext("2d");
+    const W = voiceCanvas.width;
+    const H = voiceCanvas.height;
+    let t = 0;
+    function frame() {
+      if (!isVoiceMode) return;
+      ctx.clearRect(0, 0, W, H);
+      ctx.strokeStyle = "#4ecdc4";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let x = 0; x < W; x++) {
+        const y = H / 2 + Math.sin(x * 0.04 + t) * (H * 0.2) * (0.5 + 0.5 * Math.sin(t * 0.3));
+        x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      t += 0.1;
+      waveAnimId = requestAnimationFrame(frame);
+    }
+    frame();
+  }
+
+  function submitAudioData(b64) {
+    clearEmptyState();
+    const history = buildChatHistoryForLlm();
+    const requestId = nextId();
+    addUserBubble("[语音消息]", requestId);
+    const pushed = pushMessageToSession("user", "[语音消息]", { voice: true });
+    if (pushed) pendingUserEntries.set(requestId, pushed);
+    addAssistantBubble(requestId);
+    send({ type: "audio", audio_data: b64, request_id: requestId, history });
   }
 
   async function finishRecording() {
@@ -4315,17 +4477,7 @@
       return;
     }
 
-    clearEmptyState();
-    // Snapshot history BEFORE inserting the voice placeholder; otherwise the
-    // placeholder would either leak into history (if we didn't filter) or we'd
-    // miss the last real exchange.
-    const history = buildChatHistoryForLlm();
-    const requestId = nextId();
-    addUserBubble("[语音消息]", requestId);
-    const pushed = pushMessageToSession("user", "[语音消息]", { voice: true });
-    if (pushed) pendingUserEntries.set(requestId, pushed);
-    addAssistantBubble(requestId);
-    send({ type: "audio", audio_data: b64, request_id: requestId, history });
+    submitAudioData(b64);
   }
 
   async function measureWavRms(wavBlob) {
@@ -5570,6 +5722,10 @@
       status: "cfg-web-status",
       form: '[data-cfg-section="web"]',
     },
+    device_esp32: {
+      status: "cfg-esp32-status",
+      form: '[data-cfg-section="device_esp32"]',
+    },
   };
 
   let cfgColdRestartFields = [];
@@ -5592,7 +5748,8 @@
   function repopulateCameraPortSelect(desiredValue) {
     const sel = document.querySelector("[data-cfg-camera-port]");
     if (!sel) return;
-    const keep = desiredValue !== undefined ? desiredValue : sel.value;
+    let keep = desiredValue !== undefined ? desiredValue : sel.value;
+    if (!keep && cameraCache.esp32 && cameraCache.esp32.enabled) keep = "esp32";
     sel.innerHTML = "";
     const addOpt = (value, label) => {
       const opt = document.createElement("option");
@@ -5601,16 +5758,20 @@
       sel.appendChild(opt);
     };
     addOpt("", "关闭 / 禁用视觉输入");
-    const seen = new Set([""]);
+    const esp = cameraCache.esp32;
+    const espStatus = esp && esp.online ? "在线" : "离线";
+    const espHost = (esp && esp.host) || "";
+    const espLabel = espHost
+      ? `ESP32 无线摄像头 (${espHost} · ${espStatus})`
+      : `ESP32 无线摄像头 (${espStatus})`;
+    addOpt("esp32", espLabel);
+    const seen = new Set(["", "esp32"]);
     detectedDevices.cameras.forEach((cam) => {
       const port = String(cam.port || "");
       if (!port || seen.has(port)) return;
       seen.add(port);
       addOpt(port, cam.name ? `${port} (${cam.name})` : `摄像头 ${port}`);
     });
-    // Preserve any stored value that's not in the detected list so the user's
-    // saved choice isn't silently rewritten to "关闭" on first load before
-    // detection has populated `detectedDevices.cameras`.
     if (keep && !seen.has(keep)) {
       addOpt(keep, `${keep}（自定义，保留原值）`);
     }
@@ -5629,7 +5790,14 @@
       sel.appendChild(opt);
     };
     addOpt("", "系统默认（跟随 sounddevice 默认输入）");
-    const seen = new Set([""]);
+    const esp = cameraCache.esp32;
+    const espStatus = esp && esp.online ? "在线" : "离线";
+    const espHost = (esp && esp.host) || "";
+    const espLabel = espHost
+      ? `ESP32 无线麦克风 (${espHost} · ${espStatus})`
+      : `ESP32 无线麦克风 (${espStatus})`;
+    addOpt("esp32", espLabel);
+    const seen = new Set(["", "esp32"]);
     detectedDevices.mics.forEach((m) => {
       const idx = String(m.index);
       if (seen.has(idx)) return;
@@ -5832,6 +6000,15 @@
       return;
     }
 
+    // If camera.port is set to the magic "esp32" value, strip it from the
+    // camera section (so we don't persist a bogus port) and separately enable
+    // the ESP32 device config.
+    let switchToEsp32 = false;
+    if (grouped.camera && grouped.camera["camera.port"] === "esp32") {
+      grouped.camera["camera.port"] = "";
+      switchToEsp32 = true;
+    }
+
     if (statusEl) statusEl.textContent = "保存中…";
     const needsRestart = [];
     const errors = [];
@@ -5872,7 +6049,18 @@
     // Settings save persists to disk + updates in-memory config, but the
     // topbar chip's cache and any live camera producer also need to know.
     // Broadcast via the same WS path the chip popover uses.
-    if (cameraPortSaved !== null && typeof send === "function") {
+    if (switchToEsp32) {
+      if (typeof send === "function") {
+        send({ type: "set_camera", port: "esp32", request_id: `cam_set_${Date.now()}` });
+      }
+      try {
+        await fetch("/api/config/device_esp32", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ "device_esp32.enabled": true }),
+        });
+      } catch (_) { /* best-effort */ }
+    } else if (cameraPortSaved !== null && typeof send === "function") {
       send({ type: "set_camera", port: cameraPortSaved, request_id: `cam_set_${Date.now()}` });
     }
     // When the default playback mode changes, clear any stale session override

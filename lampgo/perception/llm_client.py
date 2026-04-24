@@ -8,13 +8,16 @@ import re
 from copy import deepcopy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from lampgo.core.config import CameraConfig, LLMConfig
+from lampgo.core.config import CameraConfig, DeviceEsp32Config, LLMConfig
 from lampgo.perception import anthropic_adapter
 from lampgo.perception.camera import CameraCapture
+
+if TYPE_CHECKING:
+    from lampgo.device import Esp32DeviceManager
 
 logger = structlog.get_logger(__name__)
 
@@ -368,9 +371,16 @@ class LLMClient:
         config: LLMConfig,
         skill_specs: list[dict],
         camera_config: CameraConfig | None = None,
+        *,
+        device_esp32_config: DeviceEsp32Config | None = None,
+        esp32_manager: "Esp32DeviceManager | None" = None,
     ) -> None:
         self._config = config
-        self._camera = CameraCapture(camera_config)
+        self._camera = CameraCapture(
+            camera_config,
+            device_esp32_config=device_esp32_config,
+            esp32_manager=esp32_manager,
+        )
         self._agent_tools = _build_agent_tools(skill_specs, config, has_camera=self._camera.enabled)
         self._api_base = config.api_base or "https://api.openai.com/v1"
         self._is_mimo_model = config.fast_model.strip().lower() in MIMO_WEB_SEARCH_MODELS
