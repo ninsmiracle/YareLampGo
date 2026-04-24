@@ -303,12 +303,59 @@ class CameraConfig(BaseModel):
     port: str = Field(default="", description="Camera device index or path (empty = disabled)")
 
 
+class DeviceEsp32Config(BaseModel):
+    """Wireless camera/mic device (XIAO ESP32S3 Sense running lampgo-cam firmware).
+
+    Semantics of ``enabled``: *prefer* ESP32 over local. When the device is
+    discovered via mDNS and reachable, perception pulls frames/audio from it.
+    When it's not reachable at cold start, lampgo silently falls back to the
+    local camera (``camera.port``) and microphone (``voice.mic_device``) and
+    the Web UI shows a banner. Runtime disconnects do NOT auto-fallback — the
+    LLM sees "no frame" and can respond naturally, to avoid mid-conversation
+    source flips.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Prefer ESP32 device over local camera/mic when available.",
+    )
+    preferred_host: str = Field(
+        default="",
+        description=(
+            "Optional mDNS hostname to pin (e.g. 'lampgo-cam-AB12.local'). "
+            "Empty = auto-discover first reachable lampgo-cam device."
+        ),
+    )
+    jpeg_quality: int = Field(
+        default=10,
+        ge=4,
+        le=63,
+        description="Camera JPEG quality sent to ESP32 (4=best, 63=worst).",
+    )
+    framesize: int = Field(
+        default=8,
+        ge=0,
+        le=13,
+        description="ESP32 framesize enum (0=96x96 … 8=SVGA 800x600 … 13=UXGA 1600x1200).",
+    )
+    mic_enabled: bool = Field(
+        default=False,
+        description="Enable ESP32 PDM microphone stream (still falls back to sounddevice when offline).",
+    )
+    http_timeout_s: float = Field(
+        default=5.0,
+        gt=0,
+        le=30.0,
+        description="HTTP timeout when proxying to ESP32 (seconds).",
+    )
+
+
 class VoiceConfig(BaseModel):
     """Voice / TTS / STT configuration."""
 
-    stt_provider: str = Field(default="omni", description="STT provider: omni (mimo-v2-omni), whisper")
-    stt_model: str = Field(default="mimo-v2-omni", description="STT model name (for omni provider)")
-    tts_provider: str = Field(default="mimo", description="TTS provider: mimo (mimo-v2.5-tts), edge-tts")
+    stt_provider: str = Field(default="mimo", description="STT provider: mimo")
+    stt_model: str = Field(default="mimo-v2.5", description="STT model: mimo-v2.5, mimo-v2-omni, etc.")
+    tts_provider: str = Field(default="mimo", description="TTS provider: mimo, edge-tts")
     tts_model: str = Field(
         default="mimo-v2.5-tts",
         description=(
@@ -342,6 +389,7 @@ class LampgoConfig(BaseModel):
     led: LEDConfig = Field(default_factory=LEDConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     camera: CameraConfig = Field(default_factory=CameraConfig)
+    device_esp32: DeviceEsp32Config = Field(default_factory=DeviceEsp32Config)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
@@ -507,7 +555,6 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_MAX_AGENT_TURNS": ("llm", "max_agent_turns"),
         "LAMPGO_LLM_MAX_AGENT_TOOL_CALLS": ("llm", "max_agent_tool_calls"),
         "LAMPGO_CAMERA_PORT": ("camera", "port"),
-        "LAMPGO_VOICE_STT_PROVIDER": ("voice", "stt_provider"),
         "LAMPGO_VOICE_STT_MODEL": ("voice", "stt_model"),
         "LAMPGO_VOICE_TTS_PROVIDER": ("voice", "tts_provider"),
         "LAMPGO_VOICE_TTS_VOICE": ("voice", "tts_voice"),

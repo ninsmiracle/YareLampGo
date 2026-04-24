@@ -1,40 +1,122 @@
-"""Camera helpers for attaching a live frame to LLM requests."""
+"""Camera helpers for attaching a live frame to LLM requests.
+
+Capture source routing (see also ``lampgo.device.esp32``):
+
+    configured source          | cold start, ESP32 offline | mid-session, ESP32 drops
+    ---------------------------|---------------------------|--------------------------
+    ESP32 + local (enabled=T)  | silent fallback to cv2    | return None (LLM: "I can't see")
+    ESP32 only (enabled=T, no port) | silent None (no local) | return None
+    local only (enabled=F)     | cv2 directly              | n/a
+
+The "mid-session drop" behavior is deliberate: flipping camera source during a
+live conversation confuses both the user and the LLM ("why does my face look
+different now?"). Instead we let the LLM observe a missing frame and describe
+the situation naturally.
+"""
 
 from __future__ import annotations
 
 import base64
 import sys
+from typing import TYPE_CHECKING
 
 import structlog
 
-from lampgo.core.config import CameraConfig
+from lampgo.core.config import CameraConfig, DeviceEsp32Config
+
+if TYPE_CHECKING:
+    from lampgo.device import Esp32DeviceManager
 
 logger = structlog.get_logger(__name__)
 
 
 class CameraCapture:
-    """Capture a JPEG frame and return it as a data URL."""
+    """Capture a JPEG frame from either an ESP32 camera or a local cv2 device."""
 
     WIDTH = 640
     HEIGHT = 480
     JPEG_QUALITY = 60
+    ESP32_HTTP_TIMEOUT_S = 3.0
 
-    def __init__(self, config: CameraConfig | None) -> None:
+    def __init__(
+        self,
+        config: CameraConfig | None,
+        *,
+        device_esp32_config: DeviceEsp32Config | None = None,
+        esp32_manager: Esp32DeviceManager | None = None,
+    ) -> None:
         self._config = config or CameraConfig()
+        self._device_cfg = device_esp32_config
+        self._esp32 = esp32_manager
 
     @property
     def enabled(self) -> bool:
-        return bool(self._config.port.strip())
+        if self._config.port.strip():
+            return True
+        if self._device_cfg is not None and self._device_cfg.enabled:
+            return True
+        return False
 
     @property
     def device_label(self) -> str:
+        if self._device_cfg is not None and self._device_cfg.enabled and self._esp32 is not None:
+            host = self._esp32.get_active_host()
+            if host:
+                return f"esp32://{host}"
+            if self._device_cfg.preferred_host:
+                return f"esp32://{self._device_cfg.preferred_host} (offline)"
+            return "esp32://(discovering)"
         return self._config.port
 
     def capture_data_url(self) -> str | None:
+        """Return ``data:image/jpeg;base64,...`` for the next frame, or None.
+
+        Routing is computed on every call so a mid-session switch to ESP32
+        takes effect on the next agent tool call without rebuilding LLMClient.
+        """
+        use_esp32 = bool(self._device_cfg and self._device_cfg.enabled and self._esp32 is not None)
+
+        if use_esp32 and self._esp32.is_online():
+            url = self._esp32.get_active_base_url()
+            if url is not None:
+                data = self._capture_via_esp32(url)
+                if data is not None:
+                    self._esp32.mark_session_used()
+                    return data
+                logger.warning("camera.esp32_capture_failed", url=url)
+                if self._esp32.session_used():
+                    return None
+
+        if use_esp32 and self._esp32.session_used():
+            logger.info("camera.esp32_offline_midsession", reason="returning_none_so_llm_sees_gap")
+            return None
+
+        if not self._config.port.strip():
+            return None
+        return self._capture_via_local_cv2()
+
+    def _capture_via_esp32(self, base_url: str) -> str | None:
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("camera.esp32_httpx_missing")
+            return None
+        try:
+            with httpx.Client(timeout=self.ESP32_HTTP_TIMEOUT_S) as client:
+                resp = client.get(f"{base_url}/capture")
+            if resp.status_code != 200:
+                logger.warning("camera.esp32_http_error", status=resp.status_code)
+                return None
+            payload = base64.b64encode(resp.content).decode("ascii")
+            return f"data:image/jpeg;base64,{payload}"
+        except Exception:
+            logger.exception("camera.esp32_capture_exception", url=base_url)
+            return None
+
+    def _capture_via_local_cv2(self) -> str | None:
         device = self._parse_device(self._config.port)
         if device is None:
             return None
-
         try:
             import cv2
         except ImportError:

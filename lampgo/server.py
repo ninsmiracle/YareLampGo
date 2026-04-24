@@ -22,6 +22,8 @@ import structlog
 from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.bridge.state_writer import MinimalState, StateWriter
 from lampgo.core.config import LampgoConfig, LEDConfig
+from lampgo.device import Esp32DeviceManager
+from lampgo.voice.stt import MimoSTT, build_stt
 from lampgo.core.events import (
     AgentFinished,
     ChatMessage,
@@ -88,6 +90,8 @@ class LampgoServer:
         self.executor = SkillExecutor(self.registry, self.events)
         self.openclaw = OpenClawAdapter(self.registry, self.executor, self.events)
         self.router = IntentRouter()
+        self.esp32 = Esp32DeviceManager(config.device_esp32)
+        self._stt: MimoSTT = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
         self._web_gateway = None
@@ -680,10 +684,10 @@ class LampgoServer:
         }
 
     async def _handle_audio(self, data: dict) -> dict:
-        """Handle audio input: omni transcribes → text goes through normal _handle_text.
+        """Handle audio input: STT transcribes → text goes through normal _handle_text.
 
-        Two-step approach because mimo-v2-omni cannot reliably do
-        function calling + audio understanding simultaneously.
+        Uses the standalone STT module (stt_provider from config.voice),
+        independent of the LLM client type.
         """
         audio_data = data.get("audio_data", "")
         if not audio_data:
@@ -691,17 +695,14 @@ class LampgoServer:
 
         request_id = data.get("request_id", "")
 
-        if not self.router.has_llm_client:
-            return {"ok": False, "error": "LLM client not configured — cannot process audio"}
-
         audio_rms = self._measure_audio_rms(audio_data)
         logger.info("server.audio_transcribing", request_id=request_id, audio_b64_len=len(audio_data), rms=f"{audio_rms:.1f}")
         await self.events.publish(IntentRouting(text="[语音输入]", request_id=request_id))
         await self.events.publish(
-            IntentProgress(stage="audio_transcribe", message="正在识别语音...", source="llm", request_id=request_id)
+            IntentProgress(stage="audio_transcribe", message="正在识别语音...", source="stt", request_id=request_id)
         )
 
-        text = await self.router.transcribe_audio(audio_data)
+        text = await self._stt.transcribe_wav_b64(audio_data)
         if not text:
             logger.warning("server.audio_transcribe_empty", request_id=request_id)
             return {"ok": True, "result": {"type": "chat", "response": "抱歉，没有听清您说的话。", "source": "audio"}}
@@ -1000,7 +1001,7 @@ class LampgoServer:
                 "recording": self._record_status(),
                 "hal_connected": bool(self.hal.is_connected),
                 "led_ready": bool(self.led.is_connected),
-                "camera_ready": bool(self.config.camera.port.strip()),
+                "camera_ready": bool(self.config.camera.port.strip()) or bool(self.config.device_esp32.enabled),
             },
         }
 
@@ -1012,13 +1013,15 @@ class LampgoServer:
         try:
             import cv2  # noqa: F401
         except ImportError:
+            active = "esp32" if self.config.device_esp32.enabled else self.config.camera.port
             return {
                 "ok": True,
                 "result": {
                     "cameras": [],
-                    "active": self.config.camera.port,
+                    "active": active,
                     "available": False,
                     "reason": "opencv-python not installed",
+                    "esp32": self._esp32_camera_info(),
                 },
             }
 
@@ -1047,25 +1050,54 @@ class LampgoServer:
             if opened:
                 cameras.append({"port": str(idx), "name": names.get(idx, "") or f"camera_{idx}"})
 
+        esp32_info = self._esp32_camera_info()
+        active = "esp32" if self.config.device_esp32.enabled else self.config.camera.port
+
         return {
             "ok": True,
             "result": {
                 "cameras": cameras,
-                "active": self.config.camera.port,
+                "active": active,
                 "available": True,
+                "esp32": esp32_info,
             },
         }
 
+    def _esp32_camera_info(self) -> dict:
+        """Build ESP32 camera metadata for the camera popover."""
+        cfg = self.config.device_esp32
+        if not cfg.enabled:
+            return {"enabled": False}
+        online = self.esp32.is_online() if self.esp32 else False
+        host = self.esp32.get_active_host() if self.esp32 else None
+        return {
+            "enabled": True,
+            "online": online,
+            "host": host or cfg.preferred_host or "",
+        }
+
     def _handle_set_camera(self, port: str) -> dict:
-        """Update the active camera port in the in-memory config (runtime switch)."""
+        """Update the active camera port in the in-memory config (runtime switch).
+
+        Special port value ``"esp32"`` enables the ESP32 wireless camera and
+        clears the local camera port so perception prefers the wireless feed.
+        Any other value disables the ESP32 preference and sets a local port.
+        """
         value = (port or "").strip()
-        self.config.camera.port = value
-        logger.info("camera.port_updated", port=value or "<disabled>")
+        if value == "esp32":
+            self.config.device_esp32.enabled = True
+            self.config.camera.port = ""
+            logger.info("camera.switched_to_esp32")
+        else:
+            self.config.device_esp32.enabled = False
+            self.config.camera.port = value
+            logger.info("camera.port_updated", port=value or "<disabled>")
         return {
             "ok": True,
             "result": {
-                "active": self.config.camera.port,
-                "camera_ready": bool(value),
+                "active": "esp32" if self.config.device_esp32.enabled else self.config.camera.port,
+                "camera_ready": bool(value) or self.config.device_esp32.enabled,
+                "esp32": self._esp32_camera_info(),
             },
         }
 
@@ -1279,7 +1311,11 @@ class LampgoServer:
 
             skill_specs = self._handle_skills()["result"]["skills"]
             client = LLMClient(
-                self.config.llm, skill_specs, camera_config=self.config.camera
+                self.config.llm,
+                skill_specs,
+                camera_config=self.config.camera,
+                device_esp32_config=self.config.device_esp32,
+                esp32_manager=self.esp32,
             )
             self.router.set_llm_client(client)
             logger.info(
@@ -1332,6 +1368,11 @@ class LampgoServer:
         if self.config.home_on_start:
             await self._home_on_start()
         await self._ipc.start()
+        if self.config.device_esp32.enabled:
+            try:
+                await self.esp32.start()
+            except Exception:
+                logger.exception("server.esp32_start_failed")
         self._setup_llm_router()
         self._state_writer.start(get_state=self._get_minimal_state)
         logger.info(
@@ -1379,7 +1420,13 @@ class LampgoServer:
             from lampgo.perception.llm_client import LLMClient
 
             skill_specs = self._handle_skills()["result"]["skills"]
-            client = LLMClient(self.config.llm, skill_specs, camera_config=self.config.camera)
+            client = LLMClient(
+                self.config.llm,
+                skill_specs,
+                camera_config=self.config.camera,
+                device_esp32_config=self.config.device_esp32,
+                esp32_manager=self.esp32,
+            )
             self.router.set_llm_client(client)
             logger.info(
                 "server.llm_router_enabled",
@@ -1405,7 +1452,13 @@ class LampgoServer:
             return False
         try:
             skill_specs = self._handle_skills()["result"]["skills"]
-            client = LLMClient(self.config.llm, skill_specs, camera_config=self.config.camera)
+            client = LLMClient(
+                self.config.llm,
+                skill_specs,
+                camera_config=self.config.camera,
+                device_esp32_config=self.config.device_esp32,
+                esp32_manager=self.esp32,
+            )
             self.router.set_llm_client(client)
             logger.info(
                 "server.llm_router_reloaded",
@@ -1448,6 +1501,10 @@ class LampgoServer:
             except asyncio.CancelledError:
                 pass
         await self._ipc.stop()
+        try:
+            await self.esp32.shutdown()
+        except Exception:
+            logger.exception("server.esp32_shutdown_failed")
         if not self.config.no_hw:
             self.motion.stop()
             await self._run_blocking_shutdown_step("led.off", self.led.off)

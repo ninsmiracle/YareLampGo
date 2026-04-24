@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>lampgo 控制台</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/setup.css">
 </head>
 <body>
   <div class="app-shell" data-view="chat">
@@ -124,6 +125,14 @@
           <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">强行停止</button>
         </div>
       </header>
+
+      <div id="esp32-banner" class="esp32-banner hidden" role="status" aria-live="polite">
+        <span id="esp32-banner-text" class="esp32-banner-text"></span>
+        <span class="esp32-banner-actions">
+          <button id="btn-esp32-banner-setup" class="esp32-banner-link" type="button">配置 WiFi</button>
+          <button id="btn-esp32-banner-dismiss" class="esp32-banner-dismiss" type="button" title="隐藏">×</button>
+        </span>
+      </div>
 
       <section class="view" data-view="chat">
         <div class="chat-card">
@@ -570,13 +579,37 @@
 
             <div class="settings-card">
               <div class="settings-card-title">语音链路</div>
-              <div class="settings-card-desc">TTS 语音合成相关。大多数字段热改即可生效。</div>
+              <div class="settings-card-desc">STT 语音识别 & TTS 语音合成。大多数字段热改即可生效。</div>
 
               <div class="settings-form" data-cfg-section="voice">
+                <label class="settings-field" data-cfg-field="voice.stt_provider">
+                  <span class="settings-field-label">STT Provider（语音识别）</span>
+                  <select class="settings-input" data-cfg-input="voice.stt_provider">
+                    <option value="mimo">mimo</option>
+                  </select>
+                  <span class="settings-field-hint">
+                    语音识别服务商。目前仅支持 MiMo。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.stt_provider"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="voice.stt_model">
+                  <span class="settings-field-label">STT Model</span>
+                  <select class="settings-input" data-cfg-input="voice.stt_model">
+                    <option value="mimo-v2.5">mimo-v2.5</option>
+                    <option value="mimo-v2-omni">mimo-v2-omni</option>
+                  </select>
+                  <span class="settings-field-hint">
+                    语音转文字模型。通过 <code>input_audio</code> 调用，
+                    复用「LLM」卡片的 <code>api_key</code>，端点固定为
+                    <code>https://api.mimomimo.com/v1</code>。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.stt_model"></span>
+                </label>
+
                 <label class="settings-field" data-cfg-field="voice.tts_provider">
-                  <span class="settings-field-label">TTS Provider</span>
+                  <span class="settings-field-label">TTS Provider（语音合成）</span>
                   <select class="settings-input" data-cfg-input="voice.tts_provider">
-                    <option value="mimo">mimo（MiMo-V2.5-TTS，流式 PCM）</option>
+                    <option value="mimo">mimo</option>
                     <option value="edge-tts">edge-tts（微软 Edge，免费无 Key）</option>
                   </select>
                   <span class="settings-field-hint" data-cfg-tts-provider-hint>
@@ -587,11 +620,14 @@
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="voice.tts_model">
-                  <span class="settings-field-label">TTS Model ID</span>
-                  <input class="settings-input" type="text" placeholder="mimo-v2.5-tts" autocomplete="off" data-cfg-input="voice.tts_model">
+                  <span class="settings-field-label">TTS Model</span>
+                  <select class="settings-input" data-cfg-input="voice.tts_model">
+                    <option value="mimo-v2.5-tts">mimo-v2.5-tts</option>
+                    <option value="mimo-v2-tts">mimo-v2-tts</option>
+                  </select>
                   <span class="settings-field-hint">
-                    MiMo 的 TTS 模型名，默认 <code>mimo-v2.5-tts</code>。仅当 Provider 选 <code>mimo</code> 时生效；
-                    选 <code>edge-tts</code> 会自动禁用（Edge 没有模型概念）。
+                    仅当 Provider 选 <code>mimo</code> 时生效；
+                    选 <code>edge-tts</code> 时此项无效。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_model"></span>
                 </label>
@@ -737,6 +773,109 @@
             </div>
 
             <div class="settings-pane hidden" data-settings-pane="hardware">
+
+            <div class="settings-card">
+              <div class="settings-card-title">
+                ESP32 无线摄像头 / 麦克风
+                <span id="esp32-state-chip" class="esp32-state-chip is-offline">未发现</span>
+              </div>
+              <div class="settings-card-desc">
+                XIAO ESP32S3 + lampgo-cam 固件。开启后 lampgo 会通过 mDNS
+                （<code>_lampgo-cam._tcp.local.</code>）在同一 WiFi 下发现设备并优先走无线采集；
+                设备离线时<strong>冷启动</strong>会自动回退到本地 cv2 / sounddevice 并在页面显示提示条，
+                <strong>会话进行中</strong>掉线不会切换，LLM 会自然地告诉你"看不到了"。
+              </div>
+
+              <div id="esp32-status-block" class="esp32-status-block">
+                <div class="esp32-status-row">
+                  <span class="esp32-status-key">设备</span>
+                  <span id="esp32-status-host" class="esp32-status-val">未连接</span>
+                </div>
+                <div class="esp32-status-row">
+                  <span class="esp32-status-key">IP</span>
+                  <span id="esp32-status-ip" class="esp32-status-val">—</span>
+                </div>
+                <div class="esp32-status-row">
+                  <span class="esp32-status-key">健康</span>
+                  <span id="esp32-status-health" class="esp32-status-val">—</span>
+                </div>
+                <div class="esp32-status-row">
+                  <span class="esp32-status-key">麦克风</span>
+                  <span id="esp32-status-mic" class="esp32-status-val">—</span>
+                </div>
+                <div class="esp32-status-actions">
+                  <button id="btn-esp32-setup-wifi" class="ghost-button" type="button" title="通过 Lampgo-Setup SoftAP 给 ESP32 配 WiFi">配置 WiFi</button>
+                  <button id="btn-esp32-refresh" class="ghost-button" type="button">刷新状态</button>
+                  <button id="btn-esp32-push-config" class="ghost-button" type="button" title="把下面的画质/麦克风设置推送给 ESP32">推送画质</button>
+                  <button id="btn-esp32-reboot" class="ghost-button" type="button">重启设备</button>
+                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除 ESP32 端保存的 WiFi 凭据，设备会重新开放 SoftAP">忘记 WiFi</button>
+                </div>
+              </div>
+
+              <div class="settings-form" data-cfg-section="device_esp32">
+                <label class="settings-field" data-cfg-field="device_esp32.enabled">
+                  <span class="settings-field-label">
+                    <input type="checkbox" data-cfg-input="device_esp32.enabled">
+                    启用 ESP32（优先使用，离线时冷启动回退本地）
+                  </span>
+                  <span class="settings-field-hint">关闭 = 完全走本地 cv2 / sounddevice；开启 = 冷启动时若没发现 ESP32 自动用本地并显示提示条。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.enabled"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device_esp32.preferred_host">
+                  <span class="settings-field-label">指定设备（preferred_host）</span>
+                  <div class="esp32-host-row">
+                    <select class="settings-input" data-cfg-input="device_esp32.preferred_host" id="esp32-host-select">
+                      <option value="">自动（选最近发现的设备）</option>
+                    </select>
+                    <button id="btn-esp32-host-refresh" class="ghost-button" type="button" title="刷新设备列表">刷新</button>
+                  </div>
+                  <span class="settings-field-hint">
+                    mDNS 发现的设备会自动列出。也可手动填 IP（如 <code>192.168.31.229</code>）或 hostname（如 <code>lampgo-cam-0834.local</code>）。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.preferred_host"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device_esp32.framesize">
+                  <span class="settings-field-label">画面尺寸（framesize）</span>
+                  <select class="settings-input" data-cfg-input="device_esp32.framesize">
+                    <option value="5">5 · 320x240 (QVGA)</option>
+                    <option value="6">6 · 400x296 (CIF)</option>
+                    <option value="7">7 · 640x480 (VGA)</option>
+                    <option value="8">8 · 800x600 (SVGA)</option>
+                    <option value="9">9 · 1024x768 (XGA)</option>
+                    <option value="10">10 · 1280x720 (HD)</option>
+                    <option value="11">11 · 1280x1024 (SXGA)</option>
+                  </select>
+                  <span class="settings-field-hint">OV2640 支持的画面尺寸索引。VGA / SVGA 对台灯视觉足够，更高会占带宽且抖动变大。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.framesize"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device_esp32.jpeg_quality">
+                  <span class="settings-field-label">JPEG 画质（4=最高 63=最低）</span>
+                  <input class="settings-input" type="number" min="4" max="63" step="1" data-cfg-input="device_esp32.jpeg_quality">
+                  <span class="settings-field-hint">数值越小画质越好但体积越大；10–16 比较平衡。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.jpeg_quality"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device_esp32.mic_enabled">
+                  <span class="settings-field-label">
+                    <input type="checkbox" data-cfg-input="device_esp32.mic_enabled">
+                    使用 ESP32 麦克风（实验功能，离线时回退本地 sounddevice）
+                  </span>
+                  <span class="settings-field-hint">PDM 麦克风从 ESP32 WebSocket 推流；固件 M5 里单独启用。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.mic_enabled"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device_esp32.http_timeout_s">
+                  <span class="settings-field-label">HTTP 超时（秒）</span>
+                  <input class="settings-input" type="number" min="1" max="30" step="0.5" data-cfg-input="device_esp32.http_timeout_s">
+                  <span class="settings-field-hint">向 ESP32 代理请求的超时。WiFi 差时可适度调高。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.http_timeout_s"></span>
+                </label>
+              </div>
+
+              <div class="settings-actions">
+                <span id="cfg-esp32-status" class="settings-status" aria-live="polite"></span>
+                <button class="send-button" type="button" data-cfg-save="device_esp32">保存并生效</button>
+              </div>
+            </div>
+
             <div class="settings-card">
               <div class="settings-card-title">硬件接入</div>
               <div class="settings-card-desc">
@@ -976,6 +1115,88 @@
     </form>
   </dialog>
 
+  <dialog id="esp32-setup-dialog" class="esp32-setup-dialog">
+    <div class="esp32-setup-card">
+      <div class="esp32-setup-head">
+        <div class="esp32-setup-title">ESP32 WiFi 配网向导</div>
+        <button id="btn-esp32-setup-close" class="esp32-setup-close" type="button" aria-label="关闭">×</button>
+      </div>
+
+      <ol class="esp32-setup-steps">
+        <li class="is-active" data-step="1">1 · 连 SoftAP</li>
+        <li data-step="2">2 · 选 WiFi</li>
+        <li data-step="3">3 · 等待回连</li>
+      </ol>
+
+      <section class="esp32-setup-step" data-step="1">
+        <div class="esp32-setup-desc">
+          首次使用时 ESP32 会开启一个临时热点，名字形如
+          <code>Lampgo-Setup-XXXX</code>（XXXX 为设备 MAC 末 4 位，印在卡片上或串口日志里），
+          默认密码 <code>lampgo123</code>。
+          <ol class="esp32-setup-hint-list">
+            <li>用手机 / 笔记本连上该热点。</li>
+            <li>系统可能会弹出"无互联网连接"的提示，<b>保持连接</b>即可。</li>
+            <li>默认会打开配置页 <a href="http://192.168.4.1" target="_blank" rel="noreferrer">http://192.168.4.1</a>；lampgo 本地页面也能远程代理配置（如果你仍连着家里的 WiFi）。</li>
+          </ol>
+        </div>
+        <div class="esp32-setup-actions">
+          <button id="btn-esp32-setup-next-1" class="send-button" type="button">我已连上 SoftAP →</button>
+        </div>
+      </section>
+
+      <section class="esp32-setup-step hidden" data-step="2">
+        <div class="esp32-setup-desc">
+          选择家里的 2.4GHz WiFi（ESP32 不支持 5GHz），输入密码后点击"发送"。
+          发送后 ESP32 会立即关闭 SoftAP 并用该凭据连家里 WiFi。
+        </div>
+        <div class="esp32-setup-row">
+          <label class="esp32-setup-field">
+            <span class="esp32-setup-label">WiFi 名称（SSID）</span>
+            <div class="esp32-setup-ssid-row">
+              <select id="esp32-ssid-select" class="esp32-setup-input"></select>
+              <button id="btn-esp32-rescan" class="ghost-button" type="button" title="让 ESP32 重新扫描周围 WiFi">重新扫描</button>
+            </div>
+          </label>
+          <label class="esp32-setup-field">
+            <span class="esp32-setup-label">或手动输入 SSID（隐藏网络）</span>
+            <input id="esp32-ssid-manual" class="esp32-setup-input" type="text" autocomplete="off">
+          </label>
+          <label class="esp32-setup-field">
+            <span class="esp32-setup-label">密码</span>
+            <input id="esp32-psk" class="esp32-setup-input" type="password" autocomplete="new-password">
+          </label>
+          <label class="esp32-setup-field">
+            <span class="esp32-setup-label">
+              SoftAP 直连地址（可选）
+            </span>
+            <input id="esp32-softap-base" class="esp32-setup-input" type="text" value="http://192.168.4.1" autocomplete="off">
+            <span class="esp32-setup-hint">
+              留默认即可。如果你用本机直接连 ESP32 的 SoftAP，向导会直连设备；
+              否则会尝试通过 lampgo 后端代理（仅在设备之前已上过家里 WiFi 时可用）。
+            </span>
+          </label>
+        </div>
+        <div id="esp32-setup-error" class="esp32-setup-error hidden"></div>
+        <div class="esp32-setup-actions">
+          <button id="btn-esp32-setup-back-2" class="ghost-button" type="button">← 上一步</button>
+          <button id="btn-esp32-setup-submit" class="send-button" type="button">发送凭据</button>
+        </div>
+      </section>
+
+      <section class="esp32-setup-step hidden" data-step="3">
+        <div class="esp32-setup-desc">
+          已把凭据发给 ESP32。设备正在重启并尝试连 WiFi，完成后会在 lampgo 网络里 mDNS 广播自己，
+          通常 5–15 秒就能被发现。
+        </div>
+        <div id="esp32-wait-status" class="esp32-setup-wait">等待 mDNS 发现设备…</div>
+        <div class="esp32-setup-actions">
+          <button id="btn-esp32-setup-done" class="send-button" type="button">完成</button>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
   <script src="/app.js"></script>
+  <script src="/setup.js"></script>
 </body>
 </html>

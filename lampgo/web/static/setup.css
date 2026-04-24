@@ -1,0 +1,327 @@
+/* ==========================================================================
+   ESP32 wireless camera / mic — status banner, hardware card chips, and
+   WiFi provisioning wizard dialog. Kept in a separate stylesheet so the
+   existing style.css stays focused on the main lampgo control surface.
+   ========================================================================== */
+
+/* ---- top banner under the device chips ---- */
+
+.esp32-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  margin: 8px 16px 0;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  background: #fff7e0;
+  color: #6a4b00;
+  border: 1px solid #f3d28a;
+}
+
+.esp32-banner.is-offline-mid {
+  background: #fdecec;
+  color: #842029;
+  border-color: #f5c2c7;
+}
+
+.esp32-banner.hidden {
+  display: none;
+}
+
+.esp32-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.esp32-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.esp32-banner-link {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.esp32-banner-link:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.esp32-banner-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.65;
+}
+.esp32-banner-dismiss:hover {
+  opacity: 1;
+}
+
+/* ---- settings card status chip & status block ---- */
+
+.esp32-state-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.esp32-state-chip.is-online {
+  background: #d4edda;
+  color: #155724;
+}
+.esp32-state-chip.is-offline {
+  background: #f1f3f5;
+  color: #6c757d;
+}
+.esp32-state-chip.is-warn {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.esp32-status-block {
+  margin-top: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border: 1px solid #e9ecef;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.esp32-status-row {
+  display: flex;
+  gap: 10px;
+}
+
+.esp32-status-key {
+  flex: 0 0 52px;
+  color: #6c757d;
+}
+
+.esp32-status-val {
+  color: #212529;
+  word-break: break-all;
+}
+
+.esp32-status-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ghost-button.is-danger {
+  color: #b02a37;
+  border-color: #f5c2c7;
+}
+.ghost-button.is-danger:hover {
+  background: #fdecec;
+}
+
+/* ---- preferred_host dropdown row ---- */
+
+.esp32-host-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.esp32-host-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- camera popover ESP32 divider ---- */
+
+.device-popover-sep {
+  margin: 6px 0;
+  border: none;
+  border-top: 1px solid #e9ecef;
+}
+
+/* ---- WiFi setup wizard dialog ---- */
+
+.esp32-setup-dialog {
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  width: min(520px, 92vw);
+  max-width: 520px;
+  background: transparent;
+}
+
+.esp32-setup-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.esp32-setup-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 20px 22px 22px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+.esp32-setup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.esp32-setup-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.esp32-setup-close {
+  background: transparent;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: #6c757d;
+  padding: 0 4px;
+}
+.esp32-setup-close:hover {
+  color: #212529;
+}
+
+.esp32-setup-steps {
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 14px;
+  font-size: 12px;
+}
+
+.esp32-setup-steps li {
+  flex: 1;
+  text-align: center;
+  padding: 6px 4px;
+  border-radius: 6px;
+  background: #f1f3f5;
+  color: #6c757d;
+}
+
+.esp32-setup-steps li.is-active {
+  background: #e7f1ff;
+  color: #0d6efd;
+  font-weight: 600;
+}
+
+.esp32-setup-step.hidden {
+  display: none;
+}
+
+.esp32-setup-desc {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #343a40;
+  margin-bottom: 12px;
+}
+
+.esp32-setup-hint-list {
+  margin: 8px 0 0 20px;
+  padding: 0;
+}
+.esp32-setup-hint-list li {
+  margin-bottom: 2px;
+}
+
+.esp32-setup-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.esp32-setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.esp32-setup-label {
+  font-size: 12px;
+  color: #495057;
+}
+
+.esp32-setup-hint {
+  font-size: 11.5px;
+  color: #868e96;
+}
+
+.esp32-setup-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid #ced4da;
+  font-size: 13px;
+}
+.esp32-setup-input:focus {
+  outline: 2px solid #0d6efd44;
+  border-color: #0d6efd;
+}
+
+.esp32-setup-ssid-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.esp32-setup-ssid-row select {
+  flex: 1;
+}
+
+.esp32-setup-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #fdecec;
+  color: #842029;
+  border: 1px solid #f5c2c7;
+}
+.esp32-setup-error.hidden {
+  display: none;
+}
+
+.esp32-setup-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.esp32-setup-wait {
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8f9fa;
+  font-size: 13px;
+  color: #495057;
+  text-align: center;
+}
+
+.esp32-setup-wait.is-ok {
+  background: #d4edda;
+  color: #155724;
+}
+.esp32-setup-wait.is-err {
+  background: #fdecec;
+  color: #842029;
+}

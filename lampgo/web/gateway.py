@@ -6,6 +6,8 @@ import asyncio
 import json
 import re
 import uuid
+
+import httpx as httpx_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -156,9 +158,20 @@ class WebGateway:
             Route("/api/config/motion", self.api_config_motion, methods=["POST"]),
             Route("/api/config/safety", self.api_config_safety, methods=["POST"]),
             Route("/api/config/web", self.api_config_web, methods=["POST"]),
+            Route("/api/config/device_esp32", self.api_config_device_esp32, methods=["POST"]),
             Route("/api/config/detect", self.api_config_detect, methods=["POST"]),
             Route("/api/config/restart", self.api_config_restart, methods=["POST"]),
             Route("/api/config/llm", self.api_config_llm, methods=["GET", "POST"]),
+            # ---- ESP32 wireless device (discovery, proxy, wifi setup) ----
+            Route("/api/device/status", self.api_esp32_status, methods=["GET"]),
+            Route("/api/device/snapshot", self.api_esp32_snapshot, methods=["GET"]),
+            Route("/api/device/config", self.api_esp32_config, methods=["GET", "POST"]),
+            Route("/api/device/reboot", self.api_esp32_reboot, methods=["POST"]),
+            Route("/api/device/forget-wifi", self.api_esp32_forget_wifi, methods=["POST"]),
+            Route("/api/device/probe", self.api_esp32_probe, methods=["POST"]),
+            Route("/api/device/capture-audio/start", self.api_esp32_capture_start, methods=["POST"]),
+            Route("/api/device/capture-audio/stop", self.api_esp32_capture_stop, methods=["POST"]),
+            Route("/api/device/capture-audio/cancel", self.api_esp32_capture_cancel, methods=["POST"]),
             Route("/api/persona", self.api_persona_all, methods=["GET"]),
             Route("/api/persona/import-openclaw", self.api_persona_import, methods=["POST"]),
             Route("/api/persona/reset", self.api_persona_reset, methods=["POST"]),
@@ -365,7 +378,7 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": {"expressions": self._list_expressions()}})
 
     async def api_camera_snap(self, request: Request) -> JSONResponse:
-        camera = CameraCapture(self.server.config.camera)
+        camera = self._make_camera_capture()
         if not camera.enabled:
             return JSONResponse({"ok": False, "error": "camera_disabled", "result": {"device": camera.device_label}})
         data_url = camera.capture_data_url()
@@ -381,8 +394,15 @@ class WebGateway:
             }
         )
 
+    def _make_camera_capture(self) -> CameraCapture:
+        return CameraCapture(
+            self.server.config.camera,
+            device_esp32_config=self.server.config.device_esp32,
+            esp32_manager=self.server.esp32,
+        )
+
     async def api_sensor_context(self, request: Request) -> JSONResponse:
-        camera = CameraCapture(self.server.config.camera)
+        camera = self._make_camera_capture()
         return JSONResponse(
             {
                 "ok": True,
@@ -657,6 +677,8 @@ class WebGateway:
             "led.port",
         ),
         "voice": (
+            "voice.stt_provider",
+            "voice.stt_model",
             "voice.tts_provider",
             "voice.tts_model",
             "voice.tts_voice",
@@ -681,6 +703,14 @@ class WebGateway:
             "safety.max_acceleration",
         ),
         "web": ("web.port",),
+        "device_esp32": (
+            "device_esp32.enabled",
+            "device_esp32.preferred_host",
+            "device_esp32.jpeg_quality",
+            "device_esp32.framesize",
+            "device_esp32.mic_enabled",
+            "device_esp32.http_timeout_s",
+        ),
     }
 
     def _dump_section(self, section_fields: tuple[str, ...], provenance: dict[str, str]) -> dict[str, Any]:
@@ -827,7 +857,13 @@ class WebGateway:
         return await self._save_section(request, "device")
 
     async def api_config_voice(self, request: Request) -> JSONResponse:
-        return await self._save_section(request, "voice")
+        result = await self._save_section(request, "voice")
+        try:
+            from lampgo.voice.stt import build_stt
+            self.server._stt = build_stt(self.server.config)
+        except Exception:
+            logger.exception("web.stt_rebuild_failed")
+        return result
 
     async def api_config_motion(self, request: Request) -> JSONResponse:
         return await self._save_section(request, "motion")
@@ -837,6 +873,27 @@ class WebGateway:
 
     async def api_config_web(self, request: Request) -> JSONResponse:
         return await self._save_section(request, "web")
+
+    async def api_config_device_esp32(self, request: Request) -> JSONResponse:
+        """POST /api/config/device-esp32 — save ESP32 device preferences.
+
+        Extra-behavioral: when ``enabled`` flips true we start mDNS discovery
+        (and kill it when flipped back to false) so the Web UI doesn't need to
+        wait for a daemon restart just to toggle the switch.
+        """
+        was_enabled = bool(self.server.config.device_esp32.enabled)
+        response = await self._save_section(request, "device_esp32")
+        try:
+            new_cfg = self.server.config.device_esp32
+            self.server.esp32.update_config(new_cfg)
+            if new_cfg.enabled and not was_enabled:
+                await self.server.esp32.start()
+            elif not new_cfg.enabled and was_enabled:
+                await self.server.esp32.shutdown()
+                self.server.esp32.reset_session()
+        except Exception:
+            logger.exception("web.device_esp32_toggle_failed")
+        return response
 
     async def api_config_detect(self, request: Request) -> JSONResponse:
         """Run hardware autodetect on demand (used by the 硬件 tab button)."""
@@ -1273,6 +1330,194 @@ class WebGateway:
                 msg = resp.text[:200] or f"HTTP {resp.status_code}"
             return f"Provider 返回 {resp.status_code}: {msg}"
         return None
+
+    # ------------------------------------------------------------------
+    # ESP32 wireless camera/mic device
+    # ------------------------------------------------------------------
+
+    async def api_esp32_status(self, request: Request) -> JSONResponse:
+        """GET /api/device/status — discovery + health snapshot.
+
+        Used by the frontend to decide:
+          * whether to auto-open the WiFi setup wizard (no device found +
+            device_esp32.enabled=true but never seen)
+          * which banner to show (yellow = cold fallback to local, red =
+            mid-session disconnect)
+          * what to display in the Settings → 设备 tab
+        """
+        cfg = self.server.config.device_esp32
+        status = self.server.esp32.get_status()
+        mic_streaming = False
+        if cfg.mic_enabled and hasattr(self.server, "_voice") and self.server._voice is not None:
+            try:
+                from lampgo.device.audio_stream import Esp32AudioCapture
+                mic_streaming = isinstance(self.server._voice._capture, Esp32AudioCapture) and self.server._voice._capture.is_connected
+            except Exception:
+                pass
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "enabled": cfg.enabled,
+                    "preferred_host": cfg.preferred_host,
+                    "mic_enabled": cfg.mic_enabled,
+                    "mic_streaming": mic_streaming,
+                    "configured": status["configured"],
+                    "online": status["online"],
+                    "session_used": status["session_used"],
+                    "device": status["device"],
+                    "all_devices": status["all_devices"],
+                },
+            }
+        )
+
+    async def api_esp32_snapshot(self, request: Request) -> Any:
+        """GET /api/device/snapshot — proxy a single JPEG frame from the device."""
+        from starlette.responses import Response
+
+        jpeg = await self.server.esp32.snapshot_jpeg()
+        if jpeg is None:
+            return JSONResponse({"ok": False, "error": "no_device_or_capture_failed"}, status_code=503)
+        return Response(content=jpeg, media_type="image/jpeg")
+
+    async def api_esp32_config(self, request: Request) -> JSONResponse:
+        """GET returns the ESP32's live camera sensor config; POST forwards a patch."""
+        if request.method == "GET":
+            status, body, ctype = await self.server.esp32.proxy_get("/device/config")
+            if isinstance(body, (bytes, bytearray)):
+                try:
+                    body = json.loads(bytes(body).decode("utf-8"))
+                except Exception:
+                    body = {"ok": False, "error": "non_json_response"}
+            return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+        try:
+            patch = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+        if not isinstance(patch, dict):
+            return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        status, body, _ = await self.server.esp32.proxy_post("/device/config", patch)
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_esp32_reboot(self, request: Request) -> JSONResponse:
+        status, body, _ = await self.server.esp32.proxy_post("/device/reboot", {})
+        self.server.esp32.reset_session()
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_esp32_forget_wifi(self, request: Request) -> JSONResponse:
+        """POST /api/device/forget-wifi — clear NVS on ESP32 and reboot it into SoftAP."""
+        status, body, _ = await self.server.esp32.proxy_post("/device/forget-wifi", {})
+        self.server.esp32.reset_session()
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_esp32_probe(self, request: Request) -> JSONResponse:
+        """POST /api/device/probe — generic HTTP proxy to an ESP32 during setup.
+
+        The WiFi wizard sits on the lampgo origin but needs to talk to a device
+        that may be at one of two addresses:
+
+          * ``http://192.168.4.1`` — the SoftAP in provisioning mode (user has
+            joined Lampgo-Setup-XXXX on the same host running lampgo);
+          * ``http://lampgo-cam-XXXX.local`` — the already-provisioned device
+            that's just having new credentials pushed.
+
+        Body: ``{"base_url": "http://...", "path": "/scan", "method": "GET"|"POST",
+        "body": {...}|null}``. When ``base_url`` is empty we fall through to the
+        discovered device (same behaviour as /api/device/config).
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+
+        base_url = str(payload.get("base_url", "")).strip().rstrip("/")
+        path = str(payload.get("path", "/status"))
+        if not path.startswith("/"):
+            path = "/" + path
+        method = str(payload.get("method", "GET")).upper()
+        body = payload.get("body", None)
+
+        if not base_url:
+            active = self.server.esp32.get_active_base_url() if self.server.esp32 else None
+            if not active:
+                return JSONResponse(
+                    {"ok": False, "error": "no_device", "hint": "SoftAP 直连地址为空且未发现已配网设备"},
+                    status_code=503,
+                )
+            base_url = active.rstrip("/")
+
+        url = f"{base_url}{path}"
+        try:
+            async with httpx_module.AsyncClient(timeout=5.0) as client:
+                if method == "GET":
+                    resp = await client.get(url)
+                elif method == "POST":
+                    resp = await client.post(url, json=body or {})
+                else:
+                    return JSONResponse({"ok": False, "error": f"unsupported method: {method}"}, status_code=400)
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"probe_failed: {exc}", "url": url},
+                status_code=502,
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text[:512]}
+
+        return JSONResponse(
+            {
+                "ok": resp.status_code < 400,
+                "result": {
+                    "status_code": resp.status_code,
+                    "url": url,
+                    "body": data,
+                },
+            }
+        )
+
+    async def api_esp32_capture_start(self, request: Request) -> JSONResponse:
+        """POST /api/device/capture-audio/start — begin recording from ESP32 mic."""
+        from lampgo.device.audio_stream import Esp32AudioSession
+
+        if not self.server.esp32 or not self.server.config.device_esp32.enabled:
+            return JSONResponse({"ok": False, "error": "esp32_not_enabled"}, status_code=400)
+
+        if not hasattr(self, "_esp32_audio_session") or self._esp32_audio_session is None:
+            self._esp32_audio_session = Esp32AudioSession(self.server.esp32)
+
+        session: Esp32AudioSession = self._esp32_audio_session
+        if session.is_recording:
+            return JSONResponse({"ok": True, "result": {"status": "already_recording"}})
+
+        ok = await session.start()
+        if not ok:
+            return JSONResponse({"ok": False, "error": "esp32_offline"}, status_code=503)
+        return JSONResponse({"ok": True, "result": {"status": "recording"}})
+
+    async def api_esp32_capture_stop(self, request: Request) -> JSONResponse:
+        """POST /api/device/capture-audio/stop — stop recording, return WAV."""
+        import base64
+
+        session = getattr(self, "_esp32_audio_session", None)
+        if session is None or not session.is_recording:
+            return JSONResponse({"ok": False, "error": "not_recording"}, status_code=400)
+
+        wav_bytes = await session.stop()
+        if wav_bytes is None:
+            return JSONResponse({"ok": False, "error": "capture_too_short"}, status_code=400)
+
+        b64 = base64.b64encode(wav_bytes).decode("ascii")
+        return JSONResponse({"ok": True, "result": {"audio_data": b64}})
+
+    async def api_esp32_capture_cancel(self, request: Request) -> JSONResponse:
+        """POST /api/device/capture-audio/cancel — discard recording."""
+        session = getattr(self, "_esp32_audio_session", None)
+        if session is not None:
+            session.cancel()
+        return JSONResponse({"ok": True, "result": {"status": "cancelled"}})
 
     async def api_persona_all(self, request: Request) -> JSONResponse:
         from lampgo import personastore
@@ -1802,7 +2047,13 @@ class WebGateway:
             await ws.send_json(result)
 
         elif msg_type == "set_camera":
-            result = self.server._handle_set_camera(str(msg.get("port", "")))
+            port_val = str(msg.get("port", ""))
+            result = self.server._handle_set_camera(port_val)
+            if port_val == "esp32" and self.server.esp32 and not self.server.esp32._started:
+                try:
+                    await self.server.esp32.start()
+                except Exception:
+                    logger.exception("web.esp32_start_on_camera_switch")
             result["type"] = "set_camera"
             result["request_id"] = request_id
             await ws.send_json(result)

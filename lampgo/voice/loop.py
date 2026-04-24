@@ -53,14 +53,34 @@ class VoiceLoop:
             self._stream_tts = True
 
         self._vad = EnergyVAD()
+        self._capture = self._build_capture(cfg)
+        self._capture_source = "esp32" if self._is_esp32_capture() else "local"
+        self._running = False
+
+    def _build_capture(self, cfg) -> AudioCapture:
+        """Pick ESP32 or local mic based on config + device availability."""
+        if cfg.device_esp32.mic_enabled and hasattr(self._server, "esp32") and self._server.esp32:
+            esp32 = self._server.esp32
+            if esp32.is_online():
+                from lampgo.device.audio_stream import Esp32AudioCapture
+                logger.info("voice.using_esp32_mic")
+                return Esp32AudioCapture(esp32)  # type: ignore[return-value]
+            logger.info("voice.esp32_mic_offline_fallback")
+
         mic_dev: int | str | None = None
         if cfg.voice.mic_device:
             try:
                 mic_dev = int(cfg.voice.mic_device)
             except ValueError:
                 mic_dev = cfg.voice.mic_device
-        self._capture = AudioCapture(sample_rate=SAMPLE_RATE, device=mic_dev)
-        self._running = False
+        return AudioCapture(sample_rate=SAMPLE_RATE, device=mic_dev)
+
+    def _is_esp32_capture(self) -> bool:
+        try:
+            from lampgo.device.audio_stream import Esp32AudioCapture
+            return isinstance(self._capture, Esp32AudioCapture)
+        except ImportError:
+            return False
 
     async def run(self) -> None:
         self._capture.start()
