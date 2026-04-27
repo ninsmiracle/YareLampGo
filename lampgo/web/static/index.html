@@ -122,7 +122,7 @@
         </div>
 
         <div class="topbar-right">
-          <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">强行停止</button>
+          <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">安全急停</button>
         </div>
       </header>
 
@@ -352,8 +352,8 @@
             <div class="view-subtitle">模型、人设与记忆。改完即时生效，不必重启。</div>
           </div>
           <div class="settings-tabs" role="tablist" aria-label="配置分类">
-            <button class="settings-tab is-active" type="button" data-settings-tab="model" role="tab">模型</button>
-            <button class="settings-tab" type="button" data-settings-tab="hardware" role="tab">硬件</button>
+            <button class="settings-tab is-active" type="button" data-settings-tab="hardware" role="tab">硬件</button>
+            <button class="settings-tab" type="button" data-settings-tab="model" role="tab">模型</button>
             <button class="settings-tab" type="button" data-settings-tab="persona" role="tab">人设</button>
             <button class="settings-tab" type="button" data-settings-tab="memory" role="tab">记忆</button>
           </div>
@@ -368,7 +368,7 @@
         </div>
 
         <div class="settings-body">
-            <div class="settings-pane" data-settings-pane="model">
+            <div class="settings-pane hidden" data-settings-pane="model">
             <div class="settings-card">
               <div class="settings-card-title">LLM 模型</div>
               <div class="settings-card-desc">选择 Provider 并填写 API 密钥；保存前会发一条 ping 校验连通性。</div>
@@ -772,68 +772,53 @@
             </div>
             </div>
 
-            <div class="settings-pane hidden" data-settings-pane="hardware">
+            <div class="settings-pane" data-settings-pane="hardware">
 
             <div class="settings-card">
               <div class="settings-card-title">
-                ESP32 无线摄像头 / 麦克风
-                <span id="esp32-state-chip" class="esp32-state-chip is-offline">未发现</span>
+                无线接入
               </div>
               <div class="settings-card-desc">
-                XIAO ESP32S3 + lampgo-cam 固件。开启后 lampgo 会通过 mDNS
-                （<code>_lampgo-cam._tcp.local.</code>）在同一 WiFi 下发现设备并优先走无线采集；
-                设备离线时<strong>冷启动</strong>会自动回退到本地 cv2 / sounddevice 并在页面显示提示条，
-                <strong>会话进行中</strong>掉线不会切换，LLM 会自然地告诉你"看不到了"。
+                配网后 lampgo 会自动在同一 WiFi 下发现台灯设备并优先走无线采集；
+                设备离线时自动回退到本地摄像头 / 麦克风。
               </div>
 
               <div id="esp32-status-block" class="esp32-status-block">
-                <div class="esp32-status-row">
-                  <span class="esp32-status-key">设备</span>
-                  <span id="esp32-status-host" class="esp32-status-val">未连接</span>
+                <div class="esp32-status-head">
+                  <span class="esp32-status-title">设备</span>
+                  <div class="esp32-status-head-actions">
+                    <span id="esp32-refresh-status" class="esp32-refresh-status" aria-live="polite"></span>
+                    <button id="btn-esp32-refresh" class="esp32-icon-button" type="button" title="刷新状态" aria-label="刷新 ESP32 状态">↻</button>
+                  </div>
                 </div>
                 <div class="esp32-status-row">
+                  <span class="esp32-status-key">连接</span>
+                  <div class="esp32-status-val esp32-host-row">
+                    <select class="settings-input esp32-device-select" data-cfg-input="device_esp32.preferred_host" id="esp32-host-select">
+                      <option value="">自动发现</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="esp32-status-row" id="esp32-ip-row">
                   <span class="esp32-status-key">IP</span>
                   <span id="esp32-status-ip" class="esp32-status-val">—</span>
+                  <input id="esp32-manual-ip" class="settings-input esp32-manual-ip hidden" type="text" placeholder="192.168.31.229 或 lampgo-cam-0834.local">
                 </div>
                 <div class="esp32-status-row">
-                  <span class="esp32-status-key">健康</span>
-                  <span id="esp32-status-health" class="esp32-status-val">—</span>
+                  <span class="esp32-status-key">状态</span>
+                  <span id="esp32-status-host" class="esp32-status-val">未配网</span>
                 </div>
-                <div class="esp32-status-row">
-                  <span class="esp32-status-key">麦克风</span>
-                  <span id="esp32-status-mic" class="esp32-status-val">—</span>
-                </div>
-                <div class="esp32-status-actions">
-                  <button id="btn-esp32-setup-wifi" class="ghost-button" type="button" title="通过 Lampgo-Setup SoftAP 给 ESP32 配 WiFi">配置 WiFi</button>
-                  <button id="btn-esp32-refresh" class="ghost-button" type="button">刷新状态</button>
-                  <button id="btn-esp32-push-config" class="ghost-button" type="button" title="把下面的画质/麦克风设置推送给 ESP32">推送画质</button>
-                  <button id="btn-esp32-reboot" class="ghost-button" type="button">重启设备</button>
-                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除 ESP32 端保存的 WiFi 凭据，设备会重新开放 SoftAP">忘记 WiFi</button>
+                <div class="esp32-inline-actions">
+                  <button id="btn-esp32-setup-wifi" class="ghost-button" type="button" title="连接 ESP32 临时热点并配置 WiFi">配网</button>
+                  <button id="btn-esp32-reboot" class="ghost-button" type="button">重启</button>
+                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除 WiFi 并删除设备">删除设备</button>
+                  <span id="esp32-action-status" class="settings-status" aria-live="polite"></span>
                 </div>
               </div>
 
-              <div class="settings-form" data-cfg-section="device_esp32">
-                <label class="settings-field" data-cfg-field="device_esp32.enabled">
-                  <span class="settings-field-label">
-                    <input type="checkbox" data-cfg-input="device_esp32.enabled">
-                    启用 ESP32（优先使用，离线时冷启动回退本地）
-                  </span>
-                  <span class="settings-field-hint">关闭 = 完全走本地 cv2 / sounddevice；开启 = 冷启动时若没发现 ESP32 自动用本地并显示提示条。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.enabled"></span>
-                </label>
-                <label class="settings-field" data-cfg-field="device_esp32.preferred_host">
-                  <span class="settings-field-label">指定设备（preferred_host）</span>
-                  <div class="esp32-host-row">
-                    <select class="settings-input" data-cfg-input="device_esp32.preferred_host" id="esp32-host-select">
-                      <option value="">自动（选最近发现的设备）</option>
-                    </select>
-                    <button id="btn-esp32-host-refresh" class="ghost-button" type="button" title="刷新设备列表">刷新</button>
-                  </div>
-                  <span class="settings-field-hint">
-                    mDNS 发现的设备会自动列出。也可手动填 IP（如 <code>192.168.31.229</code>）或 hostname（如 <code>lampgo-cam-0834.local</code>）。
-                  </span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.preferred_host"></span>
-                </label>
+              <details class="esp32-param-panel" open>
+                <summary>画面参数</summary>
+                <div class="settings-form" data-cfg-section="device_esp32">
                 <label class="settings-field" data-cfg-field="device_esp32.framesize">
                   <span class="settings-field-label">画面尺寸（framesize）</span>
                   <select class="settings-input" data-cfg-input="device_esp32.framesize">
@@ -845,7 +830,7 @@
                     <option value="10">10 · 1280x720 (HD)</option>
                     <option value="11">11 · 1280x1024 (SXGA)</option>
                   </select>
-                  <span class="settings-field-hint">OV2640 支持的画面尺寸索引。VGA / SVGA 对台灯视觉足够，更高会占带宽且抖动变大。</span>
+                  <span class="settings-field-hint">VGA / SVGA 对台灯视觉足够，更高会占带宽且抖动变大。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.framesize"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="device_esp32.jpeg_quality">
@@ -854,26 +839,19 @@
                   <span class="settings-field-hint">数值越小画质越好但体积越大；10–16 比较平衡。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.jpeg_quality"></span>
                 </label>
-                <label class="settings-field" data-cfg-field="device_esp32.mic_enabled">
-                  <span class="settings-field-label">
-                    <input type="checkbox" data-cfg-input="device_esp32.mic_enabled">
-                    使用 ESP32 麦克风（实验功能，离线时回退本地 sounddevice）
-                  </span>
-                  <span class="settings-field-hint">PDM 麦克风从 ESP32 WebSocket 推流；固件 M5 里单独启用。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.mic_enabled"></span>
-                </label>
                 <label class="settings-field" data-cfg-field="device_esp32.http_timeout_s">
                   <span class="settings-field-label">HTTP 超时（秒）</span>
                   <input class="settings-input" type="number" min="1" max="30" step="0.5" data-cfg-input="device_esp32.http_timeout_s">
                   <span class="settings-field-hint">向 ESP32 代理请求的超时。WiFi 差时可适度调高。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device_esp32.http_timeout_s"></span>
                 </label>
-              </div>
+                </div>
+                <div class="settings-actions">
+                  <span id="cfg-esp32-status" class="settings-status" aria-live="polite"></span>
+                  <button class="send-button" type="button" data-cfg-save="device_esp32">保存</button>
+                </div>
+              </details>
 
-              <div class="settings-actions">
-                <span id="cfg-esp32-status" class="settings-status" aria-live="polite"></span>
-                <button class="send-button" type="button" data-cfg-save="device_esp32">保存并生效</button>
-              </div>
             </div>
 
             <div class="settings-card">
@@ -1118,36 +1096,52 @@
   <dialog id="esp32-setup-dialog" class="esp32-setup-dialog">
     <div class="esp32-setup-card">
       <div class="esp32-setup-head">
-        <div class="esp32-setup-title">ESP32 WiFi 配网向导</div>
+        <div class="esp32-setup-title">台灯 WiFi 配网向导</div>
         <button id="btn-esp32-setup-close" class="esp32-setup-close" type="button" aria-label="关闭">×</button>
       </div>
 
       <ol class="esp32-setup-steps">
-        <li class="is-active" data-step="1">1 · 连 SoftAP</li>
-        <li data-step="2">2 · 选 WiFi</li>
+        <li data-step="0" class="hidden">0 · 重置设备</li>
+        <li class="is-active" data-step="1">1 · 连接设备热点</li>
+        <li data-step="2">2 · 连接可用 WiFi</li>
         <li data-step="3">3 · 等待回连</li>
       </ol>
 
-      <section class="esp32-setup-step" data-step="1">
+      <section class="esp32-setup-step hidden" data-step="0">
         <div class="esp32-setup-desc">
-          首次使用时 ESP32 会开启一个临时热点，名字形如
+          当前设备在线，需要先重置 WiFi 才能重新配网。
+          <ol class="esp32-setup-hint-list">
+            <li>点击下方「删除设备并继续」，系统会清除设备的 WiFi 配置，设备将自动重启并进入配网模式。</li>
+            <li>如果设备不在电脑旁（无法通过网络操作），也可以<b>长按 ESP32 上的 BOOT 按钮 10 秒</b>手动重置。</li>
+          </ol>
+        </div>
+        <div class="esp32-setup-actions">
+          <button id="btn-esp32-setup-forget-and-go" class="send-button" type="button">删除设备并继续 →</button>
+        </div>
+      </section>
+
+      <section class="esp32-setup-step hidden" data-step="1">
+        <div class="esp32-setup-desc">
+          首次使用或重置网络后，ESP32 会开启一个临时 WiFi 热点，名字形如
           <code>Lampgo-Setup-XXXX</code>（XXXX 为设备 MAC 末 4 位，印在卡片上或串口日志里），
           默认密码 <code>lampgo123</code>。
           <ol class="esp32-setup-hint-list">
             <li>用手机 / 笔记本连上该热点。</li>
             <li>系统可能会弹出"无互联网连接"的提示，<b>保持连接</b>即可。</li>
-            <li>默认会打开配置页 <a href="http://192.168.4.1" target="_blank" rel="noreferrer">http://192.168.4.1</a>；lampgo 本地页面也能远程代理配置（如果你仍连着家里的 WiFi）。</li>
+            <li>连上后回到这个页面，点击下一步。一般不需要手动打开其它网页。</li>
           </ol>
+          <p class="esp32-setup-tip">找不到 <code>Lampgo-Setup-XXXX</code>？长按 ESP32 BOOT 按钮 10 秒可重置 WiFi 并重新进入配网模式。</p>
         </div>
         <div class="esp32-setup-actions">
-          <button id="btn-esp32-setup-next-1" class="send-button" type="button">我已连上 SoftAP →</button>
+          <button id="btn-esp32-setup-next-1" class="send-button" type="button">我已连上设备热点 →</button>
         </div>
       </section>
 
       <section class="esp32-setup-step hidden" data-step="2">
         <div class="esp32-setup-desc">
-          选择家里的 2.4GHz WiFi（ESP32 不支持 5GHz），输入密码后点击"发送"。
-          发送后 ESP32 会立即关闭 SoftAP 并用该凭据连家里 WiFi。
+          选择要让台灯连接的 2.4GHz WiFi（设备暂不支持 5GHz），输入密码后点击“发送”。
+          配置成功后，台灯会一直连接这个 WiFi；以后电脑上的 lampgo 后端也会通过这个 WiFi 找到并连接台灯。
+          发送后设备会关闭临时热点，并尝试连接你选择的 WiFi。
         </div>
         <div class="esp32-setup-row">
           <label class="esp32-setup-field">
@@ -1163,32 +1157,37 @@
           </label>
           <label class="esp32-setup-field">
             <span class="esp32-setup-label">密码</span>
-            <input id="esp32-psk" class="esp32-setup-input" type="password" autocomplete="new-password">
+            <div class="esp32-password-row">
+              <input id="esp32-psk" class="esp32-setup-input" type="password" autocomplete="new-password">
+              <button id="btn-esp32-toggle-psk" class="esp32-password-toggle" type="button" aria-label="显示密码" title="显示密码">👁</button>
+            </div>
           </label>
-          <label class="esp32-setup-field">
-            <span class="esp32-setup-label">
-              SoftAP 直连地址（可选）
-            </span>
-            <input id="esp32-softap-base" class="esp32-setup-input" type="text" value="http://192.168.4.1" autocomplete="off">
-            <span class="esp32-setup-hint">
-              留默认即可。如果你用本机直接连 ESP32 的 SoftAP，向导会直连设备；
-              否则会尝试通过 lampgo 后端代理（仅在设备之前已上过家里 WiFi 时可用）。
-            </span>
-          </label>
+          <details class="esp32-setup-advanced">
+            <summary>高级设置</summary>
+            <label class="esp32-setup-field">
+              <span class="esp32-setup-label">
+                设备配网页地址（可选）
+              </span>
+              <input id="esp32-softap-base" class="esp32-setup-input" type="text" value="http://192.168.4.1" autocomplete="off">
+              <span class="esp32-setup-hint">
+                留默认即可。只有在自动扫描失败时，才需要检查这里是否为 <code>http://192.168.4.1</code>。
+              </span>
+            </label>
+          </details>
         </div>
         <div id="esp32-setup-error" class="esp32-setup-error hidden"></div>
         <div class="esp32-setup-actions">
           <button id="btn-esp32-setup-back-2" class="ghost-button" type="button">← 上一步</button>
-          <button id="btn-esp32-setup-submit" class="send-button" type="button">发送凭据</button>
+          <button id="btn-esp32-setup-submit" class="send-button" type="button">发送 WiFi 信息</button>
         </div>
       </section>
 
       <section class="esp32-setup-step hidden" data-step="3">
         <div class="esp32-setup-desc">
-          已把凭据发给 ESP32。设备正在重启并尝试连 WiFi，完成后会在 lampgo 网络里 mDNS 广播自己，
+          已把 WiFi 信息发给 ESP32。设备正在重启并尝试连接 WiFi，完成后会出现在 lampgo 里，
           通常 5–15 秒就能被发现。
         </div>
-        <div id="esp32-wait-status" class="esp32-setup-wait">等待 mDNS 发现设备…</div>
+        <div id="esp32-wait-status" class="esp32-setup-wait">等待发现设备…</div>
         <div class="esp32-setup-actions">
           <button id="btn-esp32-setup-done" class="send-button" type="button">完成</button>
         </div>

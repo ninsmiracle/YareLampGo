@@ -1406,9 +1406,24 @@ class WebGateway:
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def api_esp32_forget_wifi(self, request: Request) -> JSONResponse:
-        """POST /api/device/forget-wifi — clear NVS on ESP32 and reboot it into SoftAP."""
+        """POST /api/device/forget-wifi — clear NVS on ESP32 and reboot it into SoftAP.
+
+        Also sets enabled/mic_enabled to false so the backend stops mDNS
+        discovery until the next provisioning cycle re-enables them.
+        """
         status, body, _ = await self.server.esp32.proxy_post("/device/forget-wifi", {})
-        self.server.esp32.reset_session()
+        try:
+            await self.server.esp32.shutdown()
+            self.server.esp32.reset_session()
+            from lampgo import personastore
+            personastore.patch_overrides_toml({
+                "device_esp32": {"enabled": False, "mic_enabled": False},
+            })
+            self.server.config.device_esp32.enabled = False
+            self.server.config.device_esp32.mic_enabled = False
+            self.server.esp32.update_config(self.server.config.device_esp32)
+        except Exception:
+            logger.exception("web.forget_wifi_cleanup_failed")
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def api_esp32_probe(self, request: Request) -> JSONResponse:

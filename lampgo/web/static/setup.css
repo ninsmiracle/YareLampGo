@@ -71,14 +71,15 @@
 
 /* ---- settings card status chip & status block ---- */
 
-.esp32-state-chip {
+.esp32-status-val.esp32-state-chip {
   display: inline-block;
-  margin-left: 8px;
+  width: fit-content;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
   font-weight: 500;
   vertical-align: middle;
+  flex: 0 0 auto;
 }
 .esp32-state-chip.is-online {
   background: #d4edda;
@@ -104,9 +105,50 @@
   line-height: 1.7;
 }
 
+.esp32-status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.esp32-status-title,
+.esp32-config-title {
+  font-weight: 600;
+  color: #212529;
+}
+
+.esp32-status-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.esp32-refresh-status {
+  color: #6c757d;
+  font-size: 12px;
+}
+
+.esp32-icon-button {
+  width: 26px;
+  height: 26px;
+  border: 1px solid #dee2e6;
+  border-radius: 999px;
+  background: #fff;
+  color: #495057;
+  cursor: pointer;
+  line-height: 1;
+}
+.esp32-icon-button:hover {
+  background: #f1f3f5;
+}
+
 .esp32-status-row {
   display: flex;
+  align-items: center;
   gap: 10px;
+  margin-top: 6px;
 }
 
 .esp32-status-key {
@@ -115,8 +157,46 @@
 }
 
 .esp32-status-val {
+  flex: 1;
   color: #212529;
   word-break: break-all;
+}
+
+.esp32-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+  flex-wrap: wrap;
+}
+.esp32-inline-actions .ghost-button {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.esp32-status-val.hidden {
+  display: none;
+}
+
+.esp32-manual-ip {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.esp32-manual-ip.hidden {
+  display: none;
+}
+
+.esp32-device-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 3px 6px;
+  border-radius: 4px;
 }
 
 .esp32-status-actions {
@@ -124,6 +204,56 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.esp32-config-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.esp32-config-desc,
+.esp32-advanced-hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #6c757d;
+}
+
+.esp32-param-panel {
+  margin-top: 12px;
+}
+
+.esp32-param-panel > summary,
+.esp32-advanced-actions summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 0;
+  color: #212529;
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.esp32-param-panel[open] > summary {
+  margin-bottom: 12px;
+}
+
+.esp32-advanced-actions {
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+.esp32-advanced-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .ghost-button.is-danger {
@@ -244,6 +374,12 @@
   margin-bottom: 2px;
 }
 
+.esp32-setup-tip {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #6c757d;
+}
+
 .esp32-setup-row {
   display: flex;
   flex-direction: column;
@@ -277,6 +413,48 @@
 .esp32-setup-input:focus {
   outline: 2px solid #0d6efd44;
   border-color: #0d6efd;
+}
+
+.esp32-password-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.esp32-password-row .esp32-setup-input {
+  padding-right: 42px;
+}
+
+.esp32-password-toggle {
+  position: absolute;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  color: #6c757d;
+  font-size: 14px;
+}
+
+.esp32-password-toggle:hover {
+  background: #f1f3f5;
+}
+
+.esp32-setup-advanced {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.esp32-setup-advanced summary {
+  cursor: pointer;
+  color: #6c757d;
+  user-select: none;
+}
+
+.esp32-setup-advanced .esp32-setup-field {
+  margin-top: 8px;
 }
 
 .esp32-setup-ssid-row {
