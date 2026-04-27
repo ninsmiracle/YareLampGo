@@ -5974,6 +5974,37 @@
     }
   }
 
+  async function pushEsp32LiveConfigFromSavedValues(values) {
+    if (!values || values["device_esp32.enabled"] === false) {
+      return { ok: true, skipped: true, reason: "disabled" };
+    }
+
+    const payload = {};
+    if (values["device_esp32.framesize"] !== undefined && values["device_esp32.framesize"] !== "") {
+      payload.framesize = Number(values["device_esp32.framesize"]);
+    }
+    if (values["device_esp32.jpeg_quality"] !== undefined && values["device_esp32.jpeg_quality"] !== "") {
+      payload.jpeg_quality = Number(values["device_esp32.jpeg_quality"]);
+    }
+    if (values["device_esp32.mic_enabled"] !== undefined) {
+      payload.mic_enabled = !!values["device_esp32.mic_enabled"];
+    }
+    if (!Object.keys(payload).length) {
+      return { ok: true, skipped: true, reason: "empty" };
+    }
+
+    const res = await fetch("/api/device/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) {
+      return { ok: false, error: body.error || `HTTP ${res.status}` };
+    }
+    return { ok: true, skipped: false };
+  }
+
   async function saveCfgFromButton(btn) {
     // Collect inputs within the card that owns this save button. Group by the
     // field's API section (word before the first `.`) so a card can mix fields
@@ -6044,6 +6075,23 @@
       statusEl.textContent = errors.length
         ? `保存失败：${errors.join("; ")}`
         : "已保存";
+    }
+    if (!errors.length && primarySection === "device_esp32" && grouped.device_esp32) {
+      if (statusEl) statusEl.textContent = "已保存，正在同步设备…";
+      try {
+        const pushed = await pushEsp32LiveConfigFromSavedValues(grouped.device_esp32);
+        if (statusEl) {
+          if (pushed.skipped && pushed.reason === "disabled") {
+            statusEl.textContent = "已保存，ESP32 已关闭";
+          } else if (pushed.ok) {
+            statusEl.textContent = pushed.skipped ? "已保存" : "已保存并生效";
+          } else {
+            statusEl.textContent = `已保存，但设备未同步：${pushed.error || "设备离线"}`;
+          }
+        }
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `已保存，但设备未同步：${err.message || "设备离线"}`;
+      }
     }
     if (needsRestart.length) showColdRestartBanner(needsRestart);
     // Settings save persists to disk + updates in-memory config, but the

@@ -33,18 +33,17 @@
     bannerSetup: document.getElementById("btn-esp32-banner-setup"),
     bannerDismiss: document.getElementById("btn-esp32-banner-dismiss"),
 
-    chip: document.getElementById("esp32-state-chip"),
     host: document.getElementById("esp32-status-host"),
     ip: document.getElementById("esp32-status-ip"),
-    health: document.getElementById("esp32-status-health"),
-    mic: document.getElementById("esp32-status-mic"),
+    manualIp: document.getElementById("esp32-manual-ip"),
+    refreshStatus: document.getElementById("esp32-refresh-status"),
 
     btnSetup: document.getElementById("btn-esp32-setup-wifi"),
     btnRefresh: document.getElementById("btn-esp32-refresh"),
-    btnPush: document.getElementById("btn-esp32-push-config"),
     btnReboot: document.getElementById("btn-esp32-reboot"),
     btnForget: document.getElementById("btn-esp32-forget"),
     cfgStatus: document.getElementById("cfg-esp32-status"),
+    actionStatus: document.getElementById("esp32-action-status"),
 
     dialog: document.getElementById("esp32-setup-dialog"),
     steps: document.querySelectorAll(".esp32-setup-steps li"),
@@ -55,10 +54,12 @@
     back2: document.getElementById("btn-esp32-setup-back-2"),
     submit: document.getElementById("btn-esp32-setup-submit"),
     done: document.getElementById("btn-esp32-setup-done"),
+    forgetAndGo: document.getElementById("btn-esp32-setup-forget-and-go"),
 
     ssidSelect: document.getElementById("esp32-ssid-select"),
     ssidManual: document.getElementById("esp32-ssid-manual"),
     psk: document.getElementById("esp32-psk"),
+    togglePsk: document.getElementById("btn-esp32-toggle-psk"),
     softapBase: document.getElementById("esp32-softap-base"),
     rescan: document.getElementById("btn-esp32-rescan"),
     err: document.getElementById("esp32-setup-error"),
@@ -67,15 +68,15 @@
 
   const dom2 = {
     hostSelect: document.getElementById("esp32-host-select"),
-    hostRefresh: document.getElementById("btn-esp32-host-refresh"),
   };
 
-  if (!dom.chip && !dom.dialog && !dom.banner) return;
+  if (!dom.host && !dom.dialog && !dom.banner) return;
 
   const state = {
     bannerDismissedOnce: false,
     sessionUsedEver: false,
     lastStatus: null,
+    manualMode: false,
   };
 
   // -----------------------------------------------------------------------
@@ -98,42 +99,24 @@
     state.lastStatus = status;
     const enabled = !!(status && status.enabled);
     const online = !!(status && status.online);
+    const configured = !!(status && status.configured);
     const sessionUsed = !!(status && status.session_used);
     if (sessionUsed) state.sessionUsedEver = true;
 
-    if (dom.chip) {
-      if (!enabled) {
-        dom.chip.textContent = "未启用";
-        dom.chip.className = "esp32-state-chip is-offline";
-      } else if (online) {
-        dom.chip.textContent = "在线";
-        dom.chip.className = "esp32-state-chip is-online";
-      } else if (status && status.configured) {
-        dom.chip.textContent = "离线";
-        dom.chip.className = "esp32-state-chip is-warn";
-      } else {
-        dom.chip.textContent = "发现中…";
-        dom.chip.className = "esp32-state-chip is-offline";
-      }
+    const dev = (status && status.device) || null;
+    if (dom.ip && !state.manualMode) {
+      dom.ip.textContent = dev ? (dev.ip || "—") : "—";
     }
-
-    if (dom.host || dom.ip || dom.health) {
-      const dev = (status && status.device) || null;
-      if (dom.host) dom.host.textContent = dev ? (dev.host || dev.hostname || dev.ip || "—") : "未连接";
-      if (dom.ip) dom.ip.textContent = dev ? (dev.ip || "—") : "—";
-      if (dom.health) {
-        if (!enabled) dom.health.textContent = "已禁用";
-        else if (online) dom.health.textContent = "✓ 可代理";
-        else if (dev) dom.health.textContent = "✗ 健康检查失败";
-        else dom.health.textContent = "未发现设备";
-      }
-      if (dom.mic) {
-        const micEnabled = !!(status && status.mic_enabled);
-        const micStreaming = !!(status && status.mic_streaming);
-        if (!micEnabled) dom.mic.textContent = "未启用";
-        else if (micStreaming) dom.mic.textContent = "✓ ESP32 推流中";
-        else if (online) dom.mic.textContent = "已启用（等待连接）";
-        else dom.mic.textContent = "已启用（设备离线，用本地麦克风）";
+    if (dom.host) {
+      if (online) {
+        dom.host.textContent = "在线";
+        dom.host.className = "esp32-status-val esp32-state-chip is-online";
+      } else if (configured || enabled) {
+        dom.host.textContent = "离线";
+        dom.host.className = "esp32-status-val esp32-state-chip is-warn";
+      } else {
+        dom.host.textContent = "未配网";
+        dom.host.className = "esp32-status-val esp32-state-chip is-offline";
       }
     }
 
@@ -147,19 +130,14 @@
       return;
     }
     const enabled = !!(status && status.enabled);
-    if (!enabled) {
+    const online = !!(status && status.online);
+
+    if (!enabled || online) {
       dom.banner.classList.add("hidden");
       return;
     }
 
-    const online = !!status.online;
     const sessionUsed = !!status.session_used || state.sessionUsedEver;
-
-    if (online) {
-      dom.banner.classList.add("hidden");
-      return;
-    }
-
     if (sessionUsed) {
       dom.banner.classList.remove("hidden", "is-offline-mid");
       dom.banner.classList.add("is-offline-mid");
@@ -193,43 +171,91 @@
     manual.value = "__manual__";
     manual.textContent = "\u624B\u52A8\u8F93\u5165 IP / \u4E3B\u673A\u540D\u2026";
     sel.appendChild(manual);
-    if (current && ![...sel.options].some((o) => o.value === current)) {
+    const preferred = (status && status.preferred_host) || "";
+    const active = current || preferred;
+    if (active && ![...sel.options].some((o) => o.value === active)) {
       const keep = document.createElement("option");
-      keep.value = current;
-      keep.textContent = current + " (\u5DF2\u914D\u7F6E)";
+      keep.value = active;
+      keep.textContent = active + " (\u5DF2\u914D\u7F6E)";
       sel.insertBefore(keep, manual);
     }
-    sel.value = current || "";
+    sel.value = active || "";
+  }
+
+  function setManualMode(on) {
+    state.manualMode = on;
+    if (dom.ip) dom.ip.classList.toggle("hidden", on);
+    if (dom.manualIp) dom.manualIp.classList.toggle("hidden", !on);
+    if (on && dom.manualIp) dom.manualIp.focus();
   }
 
   if (dom2.hostSelect) {
-    dom2.hostSelect.addEventListener("change", () => {
+    dom2.hostSelect.addEventListener("change", async () => {
       if (dom2.hostSelect.value === "__manual__") {
-        const val = prompt("\u8BF7\u8F93\u5165 ESP32 \u7684 IP \u6216\u4E3B\u673A\u540D\uFF08\u5982 192.168.31.229 \u6216 lampgo-cam-0834.local\uFF09\uFF1A", "");
-        if (val && val.trim()) {
-          const opt = document.createElement("option");
-          opt.value = val.trim();
-          opt.textContent = val.trim();
-          dom2.hostSelect.insertBefore(opt, dom2.hostSelect.querySelector('[value="__manual__"]'));
-          dom2.hostSelect.value = val.trim();
-        } else {
-          dom2.hostSelect.value = "";
-        }
+        setManualMode(true);
+        return;
+      }
+      setManualMode(false);
+      const val = dom2.hostSelect.value;
+      try {
+        await fetch("/api/config/device_esp32", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            "device_esp32.preferred_host": val,
+            "device_esp32.enabled": true,
+            "device_esp32.mic_enabled": true,
+          }),
+        });
+      } catch (_) {}
+      await pollStatus();
+    });
+  }
+
+  async function applyManualHost(val) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = val;
+    dom2.hostSelect.insertBefore(opt, dom2.hostSelect.querySelector('[value="__manual__"]'));
+    dom2.hostSelect.value = val;
+    if (dom.ip) dom.ip.textContent = val;
+    setManualMode(false);
+    try {
+      await fetch("/api/config/device_esp32", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          "device_esp32.preferred_host": val,
+          "device_esp32.enabled": true,
+          "device_esp32.mic_enabled": true,
+        }),
+      });
+    } catch (_) {}
+    await pollStatus();
+  }
+
+  if (dom.manualIp) {
+    dom.manualIp.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const val = dom.manualIp.value.trim();
+      if (!val) {
+        dom2.hostSelect.value = "";
+        setManualMode(false);
+        return;
+      }
+      void applyManualHost(val);
+    });
+    dom.manualIp.addEventListener("blur", () => {
+      const val = (dom.manualIp.value || "").trim();
+      if (val) {
+        void applyManualHost(val);
+      } else if (state.manualMode) {
+        dom2.hostSelect.value = "";
+        setManualMode(false);
       }
     });
   }
 
-  if (dom2.hostRefresh) {
-    dom2.hostRefresh.addEventListener("click", async () => {
-      dom2.hostRefresh.disabled = true;
-      dom2.hostRefresh.textContent = "\u641C\u7D22\u4E2D\u2026";
-      const status = await fetchStatus();
-      renderStatus(status);
-      populateHostSelect(status);
-      dom2.hostRefresh.disabled = false;
-      dom2.hostRefresh.textContent = "\u5237\u65B0";
-    });
-  }
 
   async function pollStatus() {
     const status = await fetchStatus();
@@ -248,63 +274,70 @@
     if (dom.cfgStatus) dom.cfgStatus.textContent = text || "";
   }
 
-  if (dom.btnRefresh) {
-    dom.btnRefresh.addEventListener("click", () => {
-      setCfgStatus("刷新中…");
-      pollStatus().then(() => setCfgStatus("已刷新"));
-    });
+  function setActionStatus(text) {
+    if (dom.actionStatus) dom.actionStatus.textContent = text || "";
   }
 
-  if (dom.btnPush) {
-    dom.btnPush.addEventListener("click", async () => {
-      const fs = document.querySelector('[data-cfg-input="device_esp32.framesize"]');
-      const q = document.querySelector('[data-cfg-input="device_esp32.jpeg_quality"]');
-      const mic = document.querySelector('[data-cfg-input="device_esp32.mic_enabled"]');
-      const payload = {};
-      if (fs && fs.value !== "") payload.framesize = Number(fs.value);
-      if (q && q.value !== "") payload.jpeg_quality = Number(q.value);
-      if (mic) payload.mic_enabled = !!mic.checked;
-      setCfgStatus("推送中…");
-      try {
-        const res = await fetch("/api/device/config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+  if (dom.btnRefresh) {
+    dom.btnRefresh.addEventListener("click", () => {
+      if (dom.refreshStatus) dom.refreshStatus.textContent = "刷新中…";
+      pollStatus()
+        .then(() => {
+          if (dom.refreshStatus) dom.refreshStatus.textContent = "已刷新";
+        })
+        .catch((err) => {
+          if (dom.refreshStatus) dom.refreshStatus.textContent = "刷新失败";
+          setCfgStatus("刷新失败：" + (err.message || err));
         });
-        const body = await res.json();
-        if (!body.ok) throw new Error(body.error || "push failed");
-        setCfgStatus("已推送");
-      } catch (err) {
-        setCfgStatus("推送失败：" + err.message);
-      }
     });
   }
 
   if (dom.btnReboot) {
     dom.btnReboot.addEventListener("click", async () => {
       if (!confirm("确认要重启 ESP32 吗？")) return;
-      setCfgStatus("重启中…");
+      setActionStatus("重启中…");
       try {
         const res = await fetch("/api/device/reboot", { method: "POST" });
         const body = await res.json().catch(() => ({}));
-        setCfgStatus(body && body.ok ? "设备已重启指令下发" : "重启失败");
+        setActionStatus(body && body.ok ? "已发送重启指令" : "重启失败");
       } catch (err) {
-        setCfgStatus("重启失败：" + err.message);
+        setActionStatus("重启失败：" + err.message);
       }
     });
   }
 
   if (dom.btnForget) {
     dom.btnForget.addEventListener("click", async () => {
-      if (!confirm("将清除 ESP32 保存的 WiFi 凭据，设备会重新开放 Lampgo-Setup 热点。继续？")) return;
-      setCfgStatus("清除中…");
+      if (!confirm("删除设备会清除 ESP32 保存的 WiFi，并让设备重新打开 Lampgo-Setup 热点。通常只在换 WiFi 或换设备时使用。继续？")) return;
+      setActionStatus("删除中…");
       try {
         const res = await fetch("/api/device/forget-wifi", { method: "POST" });
         const body = await res.json().catch(() => ({}));
-        setCfgStatus(body && body.ok ? "已清除，请重新配网" : "清除失败");
+        if (body && body.ok) {
+          await fetch("/api/config/device_esp32", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ "device_esp32.enabled": false, "device_esp32.mic_enabled": false }),
+          }).catch(() => {});
+          setActionStatus("已删除设备，请重新配网");
+          const status = await fetchStatus();
+          renderStatus(status);
+        } else {
+          setActionStatus("删除失败");
+        }
       } catch (err) {
-        setCfgStatus("清除失败：" + err.message);
+        setActionStatus("删除失败：" + err.message);
       }
+    });
+  }
+
+  if (dom.togglePsk && dom.psk) {
+    dom.togglePsk.addEventListener("click", () => {
+      const show = dom.psk.type === "password";
+      dom.psk.type = show ? "text" : "password";
+      dom.togglePsk.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
+      dom.togglePsk.title = show ? "隐藏密码" : "显示密码";
+      dom.togglePsk.textContent = show ? "🙈" : "👁";
     });
   }
 
@@ -313,8 +346,14 @@
   // -----------------------------------------------------------------------
 
   function openWizard() {
+    openWizardAt(1);
+  }
+
+  function openWizardAt(step) {
     if (!dom.dialog) return;
-    showStep(1);
+    const step0Li = document.querySelector('.esp32-setup-steps li[data-step="0"]');
+    if (step0Li) step0Li.classList.toggle("hidden", step !== 0);
+    showStep(step);
     dom.dialog.showModal();
   }
 
@@ -338,8 +377,35 @@
     dom.err.classList.remove("hidden");
   }
 
-  if (dom.btnSetup) dom.btnSetup.addEventListener("click", openWizard);
+  if (dom.btnSetup) dom.btnSetup.addEventListener("click", () => {
+    const s = state.lastStatus;
+    if (s && (s.online || s.enabled)) {
+      openWizardAt(0);
+    } else {
+      openWizard();
+    }
+  });
   if (dom.bannerSetup) dom.bannerSetup.addEventListener("click", openWizard);
+
+  if (dom.forgetAndGo) {
+    dom.forgetAndGo.addEventListener("click", async () => {
+      dom.forgetAndGo.disabled = true;
+      dom.forgetAndGo.textContent = "正在删除设备…";
+      try {
+        await fetch("/api/device/forget-wifi", { method: "POST" });
+        await fetch("/api/config/device_esp32", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ "device_esp32.enabled": false, "device_esp32.mic_enabled": false }),
+        }).catch(() => {});
+        const status = await fetchStatus();
+        renderStatus(status);
+      } catch (_) {}
+      dom.forgetAndGo.disabled = false;
+      dom.forgetAndGo.textContent = "删除设备并继续 →";
+      showStep(1);
+    });
+  }
   if (dom.closeBtn) dom.closeBtn.addEventListener("click", closeWizard);
   if (dom.bannerDismiss) {
     dom.bannerDismiss.addEventListener("click", () => {
@@ -432,53 +498,51 @@
         return;
       }
       showStep(3);
+      await enableEsp32AfterProvisioning();
       void waitUntilDiscovered();
     } catch (err) {
       setError("发送失败：" + err.message);
     }
   });
 
+  async function enableEsp32AfterProvisioning() {
+    try {
+      await fetch("/api/config/device_esp32", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          "device_esp32.enabled": true,
+          "device_esp32.mic_enabled": true,
+        }),
+      });
+    } catch (_) { /* best-effort */ }
+  }
+
   async function waitUntilDiscovered() {
     if (!dom.wait) return;
     dom.wait.classList.remove("is-ok", "is-err");
-    dom.wait.textContent = "等待 mDNS 发现设备…";
+    dom.wait.textContent = "已发送 WiFi 信息，ESP32 正在重启并连接…\n请将电脑切回家庭 WiFi（如仍连着 Lampgo-Setup 热点）";
     const start = Date.now();
+    let phase2 = false;
     while (Date.now() - start < SETUP_WAIT_TIMEOUT_MS) {
       await new Promise((r) => setTimeout(r, SETUP_WAIT_POLL_MS));
-      const status = await fetchStatus();
-      renderStatus(status);
-      if (status && status.online) {
-        dom.wait.classList.add("is-ok");
-        dom.wait.textContent = "✓ 已发现设备" + (status.device && status.device.host ? `：${status.device.host}` : "") + "。";
-        return;
+      if (!phase2 && Date.now() - start > 8000) {
+        phase2 = true;
+        dom.wait.textContent = "正在通过 mDNS 搜索设备…（请确认电脑已连回家庭 WiFi）";
       }
+      try {
+        const status = await fetchStatus();
+        renderStatus(status);
+        if (status && status.online) {
+          dom.wait.classList.add("is-ok");
+          dom.wait.textContent = "✓ 已发现设备" + (status.device && status.device.host ? `：${status.device.host}` : "") + "，配网完成！";
+          return;
+        }
+      } catch (_) { /* network may flicker during WiFi switch */ }
     }
     dom.wait.classList.add("is-err");
-    dom.wait.textContent = "超时未发现设备。请检查 ESP32 指示灯是否已连上目标 WiFi，或去路由器后台确认是否分配到 IP。";
+    dom.wait.textContent = "超时未发现设备。请检查：1) 电脑已连回家庭 WiFi；2) ESP32 串口是否显示 WiFi connected；3) 路由器是否分配了 IP。";
   }
 
-  // -----------------------------------------------------------------------
-  // Auto-open wizard on first visit when enabled + never-online-before.
-  //
-  // "Never-online-before" = we've been polling for >5s and device.online is
-  // still false AND status.device is null. If the device was online earlier
-  // this session (state.sessionUsedEver), skip auto-open — user probably
-  // just has a flaky link.
-  // -----------------------------------------------------------------------
-  let autoOpened = false;
-  setTimeout(async () => {
-    if (autoOpened) return;
-    const status = state.lastStatus || (await fetchStatus());
-    renderStatus(status);
-    if (!status) return;
-    if (!status.enabled) return;
-    if (status.online) return;
-    if (status.device) return;
-    if (state.sessionUsedEver) return;
-    const key = "esp32.wizardAutoOpened.v1";
-    if (sessionStorage.getItem(key)) return;
-    sessionStorage.setItem(key, "1");
-    autoOpened = true;
-    openWizard();
-  }, 6000);
+  // No auto-open: user launches the wizard explicitly via the button.
 })();
