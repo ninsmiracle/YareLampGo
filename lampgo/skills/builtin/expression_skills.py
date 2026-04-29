@@ -24,17 +24,17 @@ class SetExpressionSkill(Skill):
     }
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        # Accept both "expression" and legacy "mode" for compatibility
         expression = params.get("expression") or params.get("mode") or ""
         if not expression:
             return SkillResult(status="error", message="Expression name required")
+
+        if expression.lower().strip() not in LED_EXPRESSIONS:
+            valid = ", ".join(LED_EXPRESSIONS.keys())
+            return SkillResult(status="error", message=f"Unknown expression: {expression}. Valid: {valid}")
 
         brightness = params.get("brightness")
         if brightness is not None:
             ctx.led.set_brightness(int(brightness))
 
-        ok = ctx.led.set_mode(expression)
-        if not ok:
-            return SkillResult(status="error", message=f"Unknown expression: {expression}")
-
+        ctx.led.set_mode(expression)
         return SkillResult(status="ok", data={"expression": expression})

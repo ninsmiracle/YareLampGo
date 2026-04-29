@@ -19,6 +19,18 @@ logger = structlog.get_logger(__name__)
 
 PRIORITY_SKILLS = {"estop", "return_safe"}
 
+_MOTION_SKILLS = {
+    "nod", "headshake", "look_at", "idle_sway", "dance",
+    "move_to", "return_safe", "estop",
+    "presence_react", "face_follow",
+    "play_recording", "teleop_mouse", "teleop_gamepad",
+}
+_LED_SKILLS = {
+    "set_expression",
+    "presence_react",
+    "play_recording", "teleop_mouse", "teleop_gamepad",
+}
+
 
 class SkillExecutor:
     """Runs one skill at a time. New invocations cancel the current skill."""
@@ -40,6 +52,22 @@ class SkillExecutor:
                 status="rejected",
                 error_code="unknown_skill",
                 error_detail=f"Skill '{skill_id}' not registered",
+            )
+
+        # Hardware not connected → return fake ok to prevent LLM retry loops
+        if skill_id in _MOTION_SKILLS and not ctx.motion.is_running:
+            logger.debug("executor.hw_skip", skill_id=skill_id, reason="motor not connected")
+            return InvokeResult(
+                invocation_id=invocation_id,
+                status="ok",
+                result={"note": "motor not connected, skipped"},
+            )
+        if skill_id in _LED_SKILLS and not ctx.led.is_connected:
+            logger.debug("executor.hw_skip", skill_id=skill_id, reason="LED not connected")
+            return InvokeResult(
+                invocation_id=invocation_id,
+                status="ok",
+                result={"note": "LED not connected, skipped"},
             )
 
         # Cancel current skill if running

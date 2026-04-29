@@ -584,6 +584,104 @@ button {
   flex-shrink: 0;
 }
 
+/* ── Call view ── */
+.view[data-view="call"] {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+.view[data-view="call"].hidden { display: none; }
+
+.call-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.call-status-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.call-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+.call-status-dot.is-active { background: var(--success); }
+.call-status-dot.is-joining { background: #e65100; }
+.call-status-text {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-soft);
+}
+.call-status-right {
+  display: flex;
+  gap: 8px;
+}
+.call-action-btn {
+  padding: 6px 16px;
+  border-radius: 16px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s, opacity 0.2s;
+}
+.call-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.call-action-btn.hidden { display: none; }
+.call-start {
+  background: var(--success);
+  color: #fff;
+}
+.call-start:hover { background: #4e8b71; }
+.call-end {
+  background: var(--danger);
+  color: #fff;
+}
+.call-end:hover { background: #c56560; }
+
+.call-messages {
+  padding-bottom: 24px;
+}
+
+/* ── Reply quote (call view) ── */
+.reply-quote {
+  border-left: 3px solid var(--accent, #5b9bd5);
+  background: var(--bg-hover, #f5f6f8);
+  border-radius: 0 4px 4px 0;
+  padding: 4px 10px;
+  margin-bottom: 6px;
+  max-width: 100%;
+  overflow: hidden;
+}
+.reply-quote-text {
+  font-size: 12px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+/* ── Preempted tag (call view) ── */
+.preempted-tag {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #b07020;
+  background: #fff5e6;
+  border: 1px solid #f0d8a8;
+  border-radius: 4px;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -1339,6 +1437,29 @@ button.device-chip.is-active {
   background: linear-gradient(135deg, #f8e4dc 0%, #f1d1c6 100%);
   color: #7e4f49;
   border-bottom-right-radius: 6px;
+}
+
+.voice-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+}
+
+.voice-dots .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c07a6e;
+  animation: dotPulse 1.4s ease-in-out infinite;
+}
+
+.voice-dots .dot:nth-child(2) { animation-delay: 0.2s; }
+.voice-dots .dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dotPulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
 }
 
 .msg-assistant {
@@ -3086,6 +3207,11 @@ section.view[data-view="settings"] .view-header {
 
 .settings-field.is-disabled .settings-field-hint {
   opacity: 0.65;
+}
+
+.settings-field-separator {
+  border-top: 1px dashed var(--border, #e5ddd5);
+  margin: 12px 0 8px;
 }
 
 .settings-textarea {

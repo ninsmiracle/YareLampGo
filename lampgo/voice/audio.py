@@ -168,3 +168,131 @@ class AudioPlayback:
         self.finish()
         self.wait_done()
         self.stop()
+
+
+class JitterBufferPlayback:
+    """Speaker playback for *bursty / jittered* PCM streams (e.g. LiveKit).
+
+    Differences vs :class:`AudioPlayback` (which is tuned for lampgo's own
+    synchronous streaming TTS, where chunks arrive at a steady cadence):
+
+    * Buffers ``prebuffer_ms`` worth of audio before the first sample is
+      played, absorbing network jitter and the initial Volcengine TTS
+      ramp-up.
+    * Stores accumulated PCM in a single ``bytearray`` under a lock, so an
+      sounddevice ``callback`` consuming arbitrary block sizes never
+      fragments individual upstream frames.
+    * On underrun (queue empties mid-playback), pads the current callback
+      with silence **and re-enters prebuffering mode** so we don't ship a
+      stream of clicks/pops when the source recovers.
+    * ``blocksize=0`` lets sounddevice/PortAudio pick the optimal callback
+      size for the device.
+
+    PCM input must be int16 little-endian mono / multi-channel matching
+    the configured ``sample_rate`` × ``channels``.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        channels: int = 1,
+        *,
+        prebuffer_ms: int = 200,
+        max_buffer_ms: int = 4000,
+    ) -> None:
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._bytes_per_sample = 2  # int16
+        self._prebuffer_bytes = (
+            sample_rate * channels * self._bytes_per_sample * prebuffer_ms // 1000
+        )
+        self._max_buffer_bytes = (
+            sample_rate * channels * self._bytes_per_sample * max_buffer_ms // 1000
+        )
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._stream = None
+        self._playing = False  # True once prebuffer threshold reached
+
+    def start(self) -> None:
+        try:
+            import sounddevice as sd
+        except ImportError:
+            logger.warning("audio.no_sounddevice")
+            return
+
+        def callback(outdata, frames, time_info, status):
+            bytes_needed = frames * self._channels * self._bytes_per_sample
+            with self._lock:
+                if not self._playing:
+                    if len(self._buffer) >= self._prebuffer_bytes:
+                        self._playing = True
+                    else:
+                        outdata[:] = memoryview(b"\x00" * bytes_needed).cast("B")
+                        return
+
+                if len(self._buffer) >= bytes_needed:
+                    chunk = bytes(self._buffer[:bytes_needed])
+                    outdata[:] = memoryview(chunk).cast("B")
+                    del self._buffer[:bytes_needed]
+                else:
+                    have = len(self._buffer)
+                    if have:
+                        chunk = bytes(self._buffer)
+                        outdata[:have] = memoryview(chunk).cast("B")
+                    outdata[have:] = memoryview(b"\x00" * (bytes_needed - have)).cast("B")
+                    self._buffer.clear()
+                    self._playing = False  # re-arm prebuffer
+
+        blocksize = int(self._sample_rate * 0.02)  # 20 ms, matches LiveKit audio frames
+        self._stream = sd.RawOutputStream(
+            samplerate=self._sample_rate,
+            channels=self._channels,
+            dtype=DTYPE,
+            blocksize=blocksize,
+            latency="low",
+            callback=callback,
+        )
+        self._stream.start()
+        logger.debug(
+            "audio.jitter_playback_started",
+            sample_rate=self._sample_rate,
+            channels=self._channels,
+            prebuffer_ms=self._prebuffer_bytes
+            * 1000
+            // (self._sample_rate * self._channels * self._bytes_per_sample),
+        )
+
+    def feed(self, pcm_bytes: bytes) -> None:
+        if not pcm_bytes:
+            return
+        with self._lock:
+            self._buffer.extend(pcm_bytes)
+            if len(self._buffer) > self._max_buffer_bytes:
+                drop = len(self._buffer) - self._max_buffer_bytes
+                del self._buffer[:drop]
+                logger.debug("audio.jitter_buffer_overflow", dropped_bytes=drop)
+
+    def buffered_duration_s(self) -> float:
+        """Return the approximate amount of queued, not-yet-played audio."""
+        with self._lock:
+            return len(self._buffer) / (
+                self._sample_rate * self._channels * self._bytes_per_sample
+            )
+
+    def is_idle(self) -> bool:
+        """Return True when there is no buffered audio waiting for playback."""
+        with self._lock:
+            return not self._playing and not self._buffer
+
+    def stop(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                logger.debug("audio.jitter_playback_stop_error", exc_info=True)
+            self._stream = None
+        with self._lock:
+            self._buffer.clear()
+            self._playing = False

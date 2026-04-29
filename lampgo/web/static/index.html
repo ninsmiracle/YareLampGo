@@ -38,6 +38,12 @@
           </span>
           <span class="nav-label">新建聊天</span>
         </button>
+        <button class="nav-item" type="button" data-view="call">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          </span>
+          <span class="nav-label">通话</span>
+        </button>
         <button class="nav-item" type="button" data-view="skills">
           <span class="nav-icon">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 14.8 7.2 16.9l.9-5.4L4.2 7.7l5.4-.8L12 2z"/></svg>
@@ -180,6 +186,28 @@
               </button>
               <button class="send-button" type="submit">发送</button>
             </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="view hidden" data-view="call">
+        <div class="call-status-bar">
+          <div class="call-status-left">
+            <span class="call-status-dot" id="call-dot"></span>
+            <span class="call-status-text" id="call-status-text">未连接</span>
+          </div>
+          <div class="call-status-right">
+            <button id="btn-call-start" class="call-action-btn call-start" type="button">通话</button>
+            <button id="btn-call-end" class="call-action-btn call-end hidden" type="button">挂断</button>
+          </div>
+        </div>
+        <div id="call-messages" class="chat-messages call-messages">
+          <div id="call-empty-state" class="empty-state">
+            <div class="empty-state-emoji">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            </div>
+            <div class="empty-state-title">语音通话</div>
+            <div class="empty-state-body">点击「通话」开始语音对话，ASR 识别结果和 LLM 回复将实时显示在这里。</div>
           </div>
         </div>
       </section>
@@ -638,6 +666,72 @@
                   <span class="settings-field-hint">可用声音会跟随 TTS Provider 变化；保存后下次对话生效。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
                 </label>
+
+                <div class="settings-field-separator"></div>
+
+                <label class="settings-field" data-cfg-field="voice.wake_word">
+                  <span class="settings-field-label">唤醒词</span>
+                  <select class="settings-input" data-cfg-input="voice.wake_word">
+                    <option value="">禁用</option>
+                    <option value="hey_jarvis">Hey Jarvis</option>
+                  </select>
+                  <span class="settings-field-hint">
+                    启用后 ESP32 麦克风持续监听，检测到唤醒词后进入实时语音对话。需同时配置下方 LiveKit 参数。重启 lampgo 后生效。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.wake_word"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.livekit_url">
+                  <span class="settings-field-label">LiveKit Server URL</span>
+                  <input class="settings-input" type="text" placeholder="ws://host:7880" data-cfg-input="voice.livekit_url" autocomplete="off">
+                  <span class="settings-field-hint">局域网 LiveKit 服务器的 WebSocket 地址。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_url"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.livekit_api_key">
+                  <span class="settings-field-label">LiveKit API Key</span>
+                  <input class="settings-input" type="text" placeholder="your-api-key" data-cfg-input="voice.livekit_api_key" autocomplete="off">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_api_key"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.livekit_api_secret">
+                  <span class="settings-field-label">LiveKit API Secret</span>
+                  <input class="settings-input" type="password" placeholder="your-api-secret" data-cfg-input="voice.livekit_api_secret" autocomplete="off">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_api_secret"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.livekit_room">
+                  <span class="settings-field-label">LiveKit 房间名</span>
+                  <input class="settings-input" type="text" placeholder="lampgo" data-cfg-input="voice.livekit_room" autocomplete="off">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_room"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.silence_timeout_s">
+                  <span class="settings-field-label">静默超时（秒）</span>
+                  <input class="settings-input" type="number" min="10" max="300" step="1" placeholder="60" data-cfg-input="voice.silence_timeout_s">
+                  <span class="settings-field-hint">对话中无语音活动超过此时间后自动结束对话。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.silence_timeout_s"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.volcengine_app_id">
+                  <span class="settings-field-label">火山引擎 App ID</span>
+                  <input class="settings-input" type="text" placeholder="your-app-id" data-cfg-input="voice.volcengine_app_id" autocomplete="off">
+                  <span class="settings-field-hint">火山引擎语音服务的 App ID，用于 LiveKit 对话中的 ASR / TTS。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_app_id"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.volcengine_access_token">
+                  <span class="settings-field-label">火山引擎 Access Token</span>
+                  <input class="settings-input" type="password" placeholder="" data-cfg-input="voice.volcengine_access_token" autocomplete="off">
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_access_token"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.livekit_tts_voice">
+                  <span class="settings-field-label">LiveKit 对话声音</span>
+                  <input class="settings-input" type="text" placeholder="BV700_streaming" data-cfg-input="voice.livekit_tts_voice" autocomplete="off">
+                  <span class="settings-field-hint">火山引擎 TTS 声音标识，用于 LiveKit 实时对话。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_tts_voice"></span>
+                </label>
               </div>
 
               <div class="settings-actions">
@@ -900,7 +994,7 @@
                   </select>
                   <span class="settings-field-hint">
                     服务端 <code>sounddevice</code> 枚举结果（给 <code>VoiceLoop</code> 用）；和顶栏「麦克风」胶囊不是同一条链路：
-                    顶栏胶囊只控浏览器网页录音。修改后需重启 lampgo 才会重新打开音频流。
+                    顶栏胶囊会尽量按设备名称同步到这里；修改后通话/唤醒麦克风会热切换，无需重启。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.mic_device"></span>
                 </label>
