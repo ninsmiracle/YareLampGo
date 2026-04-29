@@ -13,6 +13,7 @@ import asyncio
 import re
 import signal
 import time
+from collections import deque
 import uuid
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,10 @@ class LampgoServer:
         self._stt: MimoSTT = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
+        self._voice = None
+        self._wake_loop = None
+        self._agent_sdk = None
+        self._voice_reload_handle: asyncio.TimerHandle | None = None
         self._web_gateway = None
         self._state_writer = StateWriter()
         self._recording_alias_cache: tuple[float, dict[str, str]] = (0.0, {})
@@ -187,7 +192,8 @@ class LampgoServer:
 
         if cmd == "text":
             result = await self._handle_text(data)
-            await self._maybe_tts(result, data.get("request_id", ""))
+            if not data.get("call_mode"):
+                await self._maybe_tts(result, data.get("request_id", ""))
             return result
 
         if cmd == "audio":
@@ -207,6 +213,24 @@ class LampgoServer:
             self.safety.estop("IPC estop command")
             self.motion.stop_immediate()
             return {"ok": True, "result": {"status": "estopped"}}
+
+        if cmd == "start_conversation":
+            if self._wake_loop:
+                if self._wake_loop.conversation_state.value == "idle":
+                    backfill = deque(self._wake_loop._ring_buffer)
+                    self._wake_loop._ring_buffer.clear()
+                    ok = await self._wake_loop.bridge.start_conversation(backfill=backfill)
+                    if ok:
+                        return {"ok": True, "result": {"status": "conversation_started"}}
+                    return {"ok": False, "error": "failed to join LiveKit room"}
+                return {"ok": False, "error": f"conversation already {self._wake_loop.conversation_state.value}"}
+            return {"ok": False, "error": "wake loop not active"}
+
+        if cmd == "stop_conversation":
+            if self._wake_loop:
+                await self._wake_loop.end_conversation()
+                return {"ok": True, "result": {"status": "conversation_ended"}}
+            return {"ok": False, "error": "wake loop not active"}
 
         if cmd == "recording_start":
             return await self.start_recording_session(fps=int(data.get("fps", 30) or 30))
@@ -540,7 +564,7 @@ class LampgoServer:
                     request_id=request_id,
                 )
             )
-            if stage == "llm_narration" and message.strip():
+            if stage == "llm_narration" and message.strip() and not call_mode:
                 task = asyncio.create_task(self._tts_for_web(message, request_id))
                 self._tts_tasks.add(task)
                 task.add_done_callback(self._tts_tasks.discard)
@@ -549,6 +573,12 @@ class LampgoServer:
 
         raw_history = data.get("history") or []
         history = raw_history if isinstance(raw_history, list) else []
+        call_mode = (
+            bool(data.get("call_mode"))
+            or
+            self._wake_loop is not None
+            and self._wake_loop.conversation_state.value in ("joining", "active")
+        )
 
         intent = self.router.route(text)
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
@@ -577,6 +607,7 @@ class LampgoServer:
                     **kwargs,
                 ),
                 history=history,
+                call_mode=call_mode,
             )
             if agent_result.intent_type == "complex":
                 await self.events.publish(
@@ -619,7 +650,13 @@ class LampgoServer:
                 stop_reason=agent_result.stop_reason,
                 tool_call_count=len(agent_result.tool_calls),
             )
-            return self._format_agent_result(agent_result, text)
+            result = self._format_agent_result(agent_result, text)
+            if agent_result.end_conversation:
+                self._schedule_end_conversation(
+                    request_id=request_id,
+                    response_text=agent_result.response or "",
+                )
+            return result
 
         if intent.intent_type == IntentType.COMPLEX:
             await _publish_intent_progress("openclaw_handoff", "关键词未命中且未能本地完成，转交 OpenClaw...", "openclaw")
@@ -920,7 +957,25 @@ class LampgoServer:
             return -1.0
 
     async def _tts_for_web(self, text: str, request_id: str) -> None:
-        """Synthesize TTS and publish audio event for web playback."""
+        """Synthesize TTS and publish audio event for web playback.
+
+        During an active LiveKit voice call the Agent SDK plays Volcengine TTS
+        directly into the room, so the local edge-tts/MiMo TTS would only be
+        wasted bandwidth (and may double-up with the call audio if the Web UI
+        is also open). Skip the synthesis but keep the call signature so agent
+        loop timing (e.g. ``await asyncio.sleep(1.5)`` after ``say``) is
+        preserved.
+        """
+        if self._wake_loop is not None:
+            state = self._wake_loop.conversation_state.value
+            if state in ("joining", "active"):
+                logger.debug(
+                    "server.tts_for_web_skipped_in_call",
+                    request_id=request_id,
+                    conversation_state=state,
+                )
+                return
+
         try:
             from lampgo.voice.tts import synthesize_for_web
             result = await synthesize_for_web(
@@ -964,9 +1019,49 @@ class LampgoServer:
             "stop_reason": agent_result.stop_reason,
             "tool_calls": tool_calls,
         }
+        if getattr(agent_result, "end_conversation", False):
+            payload["end_conversation"] = True
         if result_type == "complex":
             payload["original_text"] = text
         return {"ok": True, "result": payload}
+
+    def _schedule_end_conversation(self, *, request_id: str, response_text: str = "") -> None:
+        """End an active LiveKit conversation after goodbye TTS has played.
+
+        The LiveKit bridge can observe the SDK's remote TTS audio track and the
+        local jitter buffer, so prefer waiting for real playout completion over
+        guessing from text length. A timeout still closes the call if audio never
+        arrives or the stream gets stuck.
+        """
+        logger.info(
+            "server.conversation_end_waiting_for_tts",
+            request_id=request_id,
+            text_len=len(response_text or ""),
+        )
+
+        async def _end_later() -> None:
+            try:
+                if self._wake_loop is None:
+                    return
+                if self._wake_loop.conversation_state.value not in ("joining", "active"):
+                    return
+                await self._wake_loop.bridge.wait_for_remote_playout(
+                    first_frame_timeout_s=6.0,
+                    idle_s=0.8,
+                    max_wait_s=20.0,
+                )
+                if self._wake_loop is None:
+                    return
+                if self._wake_loop.conversation_state.value not in ("joining", "active"):
+                    return
+                logger.info("server.conversation_end_scheduled", request_id=request_id)
+                await self._wake_loop.end_conversation()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("server.conversation_end_schedule_failed", request_id=request_id, exc_info=True)
+
+        asyncio.create_task(_end_later())
 
     @staticmethod
     def _serialize_agent_tool_calls(tool_calls) -> list[dict[str, Any]]:
@@ -1002,6 +1097,7 @@ class LampgoServer:
                 "hal_connected": bool(self.hal.is_connected),
                 "led_ready": bool(self.led.is_connected),
                 "camera_ready": bool(self.config.camera.port.strip()) or bool(self.config.device_esp32.enabled),
+                "conversation_state": self._wake_loop.conversation_state.value if self._wake_loop else None,
             },
         }
 
@@ -1162,6 +1258,32 @@ class LampgoServer:
                 "available": True,
             },
         }
+
+    async def _handle_set_mic(self, mic_device: str) -> dict:
+        """Hot-switch the server-side microphone used by wake/call mode."""
+        value = str(mic_device or "").strip()
+        if value and value != "esp32":
+            try:
+                int(value)
+            except ValueError:
+                return {"ok": False, "error": f"invalid mic device: {value}"}
+
+        self.config.voice.mic_device = value
+        try:
+            from lampgo import personastore
+
+            personastore.patch_overrides_toml({"voice": {"mic_device": value}})
+        except Exception:
+            logger.debug("server.mic_config_persist_failed", mic_device=value, exc_info=True)
+
+        if self._wake_loop is not None:
+            await self._wake_loop.set_mic_device(value)
+
+        result = self._handle_list_mics()
+        result["type"] = "set_mic"
+        if result.get("ok") and isinstance(result.get("result"), dict):
+            result["result"]["active"] = value
+        return result
 
     def _handle_skills(self) -> dict:
         skills = []
@@ -1384,7 +1506,7 @@ class LampgoServer:
 
     def _get_minimal_state(self) -> MinimalState:
         camera_connected = bool(self.config.camera.port.strip())
-        mic_active = bool(self.config.voice_enabled)
+        mic_active = self._wake_loop is not None
         return MinimalState(
             status="busy" if self.executor.is_busy else "idle",
             is_busy=self.executor.is_busy,
@@ -1494,12 +1616,7 @@ class LampgoServer:
             self._record_task = None
             self._record_recorder = None
         await self._state_writer.stop()
-        if self._voice_task is not None:
-            self._voice_task.cancel()
-            try:
-                await self._voice_task
-            except asyncio.CancelledError:
-                pass
+        await self._stop_voice_loop()
         await self._ipc.stop()
         try:
             await self.esp32.shutdown()
@@ -1514,10 +1631,11 @@ class LampgoServer:
 
     async def run_forever(self) -> None:
         await self.start()
-        if self.config.voice_enabled:
-            self._start_voice_loop()
         if self.config.web_enabled:
             await self._start_web_gateway()
+            vc = self.config.voice
+            if vc.wake_word and vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret:
+                self._start_voice_loop()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1595,13 +1713,69 @@ class LampgoServer:
 
     def _start_voice_loop(self) -> None:
         try:
-            from lampgo.voice.loop import VoiceLoop
+            from lampgo.voice.wake_loop import WakeLoop
 
-            self._voice = VoiceLoop(self)
-            self._voice_task = asyncio.create_task(self._voice.run())
-            logger.info("server.voice_loop_started")
+            self._wake_loop = WakeLoop(self)
+            self._voice_task = asyncio.create_task(self._wake_loop.run())
+            logger.info(
+                "server.wake_loop_started",
+                wake_word=self.config.voice.wake_word,
+                livekit_url=self.config.voice.livekit_url,
+            )
+            self._start_agent_sdk()
         except Exception:
-            logger.exception("server.voice_loop_failed")
+            logger.exception("server.wake_loop_failed")
+
+    async def _stop_voice_loop(self) -> None:
+        if self._agent_sdk is not None:
+            await self._agent_sdk.stop()
+            self._agent_sdk = None
+        if self._wake_loop is not None:
+            self._wake_loop.stop()
+            self._wake_loop = None
+        if self._voice_task is not None:
+            self._voice_task.cancel()
+            try:
+                await self._voice_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._voice_task = None
+        logger.info("server.voice_loop_stopped")
+
+    async def restart_voice_loop(self) -> None:
+        """Debounced hot-reload: coalesce rapid saves into a single restart."""
+        if self._voice_reload_handle is not None:
+            self._voice_reload_handle.cancel()
+        loop = asyncio.get_running_loop()
+        self._voice_reload_handle = loop.call_later(
+            1.0, lambda: asyncio.create_task(self._do_restart_voice_loop())
+        )
+
+    async def _do_restart_voice_loop(self) -> None:
+        self._voice_reload_handle = None
+        await self._stop_voice_loop()
+        vc = self.config.voice
+        if not vc.wake_word or not vc.livekit_url:
+            logger.info("server.voice_loop_disabled (wake_word or livekit_url empty)")
+            return
+        missing = [f for f in ("livekit_api_key", "livekit_api_secret") if not getattr(vc, f, "")]
+        if missing:
+            logger.warning("server.voice_loop_incomplete", missing=missing)
+            return
+        self._start_voice_loop()
+
+    def _start_agent_sdk(self) -> None:
+        """Launch the Xiaomi LiveKit Agent SDK as a managed subprocess."""
+        try:
+            from lampgo.voice.agent_sdk import AgentSDKManager
+
+            self._agent_sdk = AgentSDKManager(
+                self.config.voice,
+                web_port=self.config.web.port,
+            )
+            asyncio.create_task(self._agent_sdk.start())
+        except Exception:
+            logger.exception("server.agent_sdk_start_failed")
 
 
 async def run_server(config: LampgoConfig) -> None:

@@ -1,7 +1,7 @@
 """lampgo CLI — the user-facing command-line interface.
 
 Usage:
-    lampgo run [--motor-port PORT] [--voice]
+    lampgo run [--motor-port PORT] [--web]
     lampgo invoke <skill_id> [key=value ...]
     lampgo text "做个害羞的表情"
     lampgo move base_yaw=30 base_pitch=-20
@@ -59,11 +59,10 @@ def main() -> None:
     run_p.add_argument("--led-port", default=None, help="Serial port for ESP32 LEDs (overrides config)")
     run_p.add_argument("--lamp-id", default=None, help="Lamp identity for calibration")
     run_p.add_argument("--recordings-dir", default=None, help="Path to recording CSVs")
-    run_p.add_argument("--voice", action="store_true", help="Enable voice loop (STT/TTS)")
     run_p.add_argument("--web", action="store_true", help="Enable web UI (chat interface)")
     run_p.add_argument("--web-port", type=int, default=None, help="Web UI port (default: 8420)")
     run_p.add_argument("--no-home", action="store_true", help="Skip automatic homing on startup")
-    run_p.add_argument("--no-hw", action="store_true", help="Skip hardware (motors/LED) — voice & web only")
+    run_p.add_argument("--no-hw", action="store_true", help="Skip hardware (motors/LED) — web only")
 
     # --- invoke (IPC) ---
     inv_p = sub.add_parser("invoke", help="Invoke a skill on the running daemon")
@@ -601,8 +600,6 @@ def _cmd_run(args: argparse.Namespace) -> None:
     from lampgo.server import run_server
 
     config = _load_config_from_args(args)
-    if getattr(args, "voice", False):
-        config.voice_enabled = True
     if getattr(args, "web", False):
         config.web_enabled = True
     web_port = getattr(args, "web_port", None)

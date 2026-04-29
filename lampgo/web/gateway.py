@@ -17,7 +17,7 @@ import structlog
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -149,6 +149,7 @@ class WebGateway:
             Route("/api/openclaw/tasks", self.api_openclaw_tasks),
             Route("/api/openclaw/tasks/{task_id:str}/confirm", self.api_openclaw_confirm, methods=["POST"]),
             Route("/api/openclaw/health", self.api_openclaw_health),
+            Route("/api/livekit/token", self.api_livekit_token, methods=["POST"]),
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
             Route("/api/estop", self.api_estop, methods=["POST"]),
             # ---- user-editable config / persona / memory ----
@@ -189,12 +190,15 @@ class WebGateway:
             # ---- event replay (so newly-connected browsers see historical events) ----
             Route("/api/events", self.api_events_replay, methods=["GET"]),
             WebSocketRoute("/ws", self.ws_endpoint),
+            # ---- OpenAI-compatible LLM endpoint (for LiveKit Agent SDK) ----
+            Route("/v1/chat/completions", self._llm_compat_handler, methods=["POST"]),
         ]
         if STATIC_DIR.is_dir():
             routes.append(Mount("/", app=StaticFiles(directory=str(STATIC_DIR), html=True)))
 
         @asynccontextmanager
         async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
+            app.state.lampgo_server = self.server
             self._status_task = asyncio.create_task(self._status_loop())
             yield
             if self._status_task:
@@ -224,6 +228,13 @@ class WebGateway:
                 await self.bridge.broadcast_status(status.get("result", {}))
             except Exception:
                 logger.exception("web.status_loop_error")
+
+    # ---- OpenAI-compatible LLM endpoint ----
+
+    async def _llm_compat_handler(self, request: Request) -> StreamingResponse:
+        from lampgo.web.llm_compat import handle_chat_completions
+
+        return await handle_chat_completions(request)
 
     # ---- REST endpoints ----
 
@@ -415,7 +426,7 @@ class WebGateway:
                         "device": camera.device_label,
                     },
                     "voice": {
-                        "enabled": bool(self.server.config.voice_enabled),
+                        "enabled": self.server._wake_loop is not None,
                         "stt_provider": self.server.config.voice.stt_provider,
                         "tts_provider": self.server.config.voice.tts_provider,
                         "vad_enabled": bool(self.server.config.voice.vad_enabled),
@@ -504,6 +515,33 @@ class WebGateway:
                 },
             }
         )
+
+    async def api_livekit_token(self, request: Request) -> JSONResponse:
+        """Proxy token requests to the managed Xiaomi LiveKit Agent SDK."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        from lampgo.voice.agent_sdk import AGENT_SDK_PORT
+
+        room_name = str(body.get("room_name") or self.server.config.voice.livekit_room or "lampgo")
+        user_identity = str(body.get("user_identity") or f"lampgo-web-{uuid.uuid4().hex[:8]}")
+        voice_agent = str(body.get("voice_agent") or "lampgo-jarvis")
+        try:
+            async with httpx_module.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{AGENT_SDK_PORT}/rtc/token",
+                    json={
+                        "room_name": room_name,
+                        "user_identity": user_identity,
+                        "voice_agent": voice_agent,
+                    },
+                )
+                resp.raise_for_status()
+                return JSONResponse({"ok": True, "result": resp.json()})
+        except Exception as exc:
+            logger.exception("web.livekit_token_failed")
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
     async def api_openclaw_confirm(self, request: Request) -> JSONResponse:
         body = await request.json()
@@ -648,10 +686,7 @@ class WebGateway:
     #   - camera.port      → hot-swapped via the set_camera WS command in
     #                        `server._handle_set_camera`; the Web UI also
     #                        rebroadcasts this on save.
-    #   - voice.mic_device → only read when a VoiceLoop is (re)constructed.
-    #                        Web UI users capture mic in the browser, so the
-    #                        server-side device never opens. CLI users pick
-    #                        it up on the next `--voice` invocation.
+    #   - voice.mic_device → hot-swapped via set_mic / WakeLoop.set_mic_device.
     _COLD_RESTART_FIELDS: frozenset[str] = frozenset(
         {
             "device.motor_port",
@@ -663,6 +698,18 @@ class WebGateway:
             "web.host",
             "web.port",
             "socket_path",
+        }
+    )
+
+    _VOICE_HOT_RELOAD_FIELDS: frozenset[str] = frozenset(
+        {
+            "voice.wake_word",
+            "voice.livekit_url",
+            "voice.livekit_api_key",
+            "voice.livekit_api_secret",
+            "voice.livekit_room",
+            "voice.volcengine_app_id",
+            "voice.volcengine_access_token",
         }
     )
 
@@ -684,6 +731,15 @@ class WebGateway:
             "voice.tts_voice",
             "voice.mic_device",
             "camera.port",
+            "voice.wake_word",
+            "voice.livekit_url",
+            "voice.livekit_api_key",
+            "voice.livekit_api_secret",
+            "voice.livekit_room",
+            "voice.silence_timeout_s",
+            "voice.volcengine_app_id",
+            "voice.volcengine_access_token",
+            "voice.livekit_tts_voice",
         ),
         "motion": (
             "motion.tick_rate_hz",
@@ -819,6 +875,12 @@ class WebGateway:
         personastore.patch_overrides_toml(patch)
 
         needs_restart = sorted(f for f in flat if f in self._COLD_RESTART_FIELDS)
+
+        if any(f in self._VOICE_HOT_RELOAD_FIELDS for f in flat):
+            asyncio.create_task(self.server.restart_voice_loop())
+
+        if "voice.mic_device" in flat and self.server._wake_loop is not None:
+            await self.server._wake_loop.set_mic_device(str(self.server.config.voice.mic_device or ""))
 
         # Recompute provenance so the UI can refresh the override hints.
         from lampgo.core.config import load_config_with_provenance
@@ -2079,6 +2141,13 @@ class WebGateway:
             result["request_id"] = request_id
             await ws.send_json(result)
 
+        elif msg_type == "set_mic":
+            device_val = str(msg.get("device", ""))
+            result = await self.server._handle_set_mic(device_val)
+            result["type"] = "set_mic"
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
         elif msg_type == "skills":
             result = self.server._handle_skills()
             result["request_id"] = request_id
@@ -2173,6 +2242,16 @@ class WebGateway:
         elif msg_type == "stop_tts":
             cancelled = self.server.cancel_pending_tts()
             await ws.send_json({"ok": True, "result": {"cancelled": cancelled}, "request_id": request_id})
+
+        elif msg_type == "start_conversation":
+            result = await self.server.handle_request({"cmd": "start_conversation"})
+            result["request_id"] = request_id
+            await ws.send_json(result)
+
+        elif msg_type == "stop_conversation":
+            result = await self.server.handle_request({"cmd": "stop_conversation"})
+            result["request_id"] = request_id
+            await ws.send_json(result)
 
         elif msg_type == "estop":
             result = await self.server.handle_request({"cmd": "estop"})

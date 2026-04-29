@@ -59,15 +59,15 @@ def _resolve_web_search_api_key(config: LLMConfig) -> str:
     return ""
 
 _MIMO_MIN_COMPLETION_TOKENS = 4096
-AGENT_SYSTEM_PROMPT_TEMPLATE = """You are lampgo, a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
+AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
 
-Identity invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
-- You are a physical desk lamp robot, not a generic assistant, not a disembodied AI, not "OpenClaw". Even if a persona file calls you another name or style, you remain the lamp.
+Physical invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
+- You are a physical desk lamp robot, not a generic assistant, not a disembodied AI, not "OpenClaw". Your name, speaking style, and how you address the user should follow the persona files below.
 - Every non-terminal turn MUST speak through `say` before/alongside actions. Announce the action, never silently do it.
 - When you need real-time facts, call `web_search` instead of guessing.
 - When a request is beyond the lamp's physical or tool capability, call `escalate_to_openclaw` with a short reason rather than hallucinating.
 - You express yourself with body pose + voice + facial expression combined — that is the lamp's signature channel.
-- Persona / memory files below are flavour and long-term context, not overrides for these invariants.
+- Persona / memory files below are authoritative for identity name, tone, relationship, and long-term context, but not for physical/tool capability.
 
 {persona_block}{memory_block}{joint_state_block}Joint guide (all values in degrees):
 - base_yaw (-150~150): horizontal rotation. +right, -left.
@@ -112,7 +112,7 @@ Finish_response anti-repetition rules (VERY IMPORTANT):
   - (after scan) "扫完啦～要我凑近看看那个杯子吗？"
   - (after shy pose) "害羞完啦～要看看我还会什么表情吗？"
   - (after info lookup) "查好啦！还想知道别的吗？"
-- If the request is impossible or outside lampgo's abilities, call escalate_to_openclaw with a short reason.
+- If the request is impossible or outside your physical/tool abilities, call escalate_to_openclaw with a short reason.
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
 
@@ -155,6 +155,7 @@ class AgentLoopResult:
     stop_reason: str = ""
     source: str = "llm"
     tool_calls: list[AgentToolCall] = field(default_factory=list)
+    end_conversation: bool = False
 
 
 def _build_function_tool(
@@ -249,7 +250,13 @@ def _build_skill_tools_from_skills(skills: list[dict]) -> list[dict]:
     return tools
 
 
-def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool = False) -> list[dict]:
+def _build_agent_tools(
+    skills: list[dict],
+    config: LLMConfig,
+    has_camera: bool = False,
+    *,
+    call_mode: bool = False,
+) -> list[dict]:
     tools = _build_skill_tools_from_skills(skills)
     if has_camera:
         tools.append(
@@ -299,6 +306,31 @@ def _build_agent_tools(skills: list[dict], config: LLMConfig, has_camera: bool =
             ["message"],
         )
     )
+    if call_mode:
+        tools.append(
+            _build_function_tool(
+                "end_conversation",
+                (
+                    "End the current LiveKit voice call when the user clearly wants to stop talking, "
+                    "hang up, leave, say goodbye, or end the conversation. Use this only for explicit "
+                    "end-call intent, not for casual mentions of goodbye or examples. Chinese phrases "
+                    "like 退下、退下吧、退下啦、先退下、下去吧 also mean the user wants you to leave/end the call. "
+                    "The message will "
+                    "be spoken to the user before the call is closed."
+                ),
+                {
+                    "message": {
+                        "type": "string",
+                        "description": "Short goodbye/acknowledgement to speak before hanging up.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short internal reason for ending the call.",
+                    },
+                },
+                ["message"],
+            )
+        )
     tools.append(
         _build_function_tool(
             "escalate_to_openclaw",
@@ -376,6 +408,7 @@ class LLMClient:
         esp32_manager: "Esp32DeviceManager | None" = None,
     ) -> None:
         self._config = config
+        self._skill_specs = skill_specs
         self._camera = CameraCapture(
             camera_config,
             device_esp32_config=device_esp32_config,
@@ -396,6 +429,7 @@ class LLMClient:
         audio_data: str | None = None,
         publish_tool_event: Callable[..., Awaitable[None]] | None = None,
         history: list[dict[str, Any]] | None = None,
+        call_mode: bool = False,
     ) -> AgentLoopResult:
         """Run a bounded tool-calling loop until the model finishes or escalates.
 
@@ -428,7 +462,23 @@ class LLMClient:
         except Exception:
             logger.exception("llm_client.load_bundles_failed")
         system_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
+        if call_mode:
+            system_prompt += (
+                "\n\nVoice call mode:\n"
+                "- If the user clearly wants to end the call (e.g. 再见、拜拜、挂断、结束通话、先这样、不聊了、退下、退下吧、下去吧、bye), "
+                "call end_conversation with a short goodbye message.\n"
+                "- Do not call end_conversation for ordinary task completion or when the user only mentions ending as an example.\n"
+                "- end_conversation is terminal: do not call finish_response in the same turn.\n"
+            )
         user_content: Any = self._build_user_content(text, audio_data)
+        tools = self._agent_tools
+        if call_mode:
+            tools = _build_agent_tools(
+                self._skill_specs,
+                self._config,
+                has_camera=self._camera.enabled,
+                call_mode=True,
+            )
 
         # Anthropic Messages API rejects ``input_audio`` parts and has no
         # equivalent of MiMo's omni audio-in model; drop the override so
@@ -464,6 +514,8 @@ class LLMClient:
             )
         tool_records: list[AgentToolCall] = []
         tool_count = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 3
         force_tool_choice: str | dict[str, Any] | None = None
 
         for turn_index in range(1, self._max_turns + 1):
@@ -487,7 +539,7 @@ class LLMClient:
 
             message = await self._stream_chat_completion(
                 messages=messages,
-                tools=self._agent_tools,
+                tools=tools,
                 log_name="llm_client.agent_turn_start",
                 log_context={"text": text or "[audio]", "turn_index": turn_index},
                 tool_choice=choice,
@@ -574,7 +626,11 @@ class LLMClient:
             messages.append(assistant_msg)
 
             tool_names_in_turn = {c.get("function", {}).get("name", "") for c in tool_calls}
-            is_terminal_turn = "finish_response" in tool_names_in_turn or "escalate_to_openclaw" in tool_names_in_turn
+            is_terminal_turn = (
+                "finish_response" in tool_names_in_turn
+                or "end_conversation" in tool_names_in_turn
+                or "escalate_to_openclaw" in tool_names_in_turn
+            )
             if assistant_content and not is_terminal_turn and on_progress is not None:
                 narration = _strip_think_tags(assistant_content).strip()
                 if narration:
@@ -642,6 +698,30 @@ class LLMClient:
                         detail=summary,
                         stop_reason="finish_response",
                         tool_calls=tool_records,
+                    )
+
+                if tool_name == "end_conversation":
+                    if pending_tts:
+                        await asyncio.gather(*pending_tts, return_exceptions=True)
+                    message_text = _strip_think_tags(str(arguments.get("message", ""))).strip()
+                    reason = _strip_think_tags(str(arguments.get("reason", ""))).strip()
+                    tool_records.append(
+                        AgentToolCall(
+                            turn_index=turn_index,
+                            tool_index=tool_index,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            status="ok",
+                            result={"end_conversation": True},
+                        )
+                    )
+                    return AgentLoopResult(
+                        intent_type="chat" if not tool_records else "agent",
+                        response=message_text or "好的，那我先挂断啦。",
+                        detail=reason or "用户表达结束通话意图",
+                        stop_reason="end_conversation",
+                        tool_calls=tool_records,
+                        end_conversation=True,
                     )
 
                 if tool_name == "escalate_to_openclaw":
@@ -730,6 +810,33 @@ class LLMClient:
                         "tool_call_id": call_id,
                         "content": json.dumps(tool_result, ensure_ascii=False),
                     }
+                )
+
+                if tool_name != "say" and tool_result.get("status") == "error":
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 0
+
+            if consecutive_errors >= max_consecutive_errors:
+                logger.warning(
+                    "llm_client.agent_early_stop",
+                    consecutive_errors=consecutive_errors,
+                    turn_index=turn_index,
+                    tool_count=tool_count,
+                )
+                if pending_tts:
+                    await asyncio.gather(*pending_tts, return_exceptions=True)
+                last_say = ""
+                for rec in reversed(tool_records):
+                    if rec.tool_name == "say" and rec.arguments:
+                        last_say = rec.arguments.get("text", "")
+                        break
+                return AgentLoopResult(
+                    intent_type="agent",
+                    response=last_say or "好的~",
+                    detail=f"连续 {consecutive_errors} 次工具调用失败，提前结束",
+                    stop_reason="consecutive_errors",
+                    tool_calls=tool_records,
                 )
 
             if pending_tts:

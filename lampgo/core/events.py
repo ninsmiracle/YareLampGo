@@ -197,6 +197,29 @@ class TtsAudio(Event):
     request_id: str = ""
 
 
+@dataclass
+class ConversationStateChanged(Event):
+    """Voice conversation state changed (idle / joining / active / leaving)."""
+
+    state: str
+
+
+@dataclass
+class WakeWordDetected(Event):
+    """Wake word detected by the server-side listener."""
+
+    model: str = ""
+    score: float = 0.0
+
+
+@dataclass
+class VoiceUserText(Event):
+    """ASR text received from voice pipeline (Agent SDK)."""
+
+    user_text: str
+    request_id: str = ""
+
+
 class EventBus:
     """Simple in-process typed pub/sub.  Handlers are async callables."""
 
@@ -205,6 +228,12 @@ class EventBus:
 
     def subscribe(self, event_type: type[T], handler: Callable[[T], Awaitable[None]]) -> None:
         self._handlers[event_type].append(handler)
+
+    def unsubscribe(self, event_type: type[T], handler: Callable[[T], Awaitable[None]]) -> None:
+        try:
+            self._handlers[event_type].remove(handler)
+        except (KeyError, ValueError):
+            pass
 
     async def publish(self, event: Event) -> None:
         handlers = self._handlers.get(type(event), [])

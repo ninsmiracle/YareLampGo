@@ -315,6 +315,7 @@
   const openclawFollowups = loadFollowupSet();
   const streamingState = new Map();
   let activeAgentRequestId = null;
+  let callPreemptedAwaitingResponse = false;
   let isMotionRecording = false;
   let hasPendingMotionRecording = false;
   let pendingOverwriteSave = false;
@@ -533,7 +534,11 @@
           } catch {}
           sessionSyncReady = true;
           renderHistory();
-          const current = getActiveSession();
+          // 直接用 activeSessionId 查找，不走 getActiveSession（后者会过滤掉通话会话）；
+          // 这里只是要恢复“上次看的那个会话”，loadSession 会自己把通话会话路由到通话视图。
+          const current = activeSessionId
+            ? sessions.find((s) => s.id === activeSessionId) || null
+            : null;
           if (current) {
             loadSession(current.id);
           } else if (chatMessages) {
@@ -571,7 +576,11 @@
 
   function getActiveSession() {
     if (!activeSessionId) return null;
-    return sessions.find((s) => s.id === activeSessionId) || null;
+    const s = sessions.find((sess) => sess.id === activeSessionId) || null;
+    // 通话会话只在“通话视图”里使用，聊天视图相关的 chat-flow（输入框、LLM 历史、
+    // pending assistant entry 等）不应把消息塞进通话会话里。
+    if (s && s.isCall) return null;
+    return s;
   }
 
   function ensureActiveSession() {
@@ -993,6 +1002,40 @@
   function loadSession(id) {
     const session = sessions.find((s) => s.id === id);
     if (!session) return;
+
+    // 通话会话需要在“通话视图”里展示，这样它带的工具调用 activity_html 才能用同一份 DOM
+    // 重新水合，并且用户随时能点视图右上角的“通话”按钮发起新一轮通话。
+    if (session.isCall) {
+      // 直播通话进行中（同一 session）：只切视图，不重建 DOM，避免抹掉正在进行的 bubble。
+      const callHasBubbles = !!(
+        callMessages && callMessages.querySelector(".msg-bubble-wrap")
+      );
+      const isLiveCall =
+        prevCallState === "active" ||
+        prevCallState === "joining" ||
+        prevCallState === "leaving";
+      if (id === callSessionId && callHasBubbles && isLiveCall) {
+        activeSessionId = id;
+        persistSessions();
+        showView("call");
+        renderHistory();
+        scrollCallMessages();
+        return;
+      }
+      // 用户在直播通话里点了另一个历史通话：先不动 DOM，仅切视图，避免误伤当前通话。
+      if (isLiveCall && id !== callSessionId) {
+        showView("call");
+        renderHistory();
+        return;
+      }
+      activeSessionId = id;
+      persistSessions();
+      showView("call");
+      renderHistoricalCallSession(session);
+      renderHistory();
+      return;
+    }
+
     // 守卫的意图：同一会话里已经渲染过真实 bubble → 不要重建 DOM，保留 in-progress thinking 状态。
     // 之前用 `childElementCount > 0` 会把 index.html 里静态存在的 `#empty-state` 当成 "已渲染"，
     // 导致启动后 syncSessionsFromServer 在 activeSessionId 刚被设置那一帧就 early-return，
@@ -1819,6 +1862,38 @@
     }
   }
 
+  function normalizeDeviceName(name) {
+    return String(name || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .replace(/\s*\([^)]*\)\s*/g, " ")
+      .trim();
+  }
+
+  function serverMicForBrowserChoice(id) {
+    if (!id) return "";
+    if (id === "esp32") return "esp32";
+    const selected = micDevicesCache.find((d) => d.deviceId === id);
+    const browserName = normalizeDeviceName(selected && selected.label);
+    if (!browserName) return null;
+    const exact = detectedDevices.mics.find((m) => normalizeDeviceName(m.name) === browserName);
+    if (exact) return String(exact.index || "");
+    const fuzzy = detectedDevices.mics.find((m) => {
+      const serverName = normalizeDeviceName(m.name);
+      return serverName && (serverName.includes(browserName) || browserName.includes(serverName));
+    });
+    return fuzzy ? String(fuzzy.index || "") : null;
+  }
+
+  function syncServerMicFromTopbar(id) {
+    const serverMic = serverMicForBrowserChoice(id);
+    if (serverMic === null) {
+      console.warn("[voice] no matching server mic for browser device:", id);
+      return;
+    }
+    send({ type: "set_mic", device: serverMic, request_id: `mic_set_${Date.now()}` });
+  }
+
   function selectMicDevice(id) {
     preferredMicId = id || "";
     try {
@@ -1826,6 +1901,7 @@
       else localStorage.removeItem(MIC_DEVICE_KEY);
     } catch (_) { /* ignore */ }
     window.dispatchEvent(new CustomEvent("lampgo:mic-selected", { detail: { deviceId: preferredMicId } }));
+    syncServerMicFromTopbar(preferredMicId);
     if (id === "esp32") {
       if (chipMic) chipMic.title = "麦克风：ESP32 无线麦克风";
     } else {
@@ -2023,6 +2099,27 @@
       return;
     }
 
+    if (msg.type === "set_mic") {
+      if (msg.ok && msg.result) {
+        detectedDevices.mics = (msg.result.mics || []).map((m) => ({
+          index: String(m.index || ""),
+          name: m.name || "",
+          is_default: !!m.is_default,
+        }));
+        repopulateMicDeviceSelect(String(msg.result.active || ""));
+        if (chipMic && msg.result.active !== undefined) {
+          const active = String(msg.result.active || "");
+          const matched = detectedDevices.mics.find((m) => String(m.index) === active);
+          if (active === "esp32") chipMic.title = "麦克风：ESP32 无线麦克风（通话已同步）";
+          else if (matched && matched.name) chipMic.title = `麦克风：${matched.name}（通话已同步）`;
+          else if (!active) chipMic.title = "系统默认麦克风（通话已同步）";
+        }
+      } else {
+        console.warn("[voice] set server mic failed:", msg.error || msg);
+      }
+      return;
+    }
+
     if (msg.ok && msg.result && msg.result.skills) {
       renderSkills(msg.result.skills);
       return;
@@ -2126,7 +2223,22 @@
     else if (evt === "OpenClawPromotionRequested" && data.task) upsertOpenClawTask(data.task);
     else if (evt === "OpenClawPromotionDecision" && data.task) upsertOpenClawTask(data.task);
 
-    if (evt === "TtsAudio" && data.audio) handleTtsAudio(data.audio, data.format || "mp3");
+    if (evt === "TtsAudio" && data.audio && !lkRoom) handleTtsAudio(data.audio, data.format || "mp3");
+    if (evt === "ConversationStateChanged" && data.state) updateCallViewState(data.state);
+    if (evt === "WakeWordDetected") {
+      if (!lkRoom && prevCallState !== "joining" && prevCallState !== "active") {
+        startBrowserLiveKitCall();
+      }
+      return;
+    }
+
+    if (evt === "VoiceUserText" && data.user_text && data.request_id) {
+      addCallUserBubble(data.user_text);
+      addCallAssistantBubble(data.request_id, data.user_text, callPreemptedAwaitingResponse);
+      callPreemptedAwaitingResponse = false;
+      pushCallMessage("user", data.user_text);
+      return;
+    }
 
     const requestId = data.request_id || "";
     const bubble = requestId ? pendingMessages.get(requestId) : null;
@@ -2511,6 +2623,10 @@
       recordMetrics.textContent = `采样：${recordingFps} FPS · ${recordingFrames} 帧`;
     }
     updateRecordButtonState();
+
+    if (data.conversation_state != null) {
+      updateCallViewState(data.conversation_state);
+    }
   }
 
   function formatIntentResolved(data) {
@@ -3206,10 +3322,29 @@
     send({ type: "text", input: text, request_id: requestId, history });
   });
 
+  const VOICE_DOTS_HTML = '<span class="voice-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+
+  function clearAssistantLoadingDots(bubble) {
+    if (!bubble) return;
+    bubble.querySelectorAll(".assistant-loading-dots").forEach((el) => el.remove());
+  }
+
+  function showAssistantLoadingDots(bubble) {
+    if (!bubble) return;
+    const el = bubble.querySelector(".response-text");
+    if (!el || el.querySelector(".assistant-loading-dots")) return;
+    const dots = document.createElement("span");
+    dots.className = "assistant-loading-dots";
+    dots.innerHTML = VOICE_DOTS_HTML;
+    el.appendChild(dots);
+  }
+
   function addUserBubble(text, requestId) {
+    const isVoice = text === "[语音消息]";
     const row = document.createElement("div");
     row.className = "flex justify-end mb-4";
-    row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${esc(text)}</div><span class="msg-time">${formatTime()}</span></div>`;
+    const content = isVoice ? VOICE_DOTS_HTML : esc(text);
+    row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${content}</div><span class="msg-time">${formatTime()}</span></div>`;
     chatMessages.appendChild(row);
     const bubble = row.querySelector(".msg-user");
     if (requestId && bubble) pendingUserMessages.set(requestId, bubble);
@@ -3414,45 +3549,84 @@
     }
 
     if (log) finalizeActivity(log);
+    clearAssistantLoadingDots(bubble);
+
+    const isPreempted = !!(result.preempted);
+    const isCallBubble = bubble.dataset.callView === "true";
+    if (isPreempted && isCallBubble) callPreemptedAwaitingResponse = true;
 
     if (text) {
       appendTextToBubble(bubble, text);
     }
 
-    flushPendingSnapshot(msg.request_id);
-    const pushed = pendingAssistantEntries.get(msg.request_id);
-    if (pushed && pushed.entry) {
-      const meta = pushed.entry.meta || (pushed.entry.meta = {});
-      if (text) pushed.entry.text = text;
-      if (ocTask) {
-        meta.openclaw_task_id = ocTask.task_id;
-        meta.openclaw_user_text = ocTask.user_text || "";
-        meta.openclaw_status = ocTask.status || "";
+    if (isPreempted) {
+      const tag = document.createElement("span");
+      tag.className = "preempted-tag";
+      tag.textContent = "已中止";
+      bubble.appendChild(tag);
+    }
+
+    if (isCallBubble) {
+      const replyText = text || (isPreempted ? "[已中止]" : "");
+      if (replyText) {
+        const meta = {};
+        if (isPreempted) meta.preempted = true;
+        if (result.end_conversation) meta.end_conversation = true;
+        if (ocTask) {
+          meta.openclaw_task_id = ocTask.task_id;
+          meta.openclaw_user_text = ocTask.user_text || "";
+          meta.openclaw_status = ocTask.status || "";
+        }
+        const activityHtml = captureActivityHtml(bubble);
+        if (activityHtml) meta.activity_html = activityHtml;
+        pushCallMessage(
+          "assistant",
+          replyText,
+          Object.keys(meta).length ? meta : undefined,
+        );
       }
-      const activityHtml = captureActivityHtml(bubble);
-      if (activityHtml) meta.activity_html = activityHtml;
-      delete meta.pending;
-      delete meta.requestId;
-      pushed.entry.ts = Date.now();
-      if (pushed.session) pushed.session.updatedAt = Date.now();
-      persistSessions();
-      renderHistory();
-      pendingAssistantEntries.delete(msg.request_id);
-    } else if (text) {
-      const meta = {};
-      if (ocTask) {
-        meta.openclaw_task_id = ocTask.task_id;
-        meta.openclaw_user_text = ocTask.user_text || "";
-        meta.openclaw_status = ocTask.status || "";
+      // Server owns the delayed hangup so the final TTS playout is not cut.
+      // The end_conversation flag is still stored in message metadata for UI/history.
+      if (result.end_conversation && lkRoom) {
+        window.setTimeout(() => stopBrowserLiveKitCall(), 2500);
       }
-      const activityHtml = captureActivityHtml(bubble);
-      if (activityHtml) meta.activity_html = activityHtml;
-      pushMessageToSession("assistant", text, Object.keys(meta).length ? meta : undefined);
+    } else {
+      flushPendingSnapshot(msg.request_id);
+      const pushed = pendingAssistantEntries.get(msg.request_id);
+      if (pushed && pushed.entry) {
+        const meta = pushed.entry.meta || (pushed.entry.meta = {});
+        if (text) pushed.entry.text = text;
+        if (ocTask) {
+          meta.openclaw_task_id = ocTask.task_id;
+          meta.openclaw_user_text = ocTask.user_text || "";
+          meta.openclaw_status = ocTask.status || "";
+        }
+        const activityHtml = captureActivityHtml(bubble);
+        if (activityHtml) meta.activity_html = activityHtml;
+        delete meta.pending;
+        delete meta.requestId;
+        pushed.entry.ts = Date.now();
+        if (pushed.session) pushed.session.updatedAt = Date.now();
+        persistSessions();
+        renderHistory();
+        pendingAssistantEntries.delete(msg.request_id);
+      } else if (text) {
+        const meta = {};
+        if (ocTask) {
+          meta.openclaw_task_id = ocTask.task_id;
+          meta.openclaw_user_text = ocTask.user_text || "";
+          meta.openclaw_status = ocTask.status || "";
+        }
+        const activityHtml = captureActivityHtml(bubble);
+        if (activityHtml) meta.activity_html = activityHtml;
+        pushMessageToSession("assistant", text, Object.keys(meta).length ? meta : undefined);
+      }
     }
 
     pendingMessages.delete(msg.request_id);
     pendingUserMessages.delete(msg.request_id);
-    scrollChat();
+    if (isCallBubble) scrollCallMessages();
+    else scrollChat();
   }
 
   function captureActivityHtml(bubble) {
@@ -3625,6 +3799,7 @@
   }
 
   function appendTextToBubble(bubble, text) {
+    clearAssistantLoadingDots(bubble);
     const el = bubble.querySelector(".response-text");
     if (!el) return;
     let finalEl = el.querySelector(".final-response");
@@ -3970,6 +4145,351 @@
     }
   });
 
+  /* ── Call view ── */
+  const callMessages = document.getElementById("call-messages");
+  const callEmptyState = document.getElementById("call-empty-state");
+  const callDot = document.getElementById("call-dot");
+  const callStatusText = document.getElementById("call-status-text");
+  const btnCallStart = document.getElementById("btn-call-start");
+  const btnCallEnd = document.getElementById("btn-call-end");
+
+  let callSessionId = null;
+  let prevCallState = "idle";
+  let lkRoom = null;
+  let lkLocalTrack = null;
+  let lkModulePromise = null;
+  const lkAudioEls = new Set();
+
+  function setBrowserCallState(state) {
+    updateCallViewState(state);
+  }
+
+  async function loadLiveKitClient() {
+    if (!lkModulePromise) {
+      lkModulePromise = import("https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.esm.mjs");
+    }
+    return lkModulePromise;
+  }
+
+  async function startBrowserLiveKitCall() {
+    btnCallStart.disabled = true;
+    resetCallView();
+    createCallSession();
+    setBrowserCallState("joining");
+    try {
+      const resp = await fetch("/api/livekit/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room_name: "lampgo",
+          user_identity: `lampgo-web-${Date.now().toString(36)}`,
+          voice_agent: "lampgo-jarvis",
+        }),
+      });
+      const body = await resp.json();
+      if (!resp.ok || !body.ok) throw new Error((body && body.error) || `HTTP ${resp.status}`);
+      const { Room, Track, createLocalAudioTrack } = await loadLiveKitClient();
+      const { token, serverUrl } = body.result;
+      const room = new Room({ adaptiveStream: false, dynacast: false });
+      room.on("trackSubscribed", (track) => {
+        if (track.kind !== Track.Kind.Audio) return;
+        const el = track.attach();
+        el.autoplay = true;
+        el.playsInline = true;
+        el.style.display = "none";
+        document.body.appendChild(el);
+        lkAudioEls.add(el);
+      });
+      room.on("trackUnsubscribed", (track) => {
+        track.detach().forEach((el) => {
+          lkAudioEls.delete(el);
+          el.remove();
+        });
+      });
+      room.on("disconnected", () => {
+        cleanupBrowserLiveKitCall();
+        setBrowserCallState("idle");
+      });
+      await room.connect(serverUrl, token);
+      const audioOptions = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+      if (selectedMicId && selectedMicId !== "esp32") audioOptions.deviceId = selectedMicId;
+      lkLocalTrack = await createLocalAudioTrack(audioOptions);
+      await room.localParticipant.publishTrack(lkLocalTrack, { source: Track.Source.Microphone });
+      lkRoom = room;
+      setBrowserCallState("active");
+      console.log("[call] browser LiveKit call started with AEC");
+    } catch (err) {
+      console.error("[call] browser LiveKit start failed:", err);
+      addSystemMessage(`通话启动失败：${err.message || err}`);
+      cleanupBrowserLiveKitCall();
+      setBrowserCallState("idle");
+    }
+  }
+
+  function cleanupBrowserLiveKitCall() {
+    if (lkLocalTrack) {
+      try { lkLocalTrack.stop(); } catch (_) { /* ignore */ }
+      lkLocalTrack = null;
+    }
+    lkAudioEls.forEach((el) => el.remove());
+    lkAudioEls.clear();
+    lkRoom = null;
+  }
+
+  function stopBrowserLiveKitCall() {
+    if (lkRoom) {
+      const room = lkRoom;
+      cleanupBrowserLiveKitCall();
+      try { room.disconnect(); } catch (_) { /* ignore */ }
+    }
+    setBrowserCallState("idle");
+  }
+
+  function createCallSession() {
+    const id = `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const session = {
+      id,
+      title: "语音通话",
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isCall: true,
+    };
+    sessions.unshift(session);
+    callSessionId = id;
+    activeSessionId = id;
+    persistSessions();
+    renderHistory();
+    return session;
+  }
+
+  function pushCallMessage(role, text, meta) {
+    if (!callSessionId || !text) return;
+    const session = sessions.find((s) => s.id === callSessionId);
+    if (!session) return;
+    const entry = { role, text, ts: Date.now() };
+    if (meta && typeof meta === "object") entry.meta = meta;
+    session.messages.push(entry);
+    session.updatedAt = Date.now();
+    if (session.title === "语音通话" && role === "user") {
+      session.title = "\u{1F4DE} " + (text.length > 24 ? text.slice(0, 24) + "…" : text);
+    }
+    persistSessions();
+  }
+
+  function finalizeCallSession() {
+    if (!callSessionId) return;
+    const finishingId = callSessionId;
+    const session = sessions.find((s) => s.id === callSessionId);
+    if (session && session.messages.length === 0) {
+      sessions.splice(sessions.indexOf(session), 1);
+      if (activeSessionId === finishingId) activeSessionId = sessions[0] ? sessions[0].id : null;
+    }
+    callSessionId = null;
+    persistSessions();
+    renderHistory();
+  }
+
+  function updateCallViewState(state) {
+    if (!callDot) return;
+    callDot.classList.remove("is-active", "is-joining");
+    if (state === "active") {
+      callDot.classList.add("is-active");
+      callStatusText.textContent = "通话中";
+      btnCallStart.classList.add("hidden");
+      btnCallEnd.classList.remove("hidden");
+      btnCallEnd.disabled = false;
+      if (!callSessionId) {
+        resetCallView();
+        createCallSession();
+      }
+      showView("call");
+    } else if (state === "joining") {
+      if (prevCallState === "idle") {
+        resetCallView();
+        createCallSession();
+      }
+      showView("call");
+      callDot.classList.add("is-joining");
+      callStatusText.textContent = "连接中…";
+      btnCallStart.classList.add("hidden");
+      btnCallEnd.classList.remove("hidden");
+      btnCallEnd.disabled = true;
+    } else if (state === "leaving") {
+      callPreemptedAwaitingResponse = false;
+      callStatusText.textContent = "结束中…";
+      btnCallStart.classList.add("hidden");
+      btnCallEnd.classList.remove("hidden");
+      btnCallEnd.disabled = true;
+    } else {
+      callPreemptedAwaitingResponse = false;
+      callStatusText.textContent = "未连接";
+      btnCallStart.classList.remove("hidden");
+      btnCallStart.disabled = false;
+      btnCallEnd.classList.add("hidden");
+      if (prevCallState === "active" || prevCallState === "joining" || prevCallState === "leaving") finalizeCallSession();
+    }
+    prevCallState = state;
+  }
+
+  if (btnCallStart) {
+    btnCallStart.addEventListener("click", () => {
+      startBrowserLiveKitCall();
+    });
+  }
+  if (btnCallEnd) {
+    btnCallEnd.addEventListener("click", () => {
+      btnCallEnd.disabled = true;
+      if (lkRoom) stopBrowserLiveKitCall();
+      else send({ type: "stop_conversation" });
+    });
+  }
+
+  function scrollCallMessages() {
+    if (!callMessages) return;
+    requestAnimationFrame(() => {
+      callMessages.scrollTop = callMessages.scrollHeight;
+    });
+  }
+
+  function addCallUserBubble(text) {
+    if (!callMessages) return;
+    if (callEmptyState) callEmptyState.style.display = "none";
+    const row = document.createElement("div");
+    row.className = "flex justify-end mb-4";
+    row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${esc(text)}</div><span class="msg-time">${formatTime()}</span></div>`;
+    callMessages.appendChild(row);
+    scrollCallMessages();
+  }
+
+  function addCallAssistantBubble(requestId, quoteText, showLoading = false) {
+    if (!callMessages) return;
+    if (callEmptyState) callEmptyState.style.display = "none";
+    const row = document.createElement("div");
+    row.className = "flex justify-start mb-4";
+    const wrap = document.createElement("div");
+    wrap.className = "msg-bubble-wrap";
+    const bubble = document.createElement("div");
+    bubble.className = "msg-assistant";
+
+    const truncated = quoteText.length > 40 ? quoteText.slice(0, 40) + "…" : quoteText;
+    bubble.innerHTML =
+      `<div class="reply-quote"><span class="reply-quote-text">${esc(truncated)}</span></div>` +
+      '<div class="steps"></div><div class="response-text"></div>';
+
+    const time = document.createElement("span");
+    time.className = "msg-time";
+    time.textContent = formatTime();
+    wrap.appendChild(bubble);
+    wrap.appendChild(time);
+    row.appendChild(wrap);
+    callMessages.appendChild(row);
+    pendingMessages.set(requestId, bubble);
+    bubble.dataset.requestId = requestId;
+    bubble.dataset.callView = "true";
+    if (showLoading) showAssistantLoadingDots(bubble);
+    scrollCallMessages();
+    return bubble;
+  }
+
+  // 把通话视图恢复到“空白起点”：移除所有 bubble、显示 empty-state、清掉当前关联的 callSessionId。
+  // 注意不要在直播通话进行中（active/joining/leaving）调用这个函数，否则会抹掉正在进行的 DOM。
+  function resetCallView() {
+    if (!callMessages) {
+      callSessionId = null;
+      return;
+    }
+    Array.from(callMessages.children).forEach((child) => {
+      if (child.id !== "call-empty-state") child.remove();
+    });
+    if (callEmptyState) callEmptyState.style.display = "";
+    callSessionId = null;
+    callPreemptedAwaitingResponse = false;
+  }
+
+  function renderHistoricalCallUserBubble(text, ts) {
+    if (!callMessages || !text) return;
+    const row = document.createElement("div");
+    row.className = "flex justify-end mb-4";
+    row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${esc(text)}</div><span class="msg-time">${formatTime(new Date(ts))}</span></div>`;
+    callMessages.appendChild(row);
+  }
+
+  function renderHistoricalCallAssistantBubble(text, ts, meta) {
+    if (!callMessages) return;
+    const row = document.createElement("div");
+    row.className = "flex justify-start mb-4";
+    const responseHtml = text ? `<div class="final-response">${formatAssistantText(text)}</div>` : "";
+    row.innerHTML = `
+      <div class="msg-bubble-wrap">
+        <div class="msg-assistant">
+          <div class="steps"></div>
+          <div class="response-text">${responseHtml}</div>
+        </div>
+        <span class="msg-time">${formatTime(new Date(ts))}</span>
+      </div>
+    `;
+    callMessages.appendChild(row);
+    const bubble = row.querySelector(".msg-assistant");
+    if (bubble && meta && meta.activity_html) {
+      rehydrateActivityLog(bubble, meta.activity_html);
+    }
+    if (bubble && meta && meta.openclaw_task_id) {
+      appendOpenClawLinkCard(bubble, {
+        task_id: meta.openclaw_task_id,
+        user_text: meta.openclaw_user_text || "",
+        status: meta.openclaw_status || "",
+      });
+    }
+    if (bubble && meta && meta.preempted) {
+      const tag = document.createElement("span");
+      tag.className = "preempted-tag";
+      tag.textContent = "已中止";
+      bubble.appendChild(tag);
+    }
+  }
+
+  function renderHistoricalCallSession(session) {
+    if (!session || !callMessages) return;
+    Array.from(callMessages.children).forEach((child) => {
+      if (child.id !== "call-empty-state") child.remove();
+    });
+    if (!session.messages || !session.messages.length) {
+      if (callEmptyState) callEmptyState.style.display = "";
+      callSessionId = session.id;
+      return;
+    }
+    if (callEmptyState) callEmptyState.style.display = "none";
+    session.messages.forEach((m) => {
+      if (m.role === "user") {
+        renderHistoricalCallUserBubble(m.text, m.ts);
+      } else if (m.role === "assistant") {
+        renderHistoricalCallAssistantBubble(m.text, m.ts, m.meta);
+      }
+    });
+    callSessionId = session.id;
+    scrollCallMessages();
+  }
+
+  // sidebar 的 “通话” 导航按钮：在不打断直播通话的前提下，每次点击都回到一个全新的通话页面。
+  // - 直播中 / 连接中 / 挂断中：仅切换 view，保留 DOM；
+  // - 其他状态（idle 或正在浏览历史通话）：把 DOM 重置成空白起点。
+  function openFreshCallView() {
+    showView("call");
+    if (
+      prevCallState === "active" ||
+      prevCallState === "joining" ||
+      prevCallState === "leaving"
+    ) {
+      return;
+    }
+    resetCallView();
+  }
+
   eachRecordButton((btn) => {
     btn.addEventListener("click", () => {
       if (isMotionRecording) stopMotionRecording();
@@ -4075,6 +4595,7 @@
       const view = btn.dataset.view;
       if (!view) return;
       if (btn.dataset.action === "new-chat") startNewSession();
+      else if (view === "call") openFreshCallView();
       else showView(view);
     });
   });
@@ -4178,6 +4699,7 @@
   function scrollChat() {
     requestAnimationFrame(() => {
       chatMessages.scrollTop = chatMessages.scrollHeight;
+      if (callMessages) callMessages.scrollTop = callMessages.scrollHeight;
     });
   }
 
@@ -6199,7 +6721,11 @@
 
   loadSessions();
   renderHistory();
-  const bootSession = getActiveSession();
+  // 同步初始化路径：直接用 activeSessionId 找上次看的会话；getActiveSession 会过滤掉通话会话，
+  // 但通话会话也应该在启动时回到通话视图，所以这里走原始查找。
+  const bootSession = activeSessionId
+    ? sessions.find((s) => s.id === activeSessionId) || null
+    : null;
   if (bootSession && bootSession.messages.length) {
     loadSession(bootSession.id);
   }

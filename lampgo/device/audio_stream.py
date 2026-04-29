@@ -40,6 +40,7 @@ class Esp32AudioCapture:
         self._running = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._ws_task: asyncio.Task | None = None
 
     # -- public interface (matches AudioCapture) ----------------------------
 
@@ -53,8 +54,8 @@ class Esp32AudioCapture:
 
     def stop(self) -> None:
         self._running = False
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop is not None and self._ws_task is not None:
+            self._loop.call_soon_threadsafe(self._ws_task.cancel)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
@@ -81,10 +82,14 @@ class Esp32AudioCapture:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._ws_loop())
+            self._ws_task = self._loop.create_task(self._ws_loop())
+            self._loop.run_until_complete(self._ws_task)
+        except asyncio.CancelledError:
+            pass
         except Exception:
             logger.exception("esp32_audio.thread_crashed")
         finally:
+            self._ws_task = None
             self._loop.close()
             self._loop = None
 
@@ -120,7 +125,7 @@ class Esp32AudioCapture:
             return
 
         logger.info("esp32_audio.connecting", url=url)
-        async with websockets.connect(url, open_timeout=5, close_timeout=2) as ws:
+        async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
             logger.info("esp32_audio.connected", url=url)
             while self._running:
                 try:
@@ -220,7 +225,7 @@ class Esp32AudioSession:
 
         deadline = asyncio.get_event_loop().time() + self.MAX_DURATION_S
         try:
-            async with websockets.connect(url, open_timeout=5, close_timeout=2) as ws:
+            async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
                 while not self._stop_event.is_set():
                     if asyncio.get_event_loop().time() > deadline:
                         break

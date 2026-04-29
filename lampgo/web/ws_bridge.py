@@ -13,6 +13,7 @@ from starlette.websockets import WebSocket, WebSocketState
 from lampgo.core.events import (
     AgentFinished,
     ChatMessage,
+    ConversationStateChanged,
     EStopActivated,
     EStopReset,
     Event,
@@ -33,6 +34,8 @@ from lampgo.core.events import (
     ToolCallFinished,
     ToolCallPlanned,
     TtsAudio,
+    VoiceUserText,
+    WakeWordDetected,
 )
 
 if TYPE_CHECKING:
@@ -61,6 +64,9 @@ ALL_EVENT_TYPES: list[type[Event]] = [
     SkillProgress,
     ChatMessage,
     TtsAudio,
+    ConversationStateChanged,
+    VoiceUserText,
+    WakeWordDetected,
 ]
 
 

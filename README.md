@@ -105,10 +105,9 @@ uv run lampgo onboard
 ### 2. 启动服务
 
 ```bash
-uv run lampgo run --web                 # 守护进程 + Web UI（推荐）
+uv run lampgo run --web                 # 守护进程 + Web UI（推荐，唤醒词配置后自动启用语音）
 uv run lampgo run --web --no-hw         # 无硬件模式
 uv run lampgo run --web --web-port 18790
-uv run lampgo run --voice               # CLI + 语音闭环
 uv run lampgo run                       # 纯后台守护进程
 ```
 

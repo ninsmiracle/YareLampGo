@@ -370,6 +370,18 @@ class VoiceConfig(BaseModel):
     mic_device: str = Field(default="", description="Microphone device index or name (empty = system default)")
     wake_word: str = Field(default="", description="Wake word for hands-free activation (empty = disabled)")
     vad_enabled: bool = Field(default=False, description="Enable voice activity detection")
+    livekit_url: str = Field(default="", description="LiveKit server WebSocket URL (e.g. ws://192.168.31.116:7880)")
+    livekit_api_key: str = Field(default="", description="LiveKit API key for token signing")
+    livekit_api_secret: str = Field(default="", description="LiveKit API secret for token signing")
+    livekit_room: str = Field(default="lampgo", description="LiveKit room name for voice conversations")
+    livekit_agent_name: str = Field(
+        default="xiaomi-agent-lampgo-jarvis",
+        description="Agent name dispatched in the LiveKit room (must match roles.yaml name_prefix + voice_agent).",
+    )
+    silence_timeout_s: int = Field(default=60, ge=10, le=300, description="Seconds of silence before ending a conversation")
+    volcengine_app_id: str = Field(default="", description="Volcengine app ID for LiveKit ASR/TTS")
+    volcengine_access_token: str = Field(default="", description="Volcengine access token for LiveKit ASR/TTS")
+    livekit_tts_voice: str = Field(default="BV700_streaming", description="Volcengine TTS voice for LiveKit conversations")
 
 
 class WebConfig(BaseModel):
@@ -394,7 +406,6 @@ class LampgoConfig(BaseModel):
     web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
     socket_path: str = Field(default="/tmp/lampgo.sock", description="Unix socket path for IPC")
-    voice_enabled: bool = Field(default=False, description="Enable voice loop on startup")
     web_enabled: bool = Field(default=False, description="Enable web UI on startup")
     home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
     no_hw: bool = Field(default=False, description="Skip hardware connections (motors/LED)")
