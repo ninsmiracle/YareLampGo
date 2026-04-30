@@ -220,6 +220,13 @@ class VoiceUserText(Event):
     request_id: str = ""
 
 
+@dataclass
+class Esp32AudioRelay(Event):
+    """Raw ESP32 PCM chunk relayed to browser for LiveKit publishing."""
+
+    pcm: bytes
+
+
 class EventBus:
     """Simple in-process typed pub/sub.  Handlers are async callables."""
 

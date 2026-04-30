@@ -2253,6 +2253,18 @@ class WebGateway:
             result["request_id"] = request_id
             await ws.send_json(result)
 
+        elif msg_type == "start_esp32_relay":
+            if self.server._wake_loop:
+                self.server._wake_loop.start_browser_relay()
+                await ws.send_json({"ok": True, "request_id": request_id})
+            else:
+                await ws.send_json({"ok": False, "error": "wake loop not active", "request_id": request_id})
+
+        elif msg_type == "stop_esp32_relay":
+            if self.server._wake_loop:
+                self.server._wake_loop.stop_browser_relay()
+            await ws.send_json({"ok": True, "request_id": request_id})
+
         elif msg_type == "estop":
             result = await self.server.handle_request({"cmd": "estop"})
             result["request_id"] = request_id

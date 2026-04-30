@@ -14,6 +14,7 @@ from lampgo.core.events import (
     AgentFinished,
     ChatMessage,
     ConversationStateChanged,
+    Esp32AudioRelay,
     EStopActivated,
     EStopReset,
     Event,
@@ -79,6 +80,7 @@ class WsBridge:
         self._lock = asyncio.Lock()
         for evt_type in ALL_EVENT_TYPES:
             events.subscribe(evt_type, self._on_event)
+        events.subscribe(Esp32AudioRelay, self._on_audio_relay)
 
     async def add_client(self, ws: WebSocket) -> None:
         async with self._lock:
@@ -99,6 +101,22 @@ class WsBridge:
     #     inside a mid-line slice on restart and silently reset the counter,
     #     which in turn made the UI event log appear stuck on old timestamps.
     _NON_PERSISTED_EVENTS: set[str] = {"TtsAudio"}
+
+    async def _on_audio_relay(self, event: Esp32AudioRelay) -> None:
+        """Send raw ESP32 PCM as binary WebSocket frames (no JSON overhead)."""
+        async with self._lock:
+            clients = list(self._clients)
+        dead: list[WebSocket] = []
+        for ws in clients:
+            try:
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_bytes(event.pcm)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            async with self._lock:
+                for ws in dead:
+                    self._clients.discard(ws)
 
     async def _on_event(self, event: Event) -> None:
         msg = self._serialize(event)

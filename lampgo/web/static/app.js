@@ -1572,6 +1572,10 @@
     ws.onerror = () => ws.close();
 
     ws.onmessage = (evt) => {
+      if (evt.data instanceof Blob) {
+        evt.data.arrayBuffer().then((buf) => feedEsp32Audio(new Uint8Array(buf)));
+        return;
+      }
       try {
         handleMessage(JSON.parse(evt.data));
       } catch (err) {
@@ -2224,7 +2228,7 @@
     else if (evt === "OpenClawPromotionDecision" && data.task) upsertOpenClawTask(data.task);
 
     if (evt === "TtsAudio" && data.audio && !lkRoom) handleTtsAudio(data.audio, data.format || "mp3");
-    if (evt === "ConversationStateChanged" && data.state) updateCallViewState(data.state);
+    if (evt === "ConversationStateChanged" && data.state && !lkRoom) updateCallViewState(data.state);
     if (evt === "WakeWordDetected") {
       if (!lkRoom && prevCallState !== "joining" && prevCallState !== "active") {
         startBrowserLiveKitCall();
@@ -2624,7 +2628,7 @@
     }
     updateRecordButtonState();
 
-    if (data.conversation_state != null) {
+    if (data.conversation_state != null && !lkRoom) {
       updateCallViewState(data.conversation_state);
     }
   }
@@ -4160,6 +4164,42 @@
   let lkModulePromise = null;
   const lkAudioEls = new Set();
 
+  let esp32AudioCtx = null;
+  let esp32WorkletNode = null;
+  let esp32MediaStream = null;
+  let esp32RelayActive = false;
+
+  const ESP32_WORKLET_CODE = `
+class Esp32PcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buffer = new Float32Array(0);
+    this.port.onmessage = (e) => {
+      const incoming = e.data;
+      const merged = new Float32Array(this._buffer.length + incoming.length);
+      merged.set(this._buffer);
+      merged.set(incoming, this._buffer.length);
+      this._buffer = merged;
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    if (!out) return true;
+    const needed = out.length;
+    if (this._buffer.length >= needed) {
+      out.set(this._buffer.subarray(0, needed));
+      this._buffer = this._buffer.subarray(needed);
+    } else {
+      out.set(this._buffer);
+      out.fill(0, this._buffer.length);
+      this._buffer = new Float32Array(0);
+    }
+    return true;
+  }
+}
+registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
+`;
+
   function setBrowserCallState(state) {
     updateCallViewState(state);
   }
@@ -4171,11 +4211,56 @@
     return lkModulePromise;
   }
 
+  function feedEsp32Audio(pcmBytes) {
+    if (!esp32WorkletNode) return;
+    const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+    esp32WorkletNode.port.postMessage(float32);
+  }
+
+  async function createEsp32AudioTrack() {
+    esp32AudioCtx = new AudioContext({ sampleRate: 16000 });
+    const blob = new Blob([ESP32_WORKLET_CODE], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    await esp32AudioCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+
+    esp32WorkletNode = new AudioWorkletNode(esp32AudioCtx, "esp32-pcm-processor");
+    const dest = esp32AudioCtx.createMediaStreamDestination();
+    esp32WorkletNode.connect(dest);
+    esp32MediaStream = dest.stream;
+
+    send({ type: "start_esp32_relay" });
+    esp32RelayActive = true;
+
+    return esp32MediaStream.getAudioTracks()[0];
+  }
+
+  function cleanupEsp32AudioTrack() {
+    if (esp32RelayActive) {
+      send({ type: "stop_esp32_relay" });
+      esp32RelayActive = false;
+    }
+    if (esp32WorkletNode) {
+      try { esp32WorkletNode.disconnect(); } catch (_) { /* ignore */ }
+      esp32WorkletNode = null;
+    }
+    if (esp32AudioCtx) {
+      try { esp32AudioCtx.close(); } catch (_) { /* ignore */ }
+      esp32AudioCtx = null;
+    }
+    esp32MediaStream = null;
+  }
+
   async function startBrowserLiveKitCall() {
     btnCallStart.disabled = true;
     resetCallView();
     createCallSession();
     setBrowserCallState("joining");
+    const useEsp32 = selectedMicId === "esp32";
     try {
       const resp = await fetch("/api/livekit/token", {
         method: "POST",
@@ -4188,7 +4273,7 @@
       });
       const body = await resp.json();
       if (!resp.ok || !body.ok) throw new Error((body && body.error) || `HTTP ${resp.status}`);
-      const { Room, Track, createLocalAudioTrack } = await loadLiveKitClient();
+      const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
       const { token, serverUrl } = body.result;
       const room = new Room({ adaptiveStream: false, dynacast: false });
       room.on("trackSubscribed", (track) => {
@@ -4211,20 +4296,28 @@
         setBrowserCallState("idle");
       });
       await room.connect(serverUrl, token);
-      const audioOptions = {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      };
-      if (selectedMicId && selectedMicId !== "esp32") audioOptions.deviceId = selectedMicId;
-      lkLocalTrack = await createLocalAudioTrack(audioOptions);
+
+      if (useEsp32) {
+        const mediaTrack = await createEsp32AudioTrack();
+        lkLocalTrack = new LocalAudioTrack(mediaTrack);
+        console.log("[call] using ESP32 wireless mic via AudioWorklet");
+      } else {
+        const audioOptions = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+        if (selectedMicId) audioOptions.deviceId = selectedMicId;
+        lkLocalTrack = await createLocalAudioTrack(audioOptions);
+      }
+
       await room.localParticipant.publishTrack(lkLocalTrack, { source: Track.Source.Microphone });
       lkRoom = room;
       setBrowserCallState("active");
-      console.log("[call] browser LiveKit call started with AEC");
+      console.log("[call] LiveKit call started, mic:", useEsp32 ? "esp32" : "browser");
     } catch (err) {
       console.error("[call] browser LiveKit start failed:", err);
-      addSystemMessage(`通话启动失败：${err.message || err}`);
+      addCallSystemNote(`通话启动失败：${err.message || err}`);
       cleanupBrowserLiveKitCall();
       setBrowserCallState("idle");
     }
@@ -4235,6 +4328,7 @@
       try { lkLocalTrack.stop(); } catch (_) { /* ignore */ }
       lkLocalTrack = null;
     }
+    cleanupEsp32AudioTrack();
     lkAudioEls.forEach((el) => el.remove());
     lkAudioEls.clear();
     lkRoom = null;
@@ -4354,6 +4448,15 @@
     requestAnimationFrame(() => {
       callMessages.scrollTop = callMessages.scrollHeight;
     });
+  }
+
+  function addCallSystemNote(text) {
+    if (!callMessages) return;
+    const note = document.createElement("div");
+    note.className = "system-note";
+    note.textContent = text;
+    callMessages.appendChild(note);
+    scrollCallMessages();
   }
 
   function addCallUserBubble(text) {
