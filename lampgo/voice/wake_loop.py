@@ -58,6 +58,7 @@ class WakeLoop:
         self._running = False
         self._bridge_start_task: asyncio.Task | None = None
         self._capture_lock = asyncio.Lock()
+        self._browser_call_active = False
 
     def _build_capture(self, cfg):
         """Pick ESP32 mic (preferred) or local mic fallback."""
@@ -111,6 +112,10 @@ class WakeLoop:
 
                 self._ring_buffer.append(chunk)
 
+                if self._browser_call_active:
+                    await self._relay_to_frontend(chunk)
+                    continue
+
                 if self._bridge.state in (ConversationState.JOINING, ConversationState.ACTIVE):
                     self._bridge.feed_audio(chunk)
                     continue
@@ -157,6 +162,25 @@ class WakeLoop:
                 logger.debug("wake_loop.old_capture_stop_failed", exc_info=True)
             self._ring_buffer.clear()
             logger.info("wake_loop.mic_device_switched", mic_device=mic_device or "default")
+
+    def start_browser_relay(self) -> None:
+        """Enable ESP32 audio relay to the browser for LiveKit publishing."""
+        self._browser_call_active = True
+        logger.info("wake_loop.browser_relay_started")
+
+    def stop_browser_relay(self) -> None:
+        """Disable ESP32 audio relay to the browser."""
+        self._browser_call_active = False
+        logger.info("wake_loop.browser_relay_stopped")
+
+    async def _relay_to_frontend(self, chunk: bytes) -> None:
+        """Publish an ESP32 PCM chunk to the EventBus for WS relay."""
+        from lampgo.core.events import Esp32AudioRelay
+
+        try:
+            await self._server.events.publish(Esp32AudioRelay(pcm=chunk))
+        except Exception:
+            logger.debug("wake_loop.relay_error", exc_info=True)
 
     async def end_conversation(self) -> None:
         """Manually end the current conversation (called from frontend)."""
