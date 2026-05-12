@@ -112,6 +112,12 @@ class LampgoServer:
         self._record_fps: int = 30
         self._record_motion_was_running: bool = False
 
+    def _resume_motion_after_recording(self) -> None:
+        if self.config.no_hw or not self.hal.is_connected:
+            return
+        if not self.motion.is_running:
+            self.motion.start()
+
     def _register_builtin_skills(self) -> None:
         recordings_dir = Path(self.config.recordings_dir)
         self.registry.register(MoveToSkill())
@@ -391,8 +397,7 @@ class LampgoServer:
             # Product requirement: after recording ends, re-enable torque so the
             # arm holds its current pose and does not slump under gravity.
             self.hal.enable_torque()
-            if self._record_motion_was_running:
-                self.motion.start()
+            self._resume_motion_after_recording()
             self._record_motion_was_running = False
             elapsed = max(0.0, time.monotonic() - self._record_started_at)
             logger.info("server.recording_stopped", frames=rec.frame_count, duration_s=round(elapsed, 3))
@@ -463,12 +468,12 @@ class LampgoServer:
             if self._record_task is not None:
                 await self._record_task
                 self._record_task = None
+            self.hal.enable_torque()
             frames = rec.frame_count
             self._record_recorder = None
             self._record_started_at = 0.0
             self._record_fps = 30
-            if self._record_motion_was_running:
-                self.motion.start()
+            self._resume_motion_after_recording()
             self._record_motion_was_running = False
             return {"ok": True, "result": {"status": "discarded", "frames": frames}}
 
@@ -1045,10 +1050,14 @@ class LampgoServer:
                     return
                 if self._wake_loop.conversation_state.value not in ("joining", "active"):
                     return
+                # Wait for the goodbye TTS to actually play out before leaving
+                # the LiveKit room. Generous bounds: TTS synthesis + buffering
+                # + network can easily take 3-5s before the first frame, and a
+                # short farewell still takes 4-6s of audio to play.
                 await self._wake_loop.bridge.wait_for_remote_playout(
-                    first_frame_timeout_s=6.0,
-                    idle_s=0.8,
-                    max_wait_s=20.0,
+                    first_frame_timeout_s=10.0,
+                    idle_s=1.2,
+                    max_wait_s=25.0,
                 )
                 if self._wake_loop is None:
                     return
@@ -1057,11 +1066,26 @@ class LampgoServer:
                 logger.info("server.conversation_end_scheduled", request_id=request_id)
                 await self._wake_loop.end_conversation()
             except asyncio.CancelledError:
+                logger.info("server.conversation_end_cancelled", request_id=request_id)
                 raise
             except Exception:
                 logger.debug("server.conversation_end_schedule_failed", request_id=request_id, exc_info=True)
+            finally:
+                # Clear our slot only if it still points at us — a follow-up
+                # end_conversation could have replaced it already.
+                if getattr(self, "_pending_hangup_task", None) is asyncio.current_task():
+                    self._pending_hangup_task = None  # type: ignore[attr-defined]
+                    self._pending_hangup_request_id = ""  # type: ignore[attr-defined]
 
-        asyncio.create_task(_end_later())
+        # If a previous goodbye was already pending (rare: two end_conversation
+        # in close succession), cancel it before scheduling the new one.
+        prev_task: asyncio.Task | None = getattr(self, "_pending_hangup_task", None)
+        if prev_task is not None and not prev_task.done():
+            prev_task.cancel()
+
+        task = asyncio.create_task(_end_later())
+        self._pending_hangup_task = task  # type: ignore[attr-defined]
+        self._pending_hangup_request_id = request_id  # type: ignore[attr-defined]
 
     @staticmethod
     def _serialize_agent_tool_calls(tool_calls) -> list[dict[str, Any]]:
@@ -1165,11 +1189,15 @@ class LampgoServer:
         if not cfg.enabled:
             return {"enabled": False}
         online = self.esp32.is_online() if self.esp32 else False
+        status = self.esp32.get_status() if self.esp32 else {}
+        device = status.get("device") if isinstance(status, dict) else None
         host = self.esp32.get_active_host() if self.esp32 else None
         return {
             "enabled": True,
             "online": online,
             "host": host or cfg.preferred_host or "",
+            "ip": device.get("ip", "") if isinstance(device, dict) else "",
+            "port": device.get("port", 80) if isinstance(device, dict) else 80,
         }
 
     def _handle_set_camera(self, port: str) -> dict:

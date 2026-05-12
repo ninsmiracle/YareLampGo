@@ -173,6 +173,7 @@ class WebGateway:
             Route("/api/device/capture-audio/start", self.api_esp32_capture_start, methods=["POST"]),
             Route("/api/device/capture-audio/stop", self.api_esp32_capture_stop, methods=["POST"]),
             Route("/api/device/capture-audio/cancel", self.api_esp32_capture_cancel, methods=["POST"]),
+            WebSocketRoute("/api/device/speaker", self.ws_esp32_speaker),
             Route("/api/persona", self.api_persona_all, methods=["GET"]),
             Route("/api/persona/import-openclaw", self.api_persona_import, methods=["POST"]),
             Route("/api/persona/reset", self.api_persona_reset, methods=["POST"]),
@@ -1461,6 +1462,46 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
         status, body, _ = await self.server.esp32.proxy_post("/device/config", patch)
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def ws_esp32_speaker(self, ws: WebSocket) -> None:
+        """Proxy browser PCM16 frames to the ESP32 /ws/speaker endpoint."""
+        await ws.accept()
+        base_url = self.server.esp32.get_active_base_url() if self.server.esp32 else None
+        if not base_url:
+            await ws.close(code=1011)
+            return
+
+        # Speaker WS lives on the stream httpd (port 81) to avoid contention
+        # with the mic push task on the main httpd (port 80).
+        import re
+        stream_base = re.sub(r":(\d+)$", lambda m: f":{int(m.group(1)) + 1}", base_url)
+        if stream_base == base_url:
+            stream_base = base_url.rstrip("/") + ":81"
+        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + "/ws/speaker"
+        try:
+            import websockets
+        except ImportError:
+            logger.warning("web.esp32_speaker_proxy_no_websockets")
+            await ws.close(code=1011)
+            return
+
+        try:
+            async with websockets.connect(esp32_ws_url, open_timeout=5.0, max_size=None) as esp32_ws:
+                logger.info("web.esp32_speaker_proxy_connected", url=esp32_ws_url)
+                while True:
+                    frame = await ws.receive_bytes()
+                    if frame:
+                        await esp32_ws.send(frame)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            logger.exception("web.esp32_speaker_proxy_failed", url=esp32_ws_url)
+            try:
+                await ws.close(code=1011)
+            except Exception:
+                pass
+        finally:
+            logger.info("web.esp32_speaker_proxy_closed")
 
     async def api_esp32_reboot(self, request: Request) -> JSONResponse:
         status, body, _ = await self.server.esp32.proxy_post("/device/reboot", {})

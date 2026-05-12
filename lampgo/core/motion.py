@@ -106,6 +106,11 @@ class MotionRuntime:
     def start(self) -> None:
         if self._running:
             return
+        # A previous stop can leave the SHUTDOWN sentinel in the queue if the
+        # loop exited from `_running = False` before draining commands. Starting
+        # with a fresh queue prevents the new control thread from immediately
+        # consuming that stale shutdown and exiting.
+        self._command_queue = queue.Queue(maxsize=64)
         self._running = True
         self._thread = threading.Thread(
             target=self._control_loop, name="lampgo-motion", daemon=True
@@ -120,6 +125,7 @@ class MotionRuntime:
         self._command_queue.put(_Command(type=_CommandType.SHUTDOWN))
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+            self._thread = None
         logger.info("motion.stopped")
 
     def update_target(self, target: MotionTarget) -> None:
@@ -546,7 +552,6 @@ class MotionRuntime:
                 # so large frame steps that get velocity-clamped still complete.
                 joint_targets.update(_current_stream_target)
                 hw_settle_tol = 1.0   # degrees — arm close enough to last frame
-                hw_vel_tol = 5.0      # deg/s   — based on tick delta
                 hw_at_target = all(
                     abs(self._current_state.get(j, v) - v) < hw_settle_tol
                     for j, v in _current_stream_target.items()

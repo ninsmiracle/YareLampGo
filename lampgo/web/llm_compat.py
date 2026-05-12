@@ -144,6 +144,26 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
                     "result": {"preempted": True, "response": ""},
                 }, prev_rid)
 
+        # --- Cancel any pending goodbye hangup ---
+        # If the previous turn called end_conversation, _schedule_end_conversation
+        # may still be waiting for the goodbye TTS to play out. A new user
+        # utterance means the user wants to keep talking, so abort the planned
+        # hangup before it disconnects us mid-conversation.
+        hangup_task: asyncio.Task | None = getattr(server, "_pending_hangup_task", None)
+        if hangup_task is not None and not hangup_task.done():
+            hangup_rid: str = getattr(server, "_pending_hangup_request_id", "")
+            logger.info(
+                "llm_compat.cancelling_pending_hangup",
+                chat_id=chat_id,
+                hangup_request_id=hangup_rid,
+                user_text=user_text[:40],
+            )
+            hangup_task.cancel()
+            try:
+                await asyncio.wait_for(hangup_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+
         wake_loop = getattr(server, "_wake_loop", None)
         bridge = getattr(wake_loop, "bridge", None)
         history = _extract_history(messages)

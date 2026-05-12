@@ -270,10 +270,25 @@ class LiveKitBridge:
         start = time.monotonic()
         deadline = start + max_wait_s
         first_frame_deadline = start + first_frame_timeout_s
+        # IMPORTANT: capture `_last_remote_audio_frame_time` at entry as a
+        # baseline. Without this, a recent frame from the *previous* turn
+        # (e.g. the assistant's earlier reply that finished moments ago) makes
+        # `recently_received` true and we'd immediately decide the (not-yet-
+        # started) goodbye TTS already finished, causing a premature hangup
+        # that clips the farewell mid-sentence.
+        baseline_last_frame_ts = self._last_remote_audio_frame_time
+
+        def fresh_frame_ts() -> float | None:
+            ts = self._last_remote_audio_frame_time
+            if ts is None:
+                return None
+            if baseline_last_frame_ts is not None and ts <= baseline_last_frame_ts:
+                return None
+            return ts
 
         while time.monotonic() < deadline:
             now = time.monotonic()
-            last_frame = self._last_remote_audio_frame_time
+            last_frame = fresh_frame_ts()
             playback_idle = True
             buffered_s = 0.0
             if self._playback is not None:
