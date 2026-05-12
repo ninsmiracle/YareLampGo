@@ -28,7 +28,7 @@ _MOTION_SKILLS = {
 _LED_SKILLS = {
     "set_expression",
     "presence_react",
-    "play_recording", "teleop_mouse", "teleop_gamepad",
+    "teleop_mouse", "teleop_gamepad",
 }
 
 

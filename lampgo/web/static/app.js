@@ -36,6 +36,9 @@
   const chipMicDot = document.getElementById("chip-mic-dot");
   const chipLed = document.getElementById("chip-led");
   const chipLedDot = document.getElementById("chip-led-dot");
+  const esp32VolumeControl = document.getElementById("esp32-volume-control");
+  const esp32VolumeSlider = document.getElementById("esp32-volume-slider");
+  const esp32VolumeValue = document.getElementById("esp32-volume-value");
   const btnRefreshOpenclaw = document.getElementById("btn-refresh-openclaw");
   const btnOpenclawHealth = document.getElementById("btn-openclaw-health-details");
   const openclawHealthCard = document.getElementById("openclaw-health-card");
@@ -222,6 +225,7 @@
   const ACTIVE_SESSION_KEY = "lampgo.activeSession";
   const OPENCLAW_TASK_SESSION_KEY = "lampgo.openclawTaskSessions";
   const OPENCLAW_FOLLOWUP_KEY = "lampgo.openclawFollowups";
+  const ESP32_VOLUME_KEY = "lampgo.esp32SpeakerVolume";
   const MAX_SESSIONS = 40;
   const DEFAULT_SIDEBAR_WIDTH = 232;
   const MIN_SIDEBAR_WIDTH = 200;
@@ -234,6 +238,80 @@
     expressive: "表现力",
   });
   let sidebarResizeState = null;
+  let esp32VolumeTimer = null;
+  let esp32VolumePending = false;
+  let esp32VolumeInitialSyncDone = false;
+
+  function clampEsp32Volume(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 70;
+    return Math.max(0, Math.min(100, Math.round(n)));
+  }
+
+  function setEsp32VolumeUi(value, { persist = false } = {}) {
+    const pct = clampEsp32Volume(value);
+    if (esp32VolumeSlider) esp32VolumeSlider.value = String(pct);
+    if (esp32VolumeValue) esp32VolumeValue.textContent = `${pct}%`;
+    if (persist) {
+      try { localStorage.setItem(ESP32_VOLUME_KEY, String(pct)); } catch (_) { /* ignore */ }
+    }
+    return pct;
+  }
+
+  async function syncEsp32Volume(value) {
+    const pct = clampEsp32Volume(value);
+    if (esp32VolumeControl) {
+      esp32VolumeControl.classList.add("is-syncing");
+      esp32VolumeControl.classList.remove("is-error");
+    }
+    try {
+      const resp = await fetch("/api/device/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ speaker_volume: pct / 100 }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok || body.ok === false) {
+        throw new Error(body.error || `HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      console.warn("[esp32] speaker volume sync failed:", err);
+      if (esp32VolumeControl) esp32VolumeControl.classList.add("is-error");
+    } finally {
+      if (esp32VolumeControl) esp32VolumeControl.classList.remove("is-syncing");
+      esp32VolumePending = false;
+    }
+  }
+
+  function scheduleEsp32VolumeSync(value) {
+    const pct = setEsp32VolumeUi(value, { persist: true });
+    esp32VolumePending = true;
+    if (esp32VolumeTimer) clearTimeout(esp32VolumeTimer);
+    esp32VolumeTimer = setTimeout(() => {
+      syncEsp32Volume(pct);
+    }, 150);
+  }
+
+  function initEsp32VolumeControl() {
+    if (!esp32VolumeSlider) return;
+    let initial = 70;
+    try {
+      const stored = localStorage.getItem(ESP32_VOLUME_KEY);
+      if (stored != null) initial = clampEsp32Volume(stored);
+    } catch (_) { /* ignore */ }
+    setEsp32VolumeUi(initial);
+    esp32VolumeSlider.addEventListener("input", () => {
+      scheduleEsp32VolumeSync(esp32VolumeSlider.value);
+    });
+  }
+
+  function maybeSyncInitialEsp32Volume() {
+    if (esp32VolumeInitialSyncDone || !esp32VolumeSlider) return;
+    const esp = cameraCache && cameraCache.esp32 ? cameraCache.esp32 : null;
+    if (!esp || esp.enabled === false || esp.online === false) return;
+    esp32VolumeInitialSyncDone = true;
+    syncEsp32Volume(esp32VolumeSlider.value);
+  }
 
   function clampSidebarWidth(width) {
     return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, Math.round(width)));
@@ -2070,6 +2148,7 @@
           name: c.name || "",
         }));
         repopulateCameraPortSelect();
+        maybeSyncInitialEsp32Volume();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
       }
       return;
@@ -2082,6 +2161,7 @@
         // Mirror the chip's runtime switch into the settings dropdown.
         const displayPort = msg.result.active === "esp32" ? "" : (msg.result.active || "");
         repopulateCameraPortSelect(displayPort);
+        maybeSyncInitialEsp32Volume();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
       }
@@ -2237,6 +2317,9 @@
     }
 
     if (evt === "VoiceUserText" && data.user_text && data.request_id) {
+      // A new user utterance arrived — if we were already counting down to a
+      // goodbye-induced hangup, abort it so the conversation can continue.
+      if (hangupPending) hangupCancelled = true;
       addCallUserBubble(data.user_text);
       addCallAssistantBubble(data.request_id, data.user_text, callPreemptedAwaitingResponse);
       callPreemptedAwaitingResponse = false;
@@ -3552,12 +3635,14 @@
       btnStop.classList.add("hidden");
     }
 
-    if (log) finalizeActivity(log);
-    clearAssistantLoadingDots(bubble);
-
     const isPreempted = !!(result.preempted);
+    const isUserCancelled = result.stop_reason === "user_cancelled";
+    const isCancelled = isPreempted || isUserCancelled;
     const isCallBubble = bubble.dataset.callView === "true";
     if (isPreempted && isCallBubble) callPreemptedAwaitingResponse = true;
+
+    if (log) finalizeActivity(log, { cancelled: isCancelled });
+    clearAssistantLoadingDots(bubble);
 
     if (text) {
       appendTextToBubble(bubble, text);
@@ -3589,10 +3674,15 @@
           Object.keys(meta).length ? meta : undefined,
         );
       }
-      // Server owns the delayed hangup so the final TTS playout is not cut.
-      // The end_conversation flag is still stored in message metadata for UI/history.
-      if (result.end_conversation && lkRoom) {
-        window.setTimeout(() => stopBrowserLiveKitCall(), 2500);
+      // Hang up only after the goodbye TTS has actually played out (or after a
+      // generous fallback timeout). 2.5s used to be hard-coded which cut the
+      // farewell mid-sentence; instead watch the remote track's energy.
+      if (result.end_conversation && lkRoom && !hangupPending) {
+        hangupPending = true;
+        hangupCancelled = false;
+        scheduleHangupAfterTtsPlayout().finally(() => {
+          hangupPending = false;
+        });
       }
     } else {
       flushPendingSnapshot(msg.request_id);
@@ -4046,16 +4136,31 @@
     scrollChat();
   }
 
-  function finalizeActivity(log) {
+  function finalizeActivity(log, opts) {
     if (!log || log.dataset.finalized === "1") return;
     log.dataset.finalized = "1";
-    // 兜底：把 .route-trail 里残留的 is-active 节点降级成 is-done。
+    const cancelled = !!(opts && opts.cancelled);
+    // 兜底：把 .route-trail 里残留的 is-active 节点降级。
     // 正常链路里 IntentResolved 会调 setRouteTrail(buildResolvedTrail(...)) 完成降级，
     // 但某些分支（错误退出 / OpenClaw handoff 中断 / IntentResolved 丢失）拿不到这个事件，
     // 结果 .route-node.is-active 的 route-pulse 动画会在对话结束后继续闪。
+    // 如果对话是被抢占或用户手动停止的，节点降级为 is-cancelled（灰色 ✕，表示未完成）；
+    // 否则视为已成功收尾，降级为 is-done（绿色 ✓）。
     log.querySelectorAll(".route-node.is-active").forEach((el) => {
       el.classList.remove("is-active");
-      el.classList.add("is-done");
+      el.classList.add(cancelled ? "is-cancelled" : "is-done");
+    });
+    // Drop placeholder turn cards that never produced any tool/thinking content.
+    // The agent loop opens a new turn via `IntentProgress(llm_request)` before
+    // calling the model; if that turn gets preempted by a new user utterance
+    // (CancelledError on the in-flight chat/completions request) the card
+    // stays empty. Removing them keeps the activity log honest about what
+    // actually ran.
+    log.querySelectorAll(".turn-card").forEach((card) => {
+      const body = card.querySelector(".turn-body");
+      const hasBody = body && body.children.length > 0;
+      const hasTools = (card.dataset.tools || "").trim().length > 0;
+      if (!hasBody && !hasTools) card.remove();
     });
     const turnCount = log.querySelectorAll(".turn-card").length;
     const chips = log.querySelectorAll(".tool-chip");
@@ -4168,6 +4273,13 @@
   let esp32WorkletNode = null;
   let esp32MediaStream = null;
   let esp32RelayActive = false;
+  let esp32SpeakerWs = null;
+  let esp32SpeakerCtx = null;
+  let esp32SpeakerSource = null;
+  let esp32SpeakerProcessor = null;
+  let remoteAudioTrack = null;
+  let hangupPending = false;
+  let hangupCancelled = false;
 
   const ESP32_WORKLET_CODE = `
 class Esp32PcmProcessor extends AudioWorkletProcessor {
@@ -4209,6 +4321,123 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       lkModulePromise = import("https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.esm.mjs");
     }
     return lkModulePromise;
+  }
+
+  function getEsp32WsUrl(path, portOffset) {
+    const esp = cameraCache && cameraCache.esp32 ? cameraCache.esp32 : null;
+    let host = (esp && (esp.ip || esp.host)) || "";
+    host = String(host).replace(/^https?:\/\//, "").replace(/^wss?:\/\//, "").replace(/\/.*$/, "");
+    if (!host) throw new Error("ESP32 设备未发现或离线");
+    const port = Number((esp && esp.port) || 80) + (portOffset || 0);
+    const needsPort = !/:\d+$/.test(host);
+    return `ws://${host}${needsPort ? `:${port}` : ""}${path}`;
+  }
+
+  function floatToPcm16(samples) {
+    const out = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      out[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+    return out;
+  }
+
+  function downsampleFloat32(input, inputRate, outputRate) {
+    if (inputRate === outputRate) return input;
+    const ratio = inputRate / outputRate;
+    const outLen = Math.max(1, Math.floor(input.length / ratio));
+    const out = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const start = Math.floor(i * ratio);
+      const end = Math.min(input.length, Math.floor((i + 1) * ratio));
+      let sum = 0;
+      let count = 0;
+      for (let j = start; j < end; j++) {
+        sum += input[j];
+        count += 1;
+      }
+      out[i] = count ? sum / count : 0;
+    }
+    return out;
+  }
+
+  function sendEsp32SpeakerSamples(samples, inputRate) {
+    if (!esp32SpeakerWs || esp32SpeakerWs.readyState !== WebSocket.OPEN) return;
+    const pcm16 = floatToPcm16(downsampleFloat32(samples, inputRate, 16000));
+    esp32SpeakerWs.send(pcm16.buffer);
+  }
+
+  async function startEsp32SpeakerRelay(remoteTrack) {
+    cleanupEsp32SpeakerRelay();
+    const mediaTrack = remoteTrack && (remoteTrack.mediaStreamTrack || remoteTrack._mediaStreamTrack);
+    if (!mediaTrack) {
+      console.warn("[call] ESP32 speaker relay skipped: no MediaStreamTrack on remote track");
+      return false;
+    }
+
+    esp32SpeakerWs = new WebSocket(getEsp32WsUrl("/ws/speaker", 1));
+    esp32SpeakerWs.binaryType = "arraybuffer";
+    try {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("ESP32 speaker WS 连接超时")), 5000);
+        esp32SpeakerWs.onopen = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+        esp32SpeakerWs.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error("ESP32 speaker WS 连接失败"));
+        };
+      });
+    } catch (err) {
+      cleanupEsp32SpeakerRelay();
+      throw err;
+    }
+
+    esp32SpeakerCtx = new AudioContext({ sampleRate: 48000 });
+    if (esp32SpeakerCtx.state === "suspended") {
+      try { await esp32SpeakerCtx.resume(); } catch (_) { /* ignore */ }
+    }
+    const stream = new MediaStream([mediaTrack]);
+    esp32SpeakerSource = esp32SpeakerCtx.createMediaStreamSource(stream);
+    esp32SpeakerProcessor = esp32SpeakerCtx.createScriptProcessor(2048, 1, 1);
+    esp32SpeakerProcessor.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      sendEsp32SpeakerSamples(input, esp32SpeakerCtx.sampleRate);
+    };
+    esp32SpeakerSource.connect(esp32SpeakerProcessor);
+    // Keep the processor alive without audible local playback.
+    const silentGain = esp32SpeakerCtx.createGain();
+    silentGain.gain.value = 0;
+    esp32SpeakerProcessor.connect(silentGain);
+    silentGain.connect(esp32SpeakerCtx.destination);
+    esp32SpeakerProcessor._silentGain = silentGain;
+    console.log("[call] ESP32 speaker relay started");
+    return true;
+  }
+
+  function cleanupEsp32SpeakerRelay() {
+    if (esp32SpeakerProcessor) {
+      try { esp32SpeakerProcessor.disconnect(); } catch (_) { /* ignore */ }
+      const silentGain = esp32SpeakerProcessor._silentGain;
+      if (silentGain) {
+        try { silentGain.disconnect(); } catch (_) { /* ignore */ }
+      }
+      esp32SpeakerProcessor.onaudioprocess = null;
+      esp32SpeakerProcessor = null;
+    }
+    if (esp32SpeakerSource) {
+      try { esp32SpeakerSource.disconnect(); } catch (_) { /* ignore */ }
+      esp32SpeakerSource = null;
+    }
+    if (esp32SpeakerCtx) {
+      try { esp32SpeakerCtx.close(); } catch (_) { /* ignore */ }
+      esp32SpeakerCtx = null;
+    }
+    if (esp32SpeakerWs) {
+      try { esp32SpeakerWs.close(); } catch (_) { /* ignore */ }
+      esp32SpeakerWs = null;
+    }
   }
 
   function feedEsp32Audio(pcmBytes) {
@@ -4278,6 +4507,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       const room = new Room({ adaptiveStream: false, dynacast: false });
       room.on("trackSubscribed", (track) => {
         if (track.kind !== Track.Kind.Audio) return;
+        remoteAudioTrack = track;
+        if (useEsp32) {
+          startEsp32SpeakerRelay(track).catch((err) => {
+            console.error("[call] ESP32 speaker relay failed:", err);
+            addCallSystemNote(`ESP32 扬声器连接失败：${err.message || err}`);
+          });
+          return;
+        }
         const el = track.attach();
         el.autoplay = true;
         el.playsInline = true;
@@ -4286,6 +4523,11 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         lkAudioEls.add(el);
       });
       room.on("trackUnsubscribed", (track) => {
+        if (remoteAudioTrack === track) remoteAudioTrack = null;
+        if (useEsp32) {
+          cleanupEsp32SpeakerRelay();
+          return;
+        }
         track.detach().forEach((el) => {
           lkAudioEls.delete(el);
           el.remove();
@@ -4323,12 +4565,100 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     }
   }
 
+  async function scheduleHangupAfterTtsPlayout() {
+    // Wait until the remote (Agent) audio track has been observed playing and
+    // then stays silent for ~1.5s, with a hard cap of 20s. Falls back to a
+    // simple delay if no track is available.
+    const MAX_WAIT_MS = 20000;
+    const IDLE_MS = 1500;
+    const SAMPLE_MS = 80;
+    const ENERGY_THRESHOLD = 0.012;
+    const FIRST_FRAME_TIMEOUT_MS = 4000;
+
+    const startTs = Date.now();
+    const track = remoteAudioTrack;
+    const mediaStreamTrack = track && (track.mediaStreamTrack || track._mediaStreamTrack);
+    if (!mediaStreamTrack) {
+      await new Promise((resolve) => window.setTimeout(resolve, 7000));
+      stopBrowserLiveKitCall();
+      return;
+    }
+
+    let ctx = null;
+    let analyser = null;
+    let source = null;
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try { source && source.disconnect(); } catch (_) { /* ignore */ }
+      try { analyser && analyser.disconnect(); } catch (_) { /* ignore */ }
+      try { ctx && ctx.close(); } catch (_) { /* ignore */ }
+    };
+
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (ctx.state === "suspended") {
+        try { await ctx.resume(); } catch (_) { /* ignore */ }
+      }
+      const stream = new MediaStream([mediaStreamTrack]);
+      source = ctx.createMediaStreamSource(stream);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+
+      let sawEnergy = false;
+      let lastEnergyTs = 0;
+
+      while (true) {
+        const elapsed = Date.now() - startTs;
+        if (elapsed >= MAX_WAIT_MS) break;
+        if (!lkRoom) return;
+        // The user kept talking after saying goodbye — abandon the hangup
+        // and let the conversation continue normally.
+        if (hangupCancelled) {
+          console.log("[call] pending hangup cancelled by new user utterance");
+          return;
+        }
+
+        analyser.getFloatTimeDomainData(buf);
+        let sumSq = 0;
+        for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
+        const rms = Math.sqrt(sumSq / buf.length);
+
+        if (rms > ENERGY_THRESHOLD) {
+          sawEnergy = true;
+          lastEnergyTs = Date.now();
+        } else if (sawEnergy && Date.now() - lastEnergyTs >= IDLE_MS) {
+          break;
+        } else if (!sawEnergy && elapsed >= FIRST_FRAME_TIMEOUT_MS) {
+          // TTS never arrived — give a short grace then hang up.
+          await new Promise((resolve) => window.setTimeout(resolve, 600));
+          break;
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, SAMPLE_MS));
+      }
+    } catch (err) {
+      console.warn("[call] tts playout watcher failed, hanging up after fallback delay:", err);
+      await new Promise((resolve) => window.setTimeout(resolve, 6000));
+    } finally {
+      cleanup();
+    }
+
+    if (lkRoom) stopBrowserLiveKitCall();
+  }
+
   function cleanupBrowserLiveKitCall() {
     if (lkLocalTrack) {
       try { lkLocalTrack.stop(); } catch (_) { /* ignore */ }
       lkLocalTrack = null;
     }
+    remoteAudioTrack = null;
+    hangupPending = false;
     cleanupEsp32AudioTrack();
+    cleanupEsp32SpeakerRelay();
     lkAudioEls.forEach((el) => el.remove());
     lkAudioEls.clear();
     lkRoom = null;
@@ -4462,6 +4792,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   function addCallUserBubble(text) {
     if (!callMessages) return;
     if (callEmptyState) callEmptyState.style.display = "none";
+    // A new utterance arrived (either typed in chat or via wake-word). Clear
+    // stale system notes (e.g. an earlier failed-call error) so they don't
+    // mislead the user into thinking this conversation is broken.
+    callMessages.querySelectorAll(".system-note").forEach((el) => el.remove());
     const row = document.createElement("div");
     row.className = "flex justify-end mb-4";
     row.innerHTML = `<div class="msg-bubble-wrap"><div class="msg-user">${esc(text)}</div><span class="msg-time">${formatTime()}</span></div>`;
@@ -5273,6 +5607,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   let ttsAudioContext = null;
   let ttsCurrentSource = null;
   let ttsCurrentAudioEl = null;
+  let ttsCurrentEsp32Ws = null;
+  let ttsStopped = false;
+  const ESP32_TTS_SAMPLE_RATE = 16000;
+  const ESP32_TTS_FRAME_SAMPLES = 320; // 20 ms @ 16 kHz, safely under ESP32 frame limit.
 
   async function unlockTtsPlayback() {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -5294,6 +5632,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", pcm16: "audio/wav", opus: "audio/ogg" };
     const mime = mimeMap[format] || "audio/mpeg";
     const bytes = Uint8Array.from(atob(audioB64), (c) => c.charCodeAt(0));
+    ttsStopped = false;
     ttsQueue.push({ bytes, mime, format });
     if (!ttsPlaying) void playNextTts();
   }
@@ -5322,8 +5661,93 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     }
   }
 
+  function sleepMs(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function openEsp32TtsSpeakerWs() {
+    const esp = cameraCache && cameraCache.esp32 ? cameraCache.esp32 : null;
+    if (esp && esp.online === false) throw new Error("ESP32 设备离线");
+    const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const speakerWs = new WebSocket(`${scheme}//${window.location.host}/api/device/speaker`);
+    speakerWs.binaryType = "arraybuffer";
+    await new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        try { speakerWs.close(); } catch (_) { /* ignore */ }
+        reject(new Error("ESP32 speaker WS 连接超时"));
+      }, 1500);
+      speakerWs.onopen = () => {
+        window.clearTimeout(timeout);
+        resolve();
+      };
+      speakerWs.onerror = () => {
+        window.clearTimeout(timeout);
+        try { speakerWs.close(); } catch (_) { /* ignore */ }
+        reject(new Error("ESP32 speaker WS 连接失败"));
+      };
+    });
+    ttsCurrentEsp32Ws = speakerWs;
+    return speakerWs;
+  }
+
+  function mixAudioBufferToMono(audioBuffer) {
+    const channelCount = Math.max(1, audioBuffer.numberOfChannels || 1);
+    const mono = new Float32Array(audioBuffer.length);
+    for (let ch = 0; ch < channelCount; ch++) {
+      const data = audioBuffer.getChannelData(ch);
+      for (let i = 0; i < mono.length; i++) {
+        mono[i] += data[i] / channelCount;
+      }
+    }
+    return mono;
+  }
+
+  async function decodeTtsChunkToEsp32Pcm(chunk) {
+    const ctx = await unlockTtsPlayback();
+    if (!ctx) throw new Error("浏览器不支持 AudioContext 解码");
+    const blob = new Blob([chunk.bytes], { type: chunk.mime });
+    const buffer = await blob.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(buffer.slice(0));
+    const mono = mixAudioBufferToMono(audioBuffer);
+    const pcm16 = floatToPcm16(downsampleFloat32(mono, audioBuffer.sampleRate, ESP32_TTS_SAMPLE_RATE));
+    return pcm16;
+  }
+
+  async function streamPcm16ToEsp32Speaker(pcm16) {
+    const speakerWs = await openEsp32TtsSpeakerWs();
+    try {
+      for (let offset = 0; offset < pcm16.length && !ttsStopped; offset += ESP32_TTS_FRAME_SAMPLES) {
+        if (speakerWs.readyState !== WebSocket.OPEN) {
+          throw new Error("ESP32 speaker WS 已断开");
+        }
+        const frame = pcm16.subarray(offset, Math.min(offset + ESP32_TTS_FRAME_SAMPLES, pcm16.length));
+        speakerWs.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
+        await sleepMs((frame.length / ESP32_TTS_SAMPLE_RATE) * 1000);
+      }
+      return !ttsStopped;
+    } finally {
+      if (ttsCurrentEsp32Ws === speakerWs) ttsCurrentEsp32Ws = null;
+      try { speakerWs.close(); } catch (_) { /* ignore */ }
+    }
+  }
+
+  async function playTtsChunkViaEsp32(chunk) {
+    const pcm16 = await decodeTtsChunkToEsp32Pcm(chunk);
+    if (ttsStopped) return true;
+    const ok = await streamPcm16ToEsp32Speaker(pcm16);
+    if (ok) console.log("[tts] played through ESP32 speaker");
+    return ok;
+  }
+
   async function playTtsChunk(chunk) {
     const blob = new Blob([chunk.bytes], { type: chunk.mime });
+    try {
+      if (await playTtsChunkViaEsp32(chunk)) return;
+    } catch (err) {
+      if (!ttsStopped) console.warn("[tts] ESP32 speaker playback failed, fallback to browser:", err);
+    }
+    if (ttsStopped) return;
+
     const ctx = await unlockTtsPlayback();
     if (ctx) {
       try {
@@ -5352,7 +5776,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     if (ttsPlaying) return;
     ttsPlaying = true;
     try {
-      while (ttsQueue.length) {
+      while (ttsQueue.length && !ttsStopped) {
         const chunk = ttsQueue.shift();
         try {
           await playTtsChunk(chunk);
@@ -5366,6 +5790,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   }
 
   function stopAllTts() {
+    ttsStopped = true;
     ttsQueue.length = 0;
     if (ttsCurrentSource) {
       try { ttsCurrentSource.stop(); } catch (_) {}
@@ -5377,6 +5802,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         ttsCurrentAudioEl.src = "";
       } catch (_) {}
       ttsCurrentAudioEl = null;
+    }
+    if (ttsCurrentEsp32Ws) {
+      try { ttsCurrentEsp32Ws.close(); } catch (_) {}
+      ttsCurrentEsp32Ws = null;
     }
     ttsPlaying = false;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -6842,5 +7271,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   backfillEventsFromServer();
   ensureIdleTimer();
   updateRecordButtonState();
+  initEsp32VolumeControl();
   connect();
 })();

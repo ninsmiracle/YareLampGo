@@ -789,6 +789,45 @@ button.device-chip.is-active {
   box-shadow: 0 0 0 3px rgba(229, 181, 103, 0.18);
 }
 
+.volume-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.volume-control.is-syncing {
+  border-color: rgba(229, 181, 103, 0.55);
+}
+
+.volume-control.is-error {
+  border-color: rgba(217, 145, 141, 0.75);
+  background: rgba(217, 145, 141, 0.08);
+}
+
+.volume-label,
+.volume-value {
+  color: var(--text-soft);
+}
+
+.volume-value {
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.volume-slider {
+  width: 92px;
+  accent-color: var(--accent, #be7c72);
+}
+
 .joint-popover {
   position: fixed;
   z-index: 1000;
@@ -1737,6 +1776,31 @@ button.device-chip.is-active {
   font-weight: 500;
   opacity: 0.7;
   line-height: 1;
+}
+
+/* "已中止" — the route reached this node but was preempted / user-cancelled
+   before it could complete. Visually muted (gray, no pulse) to distinguish
+   from the success state (is-done, green ✓). */
+.route-node.is-cancelled {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-faint);
+  border-color: var(--border);
+  opacity: 0.75;
+  text-decoration: line-through;
+  text-decoration-color: rgba(0, 0, 0, 0.25);
+}
+
+.route-node.is-cancelled::before {
+  content: "✕";
+  width: auto;
+  height: auto;
+  background: transparent;
+  border-radius: 0;
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.6;
+  line-height: 1;
+  text-decoration: none;
 }
 
 .route-node.is-pending {

@@ -16,7 +16,9 @@
 - **仿生风格化动作** — 内置 `gentle` / `confident` / `curious` 等风格，支持任意动作的录制、回放与热加载。
 - **LED 表情系统** — ESP32 驱动，30+ 预设表情，可编程控制。
 - **多模态感知** — 摄像头抓帧、语音闭环（STT / TTS / VAD）、OpenAI 兼容的 LLM 接入。
-- **开箱即用的 Web UI** — 聊天、录制、设置、表情面板集成在单一页面（默认 `http://127.0.0.1:8420`）。
+- **唤醒词 + 实时语音对话** — `openwakeword`（hey_jarvis 等）+ LiveKit Agent SDK 实现 "唤醒 → ASR → LLM → TTS" 全闭环；前端「通话」视图可手动发起浏览器实时对话。
+- **ESP32 无线感知** — XIAO ESP32S3 Sense 通过 mDNS 自动发现，作为无线摄像头 + PDM 麦克风 + I2S 扬声器（MAX98357A），支持硬件 AEC 与音量调节。
+- **开箱即用的 Web UI** — 聊天、通话、录制、设置、表情面板集成在单一页面（默认 `http://127.0.0.1:8420`）。
 - **OpenClaw 生态集成** — 作为 OpenClaw 的配件运行，AI Agent 可直接驱动台灯动作、LED、摄像头与记忆。
 - **无硬件降级模式** — 缺少串口或设备时自动降级到 `--no-hw`，便于开发与调试。
 
@@ -115,9 +117,10 @@ uv run lampgo run                       # 纯后台守护进程
 
 打开 <http://127.0.0.1:8420>：
 
-- **状态胶囊** — 顶部展示摄像头、麦克风、电机状态，点击可切换设备。
+- **状态胶囊** — 顶部展示摄像头、麦克风、电机状态，点击可切换设备；当 ESP32 接入扬声器时还会显示音量滑杆。
 - **Settings Tab** — 调整模型、硬件端口、语音、运动与安全参数。修改硬件字段后需冷重启。
-- **聊天与技能面板** — 语音或文字对话、触发技能、管理录制。
+- **聊天面板** — 文字对话、触发技能、管理录制；历史会话自动保存于 `~/.lampgo/sessions.json`。
+- **通话面板** — 侧边栏「通话」按钮进入实时语音对话视图，实时显示 ASR 文本、工具调用与助手回复，被打断的回复会展示「已中止」标签，结束后自动归档为会话历史。
 
 ---
 
@@ -182,6 +185,99 @@ CLI 参数  >  ~/.lampgo/config.toml  >  内置默认值
 
 - 绝大多数场景下只需通过 `lampgo onboard` 与 Web UI 修改配置，无需手工编辑文件。
 - 敏感信息（LLM / 插件 token）单独存储于 `~/.lampgo/credentials.json`（权限 `0600`）。
+
+---
+
+## Voice & Realtime Conversation
+
+`lampgo` 内置完整的语音闭环，由两条链路协同工作：
+
+| 链路 | 触发方式 | 组件 |
+| --- | --- | --- |
+| **唤醒词链路** | 持续监听麦克风，命中关键词（默认 `hey_jarvis`）后激活 | `openwakeword` + Lampgo LiveKit Agent SDK + LiveKit Server |
+| **浏览器通话** | Web UI 侧边栏「通话」按钮手动发起 | LiveKit JS Client + Agent SDK |
+
+两条链路都将音频经由 LiveKit Server 投递给 Agent SDK；Agent SDK 完成 ASR/TTS，并把 LLM 推理委托回 `lampgo` 暴露的 OpenAI 兼容接口 `/v1/chat/completions`。
+
+### 必要配置
+
+在 `~/.lampgo/config.toml` 的 `[voice]` 中设置：
+
+```toml
+[voice]
+wake_word            = "hey_jarvis"               # 留空 = 禁用唤醒词
+livekit_url          = "ws://192.168.31.116:7880" # LiveKit Server
+livekit_api_key      = "..."
+livekit_api_secret   = "..."
+volcengine_app_id    = "..."
+volcengine_access_token = "..."
+livekit_tts_voice    = "BV700_streaming"
+chat_model           = "mimo-v2-pro"
+silence_timeout_s    = 60
+```
+
+可选依赖一并装好（`uv sync --extra voice` 或在 `pyproject.toml` 已声明的 optional `voice` 组中自动随 `lampgo-livekit-agent-sdk` 一起安装）。
+
+### 行为要点
+
+- **请求抢占** — 后端在新的用户语句到来时取消上一次未完成的 LLM 推理，避免堆积长尾。
+- **流式 `say` 工具** — 助手对白逐句通过 SSE 推送到 TTS，不需要等整轮工具执行完毕。
+- **硬件优雅降级** — 当 `motion`/`led` 等硬件未连接时，相关技能直接返回 `{"note": "hardware not connected, skipped"}`，LLM 不会陷入重试循环。
+- **配置热重载** — Web UI 修改语音相关字段后 1 秒内自动重启 `WakeLoop` 和 Agent SDK 子进程，无需重启守护进程。
+
+---
+
+## ESP32 Wireless Camera / Mic / Speaker
+
+[`ESP32_CAMERA/`](../ESP32_CAMERA) 目录是配套的 XIAO ESP32S3 Sense 固件，可作为 lampgo 的无线感知前端：
+
+| 通道 | URI | 协议 | 用途 |
+| --- | --- | --- | --- |
+| 摄像头 | `http://<host>/snapshot.jpg` / `/stream` | HTTP MJPEG | LLM 视觉输入 |
+| 麦克风 | `ws://<host>/ws/audio` | WS Binary, 16 kHz PCM16LE | 唤醒词与通话麦克风源（ESP-SR AFE AEC 处理后输出） |
+| 扬声器 | `ws://<host>/ws/speaker` | WS Binary, 16 kHz PCM16LE | 浏览器将 TTS 输出回灌到 ESP32 + MAX98357A 播放，并同步作为 AEC 参考信号 |
+| 设备 API | `http://<host>/device/status`, `/device/config` | HTTP JSON | 查询 / 设置音量、相机参数等 |
+
+### 硬件接线（XIAO ESP32S3 Sense + MAX98357A）
+
+| 信号 | ESP32 GPIO | XIAO 标注 | MAX98357A |
+| --- | :---: | :---: | --- |
+| BCLK | 1 | D0 | BCLK |
+| LRCLK | 2 | D1 | LRC |
+| DIN | 4 | D3 | DIN |
+| VIN | 5V | 5V | VIN |
+| GND | GND | GND | GND |
+| 增益 | — | — | GAIN 悬空 = 9 dB（或拉到 VIN 取最低 3 dB） |
+| 使能 | — | — | **SD 建议短接至 VIN**，避免悬空抖动导致底噪 |
+
+板载 PDM 麦克风固定在 GPIO 41 (DATA) / 42 (CLK)，无需接线。
+
+### 编译与刷写
+
+XIAO ESP32S3 Sense 的 PSRAM 默认关闭，必须显式启用：
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3:PSRAM=opi /path/to/ESP32_CAMERA
+arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32S3:PSRAM=opi -p /dev/cu.usbmodem21401 /path/to/ESP32_CAMERA
+arduino-cli monitor --fqbn esp32:esp32:XIAO_ESP32S3 --config baudrate=115200 -p /dev/cu.usbmodem21401
+```
+
+首次上电进入 SoftAP 配网模式（SSID 形如 `Lampgo-Setup-XXXX`），连接后浏览器打开 `http://192.168.4.1` 输入 WiFi 凭证；之后 `lampgo` 通过 mDNS 自动发现 `lampgo-cam-XXXX.local`。
+
+### 自动接入
+
+固件启动后 `WorkMode` 会：
+
+1. 先连接 WiFi（失败则保留 SoftAP，便于重新配网）；
+2. 初始化相机（无 PSRAM 时自动降到 QVGA 并跳过相机但保留 mic/speaker，不再 halt）；
+3. 注册 `/snapshot`、`/stream`、`/ws/audio`、`/ws/speaker`、`/device/*` 等 HTTP/WS 端点；
+4. 通过 mDNS 广播。
+
+在 `[device_esp32]` 配置中 `enabled=true` 后，lampgo 优先使用 ESP32 摄像头/麦克风，运行时断连不会自动回退本地设备（避免对话中途切换），仅在冷启动时回退。
+
+### 顶栏音量滑杆
+
+当 ESP32 设备在线时，Web UI 顶栏会出现「ESP32 扬声器音量」滑杆，调整后通过 `POST /device/config { speaker_volume: 0..1 }` 实时下发到 ESP32，固件在写入 I2S 之前做 PCM 缩放。
 
 ---
 
