@@ -25,7 +25,7 @@ LampgoServer
   |-- LEDController -> ESP32 LED 表情
   |-- CameraCapture -> ESP32 / 本地摄像头
   |-- WakeLoop / STT / TTS -> ESP32 / 本地麦克风和扬声器
-  |-- Touch feedback（开发中）-> 台灯头部触摸电容 -> 控制芯片 -> PC
+  |-- Touch feedback -> 台灯头部触摸电容 -> 控制芯片 -> PC
 ```
 
 核心原则：上层只能调用技能或接口，不能直接绕过 `MotionRuntime` / `SafetyKernel` 写电机。
@@ -105,7 +105,7 @@ LLM 工具列表由当前 `SkillRegistry` 生成。用户在 Web UI 或 OpenClaw
 | ESP32 设备 | `lampgo/device/esp32.py` | mDNS 发现、健康检查、HTTP 代理、摄像头抓帧。 |
 | ESP32 音频 | `lampgo/device/audio_stream.py` | 通过 WebSocket 接收 ESP32 PCM 音频。 |
 | 摄像头 | `lampgo/perception/camera.py` | 优先 ESP32 摄像头，也支持本地 OpenCV 摄像头。 |
-| 触摸反馈 | 开发中 | 台灯头部触摸电容经控制芯片上报 PC，未来可进入事件总线并触发技能。 |
+| 触摸反馈 | 台灯头部触摸电容经控制芯片上报 PC，未来可进入事件总线并触发技能。 |
 
 ## 数据与配置
 
