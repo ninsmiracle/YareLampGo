@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 
 import httpx as httpx_module
@@ -127,6 +128,9 @@ class WebGateway:
         self._status_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
+        self._livekit_token_lock = asyncio.Lock()
+        self._livekit_token_gate_until = 0.0
+        self._livekit_token_gate_owner = ""
         self.app = self._build_app()
 
     def _build_app(self) -> Starlette:
@@ -529,6 +533,21 @@ class WebGateway:
         room_name = str(body.get("room_name") or self.server.config.voice.livekit_room or "lampgo")
         user_identity = str(body.get("user_identity") or f"lampgo-web-{uuid.uuid4().hex[:8]}")
         voice_agent = str(body.get("voice_agent") or "lampgo-jarvis")
+        if not body.get("client_call_id"):
+            logger.info("web.livekit_token_legacy_client_rejected", user_identity=user_identity)
+            return JSONResponse({"ok": False, "error": "please refresh the web UI before starting a call"}, status_code=409)
+        client_call_id = str(body.get("client_call_id"))
+        async with self._livekit_token_lock:
+            now = time.monotonic()
+            if now < self._livekit_token_gate_until and self._livekit_token_gate_owner != client_call_id:
+                logger.info(
+                    "web.livekit_token_deduped",
+                    owner=self._livekit_token_gate_owner,
+                    requester=client_call_id,
+                )
+                return JSONResponse({"ok": False, "error": "another call is already starting"}, status_code=409)
+            self._livekit_token_gate_until = now + 3.0
+            self._livekit_token_gate_owner = client_call_id
         try:
             async with httpx_module.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -542,6 +561,10 @@ class WebGateway:
                 resp.raise_for_status()
                 return JSONResponse({"ok": True, "result": resp.json()})
         except Exception as exc:
+            async with self._livekit_token_lock:
+                if self._livekit_token_gate_owner == client_call_id:
+                    self._livekit_token_gate_until = 0.0
+                    self._livekit_token_gate_owner = ""
             logger.exception("web.livekit_token_failed")
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
@@ -1412,12 +1435,13 @@ class WebGateway:
         cfg = self.server.config.device_esp32
         status = self.server.esp32.get_status()
         mic_streaming = False
-        if cfg.mic_enabled and hasattr(self.server, "_wake_loop") and self.server._wake_loop is not None:
+        wake_event_clients = 0
+        if cfg.mic_enabled and self.server.esp32:
             try:
-                from lampgo.device.audio_stream import Esp32AudioCapture
-
-                capture = getattr(self.server._wake_loop, "_capture", None)
-                mic_streaming = isinstance(capture, Esp32AudioCapture) and capture.is_connected
+                device_status_code, device_body, _ = await self.server.esp32.proxy_get("/device/status")
+                if device_status_code == 200 and isinstance(device_body, dict):
+                    mic_streaming = bool(device_body.get("mic_streaming") and device_body.get("wake_ready"))
+                    wake_event_clients = int(device_body.get("wake_event_clients") or 0)
             except Exception:
                 pass
         return JSONResponse(
@@ -1428,6 +1452,7 @@ class WebGateway:
                     "preferred_host": cfg.preferred_host,
                     "mic_enabled": cfg.mic_enabled,
                     "mic_streaming": mic_streaming,
+                    "wake_event_clients": wake_event_clients,
                     "configured": status["configured"],
                     "online": status["online"],
                     "session_used": status["session_used"],
