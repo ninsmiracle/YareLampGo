@@ -145,6 +145,15 @@
         </span>
       </div>
 
+      <aside id="pet-panel" class="pet-panel" aria-label="lampgo pet">
+        <div class="pet-panel-head">
+          <span class="pet-title">lampgo pet</span>
+          <span id="pet-mode" class="pet-mode">待机</span>
+        </div>
+        <canvas id="pet-canvas" class="pet-canvas"></canvas>
+        <div id="pet-fallback" class="pet-fallback hidden"></div>
+      </aside>
+
       <section class="view" data-view="chat">
         <div class="chat-card">
           <div id="chat-messages" class="chat-messages">
@@ -1295,6 +1304,7 @@
   </dialog>
 
   <script src="/app.js"></script>
+  <script type="module" src="/pet.js"></script>
   <script src="/setup.js"></script>
 </body>
 </html>

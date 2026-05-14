@@ -57,6 +57,7 @@ dev = [
 [[tool.uv.index]]
 name = "mimo"
 url = "https://packages.lampgo.invalid/pypi/simple"
+explicit = true
 
 [tool.uv.sources]
 lampgo-livekit-agent-sdk = { index = "mimo" }
