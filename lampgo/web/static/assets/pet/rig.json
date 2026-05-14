@@ -1,0 +1,45 @@
+{
+  "model": "/assets/pet/lampgo.glb",
+  "source": {
+    "primary_pack_go": "/assets/lamp_pack_Go.rar",
+    "fallback_step": "/assets/lampgo.STEP",
+    "primary_assembly": "台灯装配图 2026.4.25 .SLDASM",
+    "secondary_assembly": "台灯外观专利图档.SLDASM"
+  },
+  "joints": {
+    "base_yaw": {
+      "node": "base_yaw",
+      "axis": "y",
+      "direction": 1,
+      "offset": 0
+    },
+    "base_pitch": {
+      "node": "base_pitch",
+      "axis": "z",
+      "direction": -0.55,
+      "offset": -22
+    },
+    "elbow_pitch": {
+      "node": "elbow_pitch",
+      "axis": "z",
+      "direction": 0.55,
+      "offset": 62
+    },
+    "wrist_roll": {
+      "node": "wrist_roll",
+      "axis": "y",
+      "direction": 1,
+      "offset": 0
+    },
+    "wrist_pitch": {
+      "node": "wrist_pitch",
+      "axis": "z",
+      "direction": -0.45,
+      "offset": -34
+    }
+  },
+  "notes": [
+    "These node names match the generated fallback model. Replace them with real GLB node names after Blender/FreeCAD conversion.",
+    "Directions and axes are v1 defaults for visual believability, not a guarantee of physical kinematic equivalence."
+  ]
+}

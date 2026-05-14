@@ -125,6 +125,7 @@ class WebGateway:
         self.config = config or WebConfig()
         self.bridge = WsBridge(server.events)
         self._status_task: asyncio.Task | None = None
+        self._pet_pose_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self.app = self._build_app()
 
@@ -201,11 +202,14 @@ class WebGateway:
         async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
             app.state.lampgo_server = self.server
             self._status_task = asyncio.create_task(self._status_loop())
+            self._pet_pose_task = asyncio.create_task(self._pet_pose_loop())
             yield
-            if self._status_task:
-                self._status_task.cancel()
+            for task in (self._status_task, self._pet_pose_task):
+                if not task:
+                    continue
+                task.cancel()
                 try:
-                    await self._status_task
+                    await task
                 except asyncio.CancelledError:
                     pass
 
@@ -229,6 +233,30 @@ class WebGateway:
                 await self.bridge.broadcast_status(status.get("result", {}))
             except Exception:
                 logger.exception("web.status_loop_error")
+
+    async def _pet_pose_loop(self) -> None:
+        """Broadcast joint poses at animation-friendly cadence for the Web pet."""
+        interval = 1.0 / 15.0
+        while True:
+            await asyncio.sleep(interval)
+            if self.bridge.client_count == 0:
+                continue
+            try:
+                await self.bridge.broadcast_pet_pose(self._pet_pose_snapshot())
+            except Exception:
+                logger.exception("web.pet_pose_loop_error")
+
+    def _pet_pose_snapshot(self) -> dict[str, Any]:
+        positions = self.server.motion.current_state.positions
+        virtual = bool(getattr(self.server.motion, "is_virtual", False))
+        return {
+            "joint_positions": positions,
+            "mode": "virtual" if virtual else "hardware",
+            "no_hw": bool(self.server.config.no_hw),
+            "hal_connected": bool(self.server.hal.is_connected),
+            "running_skill": self.server.executor.current_skill_id,
+            "is_busy": self.server.executor.is_busy,
+        }
 
     # ---- OpenAI-compatible LLM endpoint ----
 
@@ -2074,6 +2102,8 @@ class WebGateway:
                 else:
                     await self._handle_ws_message(ws, msg)
         except WebSocketDisconnect:
+            pass
+        except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("web.ws_error")

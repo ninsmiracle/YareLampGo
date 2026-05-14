@@ -57,6 +57,7 @@ dev = [
 [[tool.uv.index]]
 name = "xiaomi"
 url = "https://pkgs.d.xiaomi.net/artifactory/api/pypi/pypi-virtual/simple"
+explicit = true
 
 [tool.uv.sources]
 xiaomi-livekit-agent-sdk = { index = "xiaomi" }

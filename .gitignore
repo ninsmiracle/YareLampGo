@@ -22,3 +22,10 @@ tests/
 docs/zhiqi/
 
 docs/whitepapers/
+
+#model assets
+assets/lamp_pack_Go.rar
+assets/lampgo.STEP
+assets/lampgo.glb
+docs/Appearance
+docs/Appearance/*

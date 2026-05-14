@@ -2115,6 +2115,12 @@
   function handleMessage(msg) {
     if (msg.type === "status") {
       updateStatus(msg.data);
+      window.dispatchEvent(new CustomEvent("lampgo:status", { detail: msg.data || {} }));
+      return;
+    }
+
+    if (msg.type === "pet_pose") {
+      window.dispatchEvent(new CustomEvent("lampgo:pet-pose", { detail: msg.data || {} }));
       return;
     }
 
