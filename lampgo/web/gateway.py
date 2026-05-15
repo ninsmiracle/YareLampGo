@@ -17,7 +17,7 @@ import structlog
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ASSETS_DIR = REPO_ROOT / "assets"
 
 
 def _coerce_value(current: Any, value: Any) -> Any:
@@ -194,6 +196,9 @@ class WebGateway:
             WebSocketRoute("/ws", self.ws_endpoint),
             # ---- OpenAI-compatible LLM endpoint (for LiveKit Agent SDK) ----
             Route("/v1/chat/completions", self._llm_compat_handler, methods=["POST"]),
+            # ---- pet model asset from repo-level CAD/export assets ----
+            Route("/assets/pet/lampgo.glb", self.api_pet_model, methods=["GET"]),
+            Route("/assets/pet/lampgoGLB.glb", self.api_pet_model, methods=["GET"]),
         ]
         if STATIC_DIR.is_dir():
             routes.append(Mount("/", app=StaticFiles(directory=str(STATIC_DIR), html=True)))
@@ -264,6 +269,16 @@ class WebGateway:
         from lampgo.web.llm_compat import handle_chat_completions
 
         return await handle_chat_completions(request)
+
+    async def api_pet_model(self, request: Request) -> FileResponse | JSONResponse:
+        """Serve the exported pet GLB from repo-level assets if present."""
+        asset_name = Path(request.url.path).name
+        if asset_name not in {"lampgo.glb", "lampgoGLB.glb"}:
+            return JSONResponse({"ok": False, "error": "pet model not allowed"}, status_code=404)
+        path = REPO_ASSETS_DIR / asset_name
+        if not path.exists():
+            return JSONResponse({"ok": False, "error": "pet model not found"}, status_code=404)
+        return FileResponse(path, media_type="model/gltf-binary")
 
     # ---- REST endpoints ----
 
