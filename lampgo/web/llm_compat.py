@@ -40,12 +40,13 @@ def _make_chunk(
     *,
     finish_reason: str | None = None,
     model: str = "lampgo",
+    role: str | None = None,
 ) -> str:
     delta: dict[str, Any] = {}
+    if role is not None:
+        delta["role"] = role
     if content is not None:
         delta["content"] = content
-    if finish_reason is not None:
-        delta["role"] = "assistant"
 
     payload = {
         "id": chat_id,
@@ -192,13 +193,14 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
                 return
             emitted_texts.append(tts_text)
             if not role_sent:
-                yield _make_chunk(chat_id, "", model="lampgo")
+                yield _make_chunk(chat_id, "", model="lampgo", role="assistant")
                 role_sent = True
-            logger.debug(
+            logger.info(
                 "llm_compat.stream_text",
                 chat_id=chat_id,
                 request_id=request_id,
                 text=tts_text[:80],
+                emitted_count=len(emitted_texts),
             )
             for i in range(0, len(tts_text), 20):
                 yield _make_chunk(chat_id, tts_text[i : i + 20], model="lampgo")
@@ -244,9 +246,16 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
                     result = task.result()
                     fallback = _extract_response(result)
                     fallback_sentence = _as_tts_sentence(fallback)
-                    if fallback_sentence and fallback_sentence not in emitted_texts:
+                    if fallback_sentence and not emitted_texts:
                         async for chunk in _yield_text(fallback_sentence):
                             yield chunk
+                    elif fallback_sentence:
+                        logger.info(
+                            "llm_compat.fallback_suppressed_after_say",
+                            request_id=request_id,
+                            fallback=fallback_sentence[:80],
+                            emitted_count=len(emitted_texts),
+                        )
                     await _broadcast_result(server, result, request_id)
                 except (asyncio.CancelledError, Exception):
                     pass

@@ -522,6 +522,10 @@ class LampgoServer:
         return r.get("response") or r.get("chat_response") or None
 
     async def _maybe_tts(self, result: dict, request_id: str) -> None:
+        payload = result.get("result", {}) if isinstance(result, dict) else {}
+        if isinstance(payload, dict) and payload.get("suppress_final_tts"):
+            logger.debug("server.tts_final_suppressed", request_id=request_id)
+            return
         text = self._extract_response_text(result)
         if text:
             task = asyncio.create_task(self._tts_for_web(text, request_id))
@@ -1035,6 +1039,8 @@ class LampgoServer:
             "matched_keyword": None,
             "stop_reason": agent_result.stop_reason,
             "tool_calls": tool_calls,
+            "spoken_texts": list(getattr(agent_result, "spoken_texts", []) or []),
+            "suppress_final_tts": bool(getattr(agent_result, "suppress_final_tts", False)),
         }
         if getattr(agent_result, "end_conversation", False):
             payload["end_conversation"] = True

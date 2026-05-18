@@ -26,6 +26,7 @@ logger = structlog.get_logger(__name__)
 RECONNECT_DELAY_S = 3.0
 MAX_RECONNECT_DELAY_S = 30.0
 WS_RECV_TIMEOUT_S = 5.0
+STALE_AUDIO_S = 10.0
 
 
 class Esp32AudioCapture:
@@ -41,6 +42,8 @@ class Esp32AudioCapture:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_task: asyncio.Task | None = None
+        self._connected = False
+        self._last_frame_at = 0.0
 
     # -- public interface (matches AudioCapture) ----------------------------
 
@@ -73,7 +76,9 @@ class Esp32AudioCapture:
 
     @property
     def is_connected(self) -> bool:
-        return self._running and self._thread is not None and self._thread.is_alive()
+        if not (self._running and self._thread is not None and self._thread.is_alive()):
+            return False
+        return self._connected and (time.monotonic() - self._last_frame_at) <= STALE_AUDIO_S
 
     # -- internal -----------------------------------------------------------
 
@@ -127,20 +132,28 @@ class Esp32AudioCapture:
         logger.info("esp32_audio.connecting", url=url)
         async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
             logger.info("esp32_audio.connected", url=url)
-            while self._running:
-                try:
-                    data = await asyncio.wait_for(ws.recv(), timeout=WS_RECV_TIMEOUT_S)
-                except asyncio.TimeoutError:
-                    continue
-                if isinstance(data, bytes):
+            self._connected = True
+            self._last_frame_at = time.monotonic()
+            try:
+                while self._running:
                     try:
-                        self._queue.put_nowait(data)
-                    except queue.Full:
+                        data = await asyncio.wait_for(ws.recv(), timeout=WS_RECV_TIMEOUT_S)
+                    except asyncio.TimeoutError:
+                        if time.monotonic() - self._last_frame_at > STALE_AUDIO_S:
+                            raise ConnectionError("stale ESP32 audio websocket")
+                        continue
+                    if isinstance(data, bytes):
+                        self._last_frame_at = time.monotonic()
                         try:
-                            self._queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                        self._queue.put_nowait(data)
+                            self._queue.put_nowait(data)
+                        except queue.Full:
+                            try:
+                                self._queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                            self._queue.put_nowait(data)
+            finally:
+                self._connected = False
 
     def _build_ws_url(self) -> str | None:
         return build_ws_audio_url(self._esp32)
@@ -159,6 +172,18 @@ def build_ws_audio_url(esp32: Esp32DeviceManager) -> str | None:
     host = dev.ip or dev.host
     port = dev.port or 80
     return f"ws://{host}:{port}/ws/audio"
+
+
+def build_ws_events_url(esp32: Esp32DeviceManager) -> str | None:
+    """Build the ``ws://host:port/ws/events`` URL for ESP32 device events."""
+    if not esp32.is_online():
+        return None
+    dev = esp32._pick_active()
+    if dev is None:
+        return None
+    host = dev.ip or dev.host
+    port = dev.port or 80
+    return f"ws://{host}:{port}/ws/events"
 
 
 class Esp32AudioSession:
