@@ -155,6 +155,14 @@ class WsBridge:
         """
         await self.broadcast({"type": "status", "data": status, "ts": time.time()})
 
+    async def broadcast_pet_pose(self, pose: dict[str, Any]) -> None:
+        """Push a high-frequency joint pose for the Web pet.
+
+        Pet pose frames are intentionally not persisted. They are visual state,
+        not user-facing history.
+        """
+        await self.broadcast({"type": "pet_pose", "data": pose, "ts": time.time()})
+
     @staticmethod
     def _serialize(event: Event) -> dict[str, Any]:
         return {

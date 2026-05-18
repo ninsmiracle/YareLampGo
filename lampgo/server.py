@@ -41,6 +41,7 @@ from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
+from lampgo.core.virtual_motion import VirtualMotionRuntime
 from lampgo.ipc import IPCServer
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.skills.base import SkillContext
@@ -111,6 +112,17 @@ class LampgoServer:
         self._record_started_at: float = 0.0
         self._record_fps: int = 30
         self._record_motion_was_running: bool = False
+
+    def _use_virtual_motion(self) -> None:
+        """Switch motion to the no-hardware in-memory runtime."""
+        if isinstance(self.motion, VirtualMotionRuntime):
+            if not self.motion.is_running:
+                self.motion.start()
+            return
+        if self.motion.is_running:
+            self.motion.stop()
+        self.motion = VirtualMotionRuntime(self.config.motion)
+        self.motion.start()
 
     def _resume_motion_after_recording(self) -> None:
         if self.config.no_hw or not self.hal.is_connected:
@@ -1112,7 +1124,8 @@ class LampgoServer:
     def _handle_status(self) -> dict:
         positions = self.motion.current_state.positions
         health = "ok" if not self.safety.is_estopped() else "degraded"
-        if not self.hal.is_connected:
+        virtual = bool(getattr(self.motion, "is_virtual", False))
+        if not self.hal.is_connected and not virtual:
             health = "disconnected"
         return {
             "ok": True,
@@ -1121,6 +1134,8 @@ class LampgoServer:
                 "is_busy": self.executor.is_busy,
                 "joint_positions": positions,
                 "device_health": health,
+                "no_hw": bool(self.config.no_hw),
+                "virtual_motion": virtual,
                 "estopped": self.safety.is_estopped(),
                 "estop_reason": self.safety.last_estop_reason,
                 "recording": self._record_status(),
@@ -1485,6 +1500,7 @@ class LampgoServer:
         logger.info("server.starting")
         if self.config.no_hw:
             logger.info("server.no_hw_mode", msg="Skipping motor and LED connections")
+            self._use_virtual_motion()
         else:
             # Hardware may fail to open (wrong port, permission, device unplugged).
             # Degrade to no_hw instead of crashing so the Web UI still comes up and
@@ -1505,6 +1521,7 @@ class LampgoServer:
                 )
                 self.config.no_hw = True
                 self.config.home_on_start = False
+                self._use_virtual_motion()
             else:
                 try:
                     self.led.connect()
@@ -1656,7 +1673,9 @@ class LampgoServer:
             await self.esp32.shutdown()
         except Exception:
             logger.exception("server.esp32_shutdown_failed")
-        if not self.config.no_hw:
+        if self.config.no_hw:
+            self.motion.stop()
+        else:
             self.motion.stop()
             await self._run_blocking_shutdown_step("led.off", self.led.off)
             await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)

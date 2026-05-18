@@ -18,7 +18,7 @@ import structlog
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ASSETS_DIR = REPO_ROOT / "assets"
 
 
 def _coerce_value(current: Any, value: Any) -> Any:
@@ -126,6 +128,7 @@ class WebGateway:
         self.config = config or WebConfig()
         self.bridge = WsBridge(server.events)
         self._status_task: asyncio.Task | None = None
+        self._pet_pose_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
         self._livekit_token_lock = asyncio.Lock()
@@ -198,6 +201,9 @@ class WebGateway:
             WebSocketRoute("/ws", self.ws_endpoint),
             # ---- OpenAI-compatible LLM endpoint (for LiveKit Agent SDK) ----
             Route("/v1/chat/completions", self._llm_compat_handler, methods=["POST"]),
+            # ---- pet model asset from repo-level CAD/export assets ----
+            Route("/assets/pet/lampgo.glb", self.api_pet_model, methods=["GET"]),
+            Route("/assets/pet/lampgoGLB.glb", self.api_pet_model, methods=["GET"]),
         ]
         if STATIC_DIR.is_dir():
             routes.append(Mount("/", app=StaticFiles(directory=str(STATIC_DIR), html=True)))
@@ -206,11 +212,14 @@ class WebGateway:
         async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
             app.state.lampgo_server = self.server
             self._status_task = asyncio.create_task(self._status_loop())
+            self._pet_pose_task = asyncio.create_task(self._pet_pose_loop())
             yield
-            if self._status_task:
-                self._status_task.cancel()
+            for task in (self._status_task, self._pet_pose_task):
+                if not task:
+                    continue
+                task.cancel()
                 try:
-                    await self._status_task
+                    await task
                 except asyncio.CancelledError:
                     pass
 
@@ -235,12 +244,46 @@ class WebGateway:
             except Exception:
                 logger.exception("web.status_loop_error")
 
+    async def _pet_pose_loop(self) -> None:
+        """Broadcast joint poses at animation-friendly cadence for the Web pet."""
+        interval = 1.0 / 15.0
+        while True:
+            await asyncio.sleep(interval)
+            if self.bridge.client_count == 0:
+                continue
+            try:
+                await self.bridge.broadcast_pet_pose(self._pet_pose_snapshot())
+            except Exception:
+                logger.exception("web.pet_pose_loop_error")
+
+    def _pet_pose_snapshot(self) -> dict[str, Any]:
+        positions = self.server.motion.current_state.positions
+        virtual = bool(getattr(self.server.motion, "is_virtual", False))
+        return {
+            "joint_positions": positions,
+            "mode": "virtual" if virtual else "hardware",
+            "no_hw": bool(self.server.config.no_hw),
+            "hal_connected": bool(self.server.hal.is_connected),
+            "running_skill": self.server.executor.current_skill_id,
+            "is_busy": self.server.executor.is_busy,
+        }
+
     # ---- OpenAI-compatible LLM endpoint ----
 
     async def _llm_compat_handler(self, request: Request) -> StreamingResponse:
         from lampgo.web.llm_compat import handle_chat_completions
 
         return await handle_chat_completions(request)
+
+    async def api_pet_model(self, request: Request) -> FileResponse | JSONResponse:
+        """Serve the exported pet GLB from repo-level assets if present."""
+        asset_name = Path(request.url.path).name
+        if asset_name not in {"lampgo.glb", "lampgoGLB.glb"}:
+            return JSONResponse({"ok": False, "error": "pet model not allowed"}, status_code=404)
+        path = REPO_ASSETS_DIR / asset_name
+        if not path.exists():
+            return JSONResponse({"ok": False, "error": "pet model not found"}, status_code=404)
+        return FileResponse(path, media_type="model/gltf-binary")
 
     # ---- REST endpoints ----
 
@@ -2176,6 +2219,8 @@ class WebGateway:
                 else:
                     await self._handle_ws_message(ws, msg)
         except WebSocketDisconnect:
+            pass
+        except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("web.ws_error")

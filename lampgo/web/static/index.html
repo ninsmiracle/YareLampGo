@@ -133,6 +133,7 @@
         </div>
 
         <div class="topbar-right">
+          <button id="btn-pet-open" class="ghost-button pet-open-button" type="button" title="打开 lampgo pet">Pet</button>
           <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">安全急停</button>
         </div>
       </header>
@@ -144,6 +145,33 @@
           <button id="btn-esp32-banner-dismiss" class="esp32-banner-dismiss" type="button" title="隐藏">×</button>
         </span>
       </div>
+
+      <aside id="pet-panel" class="pet-panel" aria-label="lampgo pet">
+        <div id="pet-drag-handle" class="pet-panel-head" title="拖动移动 pet 窗口">
+          <span class="pet-title">lampgo pet</span>
+          <span id="pet-mode" class="pet-mode">待机</span>
+          <span class="pet-window-actions">
+            <button id="btn-pet-collapse" class="pet-window-button" type="button" title="折叠 pet">−</button>
+            <button id="btn-pet-close" class="pet-window-button" type="button" title="关闭 pet">×</button>
+          </span>
+        </div>
+        <div id="pet-viewport" class="pet-viewport" title="拖动旋转视角，滚轮缩放">
+          <canvas id="pet-canvas" class="pet-canvas"></canvas>
+        </div>
+        <div class="pet-zoom-control" title="调整 pet 显示倍率">
+          <span class="pet-zoom-icon" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="6"></circle>
+              <path d="M16 16l4 4"></path>
+              <path d="M11 8v6"></path>
+              <path d="M8 11h6"></path>
+            </svg>
+          </span>
+          <input id="pet-zoom-slider" class="pet-zoom-slider" type="range" min="80" max="280" step="5" value="180" aria-label="pet 显示倍率">
+          <span id="pet-zoom-value" class="pet-zoom-value">180%</span>
+        </div>
+        <div id="pet-fallback" class="pet-fallback hidden"></div>
+      </aside>
 
       <section class="view" data-view="chat">
         <div class="chat-card">
@@ -1295,6 +1323,7 @@
   </dialog>
 
   <script src="/app.js?v=esp32-call-audio-20260514f"></script>
+  <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js"></script>
 </body>
 </html>

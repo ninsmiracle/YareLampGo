@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
+import time
 from types import SimpleNamespace
 
 from lampgo import cli
@@ -120,6 +122,86 @@ def test_load_config_from_args_keeps_hw_when_motor_port_set(monkeypatch):
     result = cli._load_config_from_args(args)
     assert result.no_hw is False
     assert result.home_on_start is True
+
+
+def _wait_for(predicate, timeout: float = 1.5) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_virtual_motion_move_to_updates_joint_state():
+    from lampgo.core.config import MotionConfig
+    from lampgo.core.types import MotionTarget
+    from lampgo.core.virtual_motion import VirtualMotionRuntime
+
+    motion = VirtualMotionRuntime(MotionConfig(tick_rate_hz=80))
+    motion.start()
+    try:
+        done = motion.move_to(MotionTarget(joints={"base_yaw": 18.0}, max_velocity=180.0))
+        assert done.wait(timeout=1.0)
+        assert abs(motion.current_state.get("base_yaw") - 18.0) < 0.5
+        assert motion.status.is_done is True
+    finally:
+        motion.stop()
+
+
+def test_virtual_motion_stream_frames_updates_joint_state():
+    from lampgo.core.config import MotionConfig
+    from lampgo.core.virtual_motion import VirtualMotionRuntime
+
+    motion = VirtualMotionRuntime(MotionConfig(tick_rate_hz=80))
+    motion.start()
+    try:
+        done = motion.stream_frames(
+            [
+                {"base_pitch": -5.0},
+                {"base_pitch": -10.0},
+                {"base_pitch": -15.0},
+            ],
+            fps=30,
+        )
+        assert done.wait(timeout=1.0)
+        assert abs(motion.current_state.get("base_pitch") + 15.0) < 0.5
+    finally:
+        motion.stop()
+
+
+def test_no_hw_server_uses_virtual_motion_for_skills(tmp_path):
+    async def run() -> None:
+        from lampgo.core.config import LampgoConfig
+        from lampgo.server import LampgoServer
+
+        cfg = LampgoConfig(
+            no_hw=True,
+            home_on_start=False,
+            socket_path=str(tmp_path / "lampgo.sock"),
+        )
+        server = LampgoServer(cfg)
+        await server.start()
+        try:
+            assert getattr(server.motion, "is_virtual", False) is True
+            assert server.motion.is_running is True
+
+            result = await server.handle_request(
+                {
+                    "cmd": "invoke",
+                    "skill_id": "move_to",
+                    "params": {"base_yaw": 12.0, "velocity": 180.0},
+                    "wait": True,
+                }
+            )
+
+            assert result["ok"] is True
+            assert result["result"]["status"] == "ok"
+            assert _wait_for(lambda: abs(server.motion.current_state.get("base_yaw") - 12.0) < 0.5)
+        finally:
+            await server.shutdown()
+
+    asyncio.run(run())
 
 
 def test_cmd_ping_reports_status_error(monkeypatch, capsys):
