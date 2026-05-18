@@ -97,13 +97,17 @@ async function initThree(THREE, GLTFLoader, DRACOLoader, rig) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.setClearColor(0x000000, 0);
 
-  const controls = createOrbitView(THREE, camera, viewportEl || canvas);
+  const controls = createOrbitView(THREE, camera, panelEl || viewportEl || canvas);
   controls.setZoom(petZoom);
 
-  scene.add(new THREE.HemisphereLight(0xffffff, 0xd9c7ba, 2.8));
-  const key = new THREE.DirectionalLight(0xffffff, 2.4);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0xd9c7ba, 2.1));
+  const key = new THREE.DirectionalLight(0xffffff, 2.0);
   key.position.set(3, 5, 4);
   scene.add(key);
+  const rim = new THREE.DirectionalLight(0xf2ded2, 1.25);
+  rim.position.set(-3, 2.4, -4);
+  scene.add(rim);
+  scene.add(buildPetStage(THREE));
 
   const nodes = new Map();
   const root = buildFallbackModel(THREE, nodes);
@@ -339,6 +343,43 @@ function roundedBox(THREE, width, height, depth, radius, material) {
   return new THREE.Mesh(geometry, material);
 }
 
+function buildPetStage(THREE) {
+  const group = new THREE.Group();
+  group.name = "pet_stage";
+
+  const shadow = new THREE.Mesh(
+    new THREE.CircleGeometry(1.15, 64),
+    new THREE.MeshBasicMaterial({
+      color: 0x7d7067,
+      transparent: true,
+      opacity: 0.14,
+      depthWrite: false,
+    }),
+  );
+  shadow.name = "pet_contact_shadow";
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.scale.set(1.25, 0.42, 1);
+  shadow.position.set(0, 0.032, 0);
+  group.add(shadow);
+
+  const softHalo = new THREE.Mesh(
+    new THREE.CircleGeometry(1.55, 64),
+    new THREE.MeshBasicMaterial({
+      color: 0xd8ccc2,
+      transparent: true,
+      opacity: 0.055,
+      depthWrite: false,
+    }),
+  );
+  softHalo.name = "pet_stage_halo";
+  softHalo.rotation.x = -Math.PI / 2;
+  softHalo.scale.set(1.35, 0.5, 1);
+  softHalo.position.set(0, 0.02, 0);
+  group.add(softHalo);
+
+  return group;
+}
+
 async function loadGlbIfPresent(THREE, GLTFLoader, DRACOLoader, rig, scene, fallbackRoot, nodes, camera, controls) {
   if (!rig.model) return null;
   let dracoLoader = null;
@@ -353,6 +394,7 @@ async function loadGlbIfPresent(THREE, GLTFLoader, DRACOLoader, rig, scene, fall
     scene.remove(fallbackRoot);
     nodes.clear();
     const lookup = collectModelNodes(gltf.scene);
+    enhanceModelMaterials(THREE, gltf.scene);
     gltf.scene.traverse((obj) => {
       if (obj.name) nodes.set(obj.name, obj);
       if (obj.isMesh) {
@@ -384,6 +426,42 @@ async function loadGlbIfPresent(THREE, GLTFLoader, DRACOLoader, rig, scene, fall
   } finally {
     if (dracoLoader) dracoLoader.dispose();
   }
+}
+
+function enhanceModelMaterials(THREE, model) {
+  const warmWhite = new THREE.Color(0xe9ded2);
+  model.traverse((obj) => {
+    if (!obj.isMesh) return;
+    for (const material of ensureMaterialArray(obj.material)) {
+      if (!material) continue;
+      const opacity = Number.isFinite(material.opacity) ? material.opacity : 1;
+      const pale =
+        material.color &&
+        material.color.r > 0.78 &&
+        material.color.g > 0.78 &&
+        material.color.b > 0.78;
+      const translucent = material.transparent || opacity < 0.98;
+
+      if (pale) {
+        material.color.lerp(warmWhite, translucent ? 0.18 : 0.08);
+        if ("roughness" in material) material.roughness = Math.max(Number(material.roughness) || 0, 0.66);
+        if ("metalness" in material) material.metalness = Math.min(Number(material.metalness) || 0, 0.06);
+      }
+
+      if (translucent) {
+        material.opacity = Math.max(opacity, 0.88);
+        material.transparent = material.opacity < 0.985;
+        material.depthWrite = true;
+      }
+
+      material.needsUpdate = true;
+    }
+  });
+}
+
+function ensureMaterialArray(material) {
+  if (!material) return [];
+  return Array.isArray(material) ? material : [material];
 }
 
 function collectModelNodes(model) {
@@ -555,8 +633,10 @@ function createOrbitView(THREE, camera, domElement) {
     controls.zoom = clamp(Number(value) || DEFAULT_ZOOM, 0.8, 2.8);
   }
 
-  function beginDrag(id, x, y) {
+  function beginDrag(id, x, y, source) {
     controls.dragging = { pointerId: id, x, y };
+    canvas.dataset.petOrbitDragging = "1";
+    canvas.dataset.petOrbitSource = source || "pet";
   }
 
   function moveDrag(id, x, y) {
@@ -570,44 +650,89 @@ function createOrbitView(THREE, camera, domElement) {
     return true;
   }
 
+  function moveActiveDrag(x, y) {
+    if (!controls.dragging) return false;
+    return moveDrag(controls.dragging.pointerId, x, y);
+  }
+
   function endDrag(id) {
     if (!controls.dragging || controls.dragging.pointerId !== id) return false;
     controls.dragging = null;
+    canvas.dataset.petOrbitDragging = "0";
     return true;
   }
 
-  domElement.addEventListener("pointerdown", (ev) => {
-    if (ev.button !== 0) return;
-    beginDrag(ev.pointerId, ev.clientX, ev.clientY);
-    domElement.setPointerCapture(ev.pointerId);
-    ev.preventDefault();
-  });
+  function orbitStartSource(target) {
+    if (!target || !target.closest) return null;
+    if (target.closest("button, input, select, textarea, a")) return null;
+    if (target.closest(".pet-panel-head, .pet-window-actions, .pet-zoom-control")) return null;
+    if (viewportEl && viewportEl.contains(target)) return "viewport";
+    if (panelEl && panelEl.contains(target)) return "panel";
+    if (canvas && canvas.contains(target)) return "canvas";
+    return null;
+  }
 
-  domElement.addEventListener("pointermove", (ev) => {
+  function handlePointerDown(ev) {
+    if (ev.button !== 0) return;
+    const source = orbitStartSource(ev.target);
+    if (!source) return;
+    beginDrag(ev.pointerId, ev.clientX, ev.clientY, source);
+    try {
+      domElement.setPointerCapture(ev.pointerId);
+    } catch {
+      // Some embedded browsers only allow capture on the direct pointer target.
+    }
+    try {
+      if (ev.target && ev.target.setPointerCapture) ev.target.setPointerCapture(ev.pointerId);
+    } catch {
+      // Capture is a best-effort enhancement; bubbling listeners still handle normal mouse input.
+    }
+    ev.preventDefault();
+  }
+
+  function handlePointerMove(ev) {
     if (moveDrag(ev.pointerId, ev.clientX, ev.clientY)) ev.preventDefault();
-  });
+  }
 
   const stopDrag = (ev) => {
     if (endDrag(ev.pointerId)) ev.preventDefault();
   };
-  domElement.addEventListener("pointerup", stopDrag);
-  domElement.addEventListener("pointercancel", stopDrag);
+
+  if (window.PointerEvent) {
+    domElement.addEventListener("pointerdown", handlePointerDown);
+    domElement.addEventListener("pointermove", handlePointerMove);
+    domElement.addEventListener("pointerup", stopDrag);
+    domElement.addEventListener("pointercancel", stopDrag);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopDrag);
+    window.addEventListener("pointercancel", stopDrag);
+    document.addEventListener("pointermove", handlePointerMove, true);
+    document.addEventListener("pointerup", stopDrag, true);
+    document.addEventListener("pointercancel", stopDrag, true);
+  }
 
   domElement.addEventListener("mousedown", (ev) => {
-    if (ev.button !== 0) return;
-    beginDrag("mouse", ev.clientX, ev.clientY);
+    if (ev.button !== 0 || controls.dragging) return;
+    const source = orbitStartSource(ev.target);
+    if (!source) return;
+    beginDrag("mouse", ev.clientX, ev.clientY, source);
     ev.preventDefault();
   });
 
-  window.addEventListener("mousemove", (ev) => {
-    if (moveDrag("mouse", ev.clientX, ev.clientY)) ev.preventDefault();
-  });
+  const handleMouseMove = (ev) => {
+    if (moveActiveDrag(ev.clientX, ev.clientY)) ev.preventDefault();
+  };
+
+  window.addEventListener("mousemove", handleMouseMove);
+  document.addEventListener("mousemove", handleMouseMove, true);
 
   window.addEventListener("mouseup", (ev) => {
-    if (endDrag("mouse")) ev.preventDefault();
+    if (!controls.dragging) return;
+    if (endDrag(controls.dragging.pointerId)) ev.preventDefault();
   });
 
   domElement.addEventListener("wheel", (ev) => {
+    if (!orbitStartSource(ev.target)) return;
     controls.radius = clamp(controls.radius * Math.exp(ev.deltaY * 0.001), controls.minDistance, controls.maxDistance);
     ev.preventDefault();
   }, { passive: false });
