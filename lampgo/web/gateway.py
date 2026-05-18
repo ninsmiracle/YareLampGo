@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 
 import httpx as httpx_module
@@ -129,6 +130,10 @@ class WebGateway:
         self._status_task: asyncio.Task | None = None
         self._pet_pose_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
+        self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
+        self._livekit_token_lock = asyncio.Lock()
+        self._livekit_token_gate_until = 0.0
+        self._livekit_token_gate_owner = ""
         self.app = self._build_app()
 
     def _build_app(self) -> Starlette:
@@ -571,6 +576,21 @@ class WebGateway:
         room_name = str(body.get("room_name") or self.server.config.voice.livekit_room or "lampgo")
         user_identity = str(body.get("user_identity") or f"lampgo-web-{uuid.uuid4().hex[:8]}")
         voice_agent = str(body.get("voice_agent") or "lampgo-jarvis")
+        if not body.get("client_call_id"):
+            logger.info("web.livekit_token_legacy_client_rejected", user_identity=user_identity)
+            return JSONResponse({"ok": False, "error": "please refresh the web UI before starting a call"}, status_code=409)
+        client_call_id = str(body.get("client_call_id"))
+        async with self._livekit_token_lock:
+            now = time.monotonic()
+            if now < self._livekit_token_gate_until and self._livekit_token_gate_owner != client_call_id:
+                logger.info(
+                    "web.livekit_token_deduped",
+                    owner=self._livekit_token_gate_owner,
+                    requester=client_call_id,
+                )
+                return JSONResponse({"ok": False, "error": "another call is already starting"}, status_code=409)
+            self._livekit_token_gate_until = now + 3.0
+            self._livekit_token_gate_owner = client_call_id
         try:
             async with httpx_module.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -584,6 +604,10 @@ class WebGateway:
                 resp.raise_for_status()
                 return JSONResponse({"ok": True, "result": resp.json()})
         except Exception as exc:
+            async with self._livekit_token_lock:
+                if self._livekit_token_gate_owner == client_call_id:
+                    self._livekit_token_gate_until = 0.0
+                    self._livekit_token_gate_owner = ""
             logger.exception("web.livekit_token_failed")
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
@@ -1454,10 +1478,13 @@ class WebGateway:
         cfg = self.server.config.device_esp32
         status = self.server.esp32.get_status()
         mic_streaming = False
-        if cfg.mic_enabled and hasattr(self.server, "_voice") and self.server._voice is not None:
+        wake_event_clients = 0
+        if cfg.mic_enabled and self.server.esp32:
             try:
-                from lampgo.device.audio_stream import Esp32AudioCapture
-                mic_streaming = isinstance(self.server._voice._capture, Esp32AudioCapture) and self.server._voice._capture.is_connected
+                device_status_code, device_body, _ = await self.server.esp32.proxy_get("/device/status")
+                if device_status_code == 200 and isinstance(device_body, dict):
+                    mic_streaming = bool(device_body.get("mic_streaming") and device_body.get("wake_ready"))
+                    wake_event_clients = int(device_body.get("wake_event_clients") or 0)
             except Exception:
                 pass
         return JSONResponse(
@@ -1468,6 +1495,7 @@ class WebGateway:
                     "preferred_host": cfg.preferred_host,
                     "mic_enabled": cfg.mic_enabled,
                     "mic_streaming": mic_streaming,
+                    "wake_event_clients": wake_event_clients,
                     "configured": status["configured"],
                     "online": status["online"],
                     "session_used": status["session_used"],
@@ -1509,6 +1537,7 @@ class WebGateway:
     async def ws_esp32_speaker(self, ws: WebSocket) -> None:
         """Proxy browser PCM16 frames to the ESP32 /ws/speaker endpoint."""
         await ws.accept()
+        logger.info("web.esp32_speaker_proxy_client_connected")
         base_url = self.server.esp32.get_active_base_url() if self.server.esp32 else None
         if not base_url:
             await ws.close(code=1011)
@@ -1528,13 +1557,85 @@ class WebGateway:
             await ws.close(code=1011)
             return
 
+        frames = 0
+        bytes_sent = 0
+        dropped_frames = 0
+        esp32_ws = None
+        next_connect_at = 0.0
+
+        async def close_esp32_ws() -> None:
+            nonlocal esp32_ws
+            if esp32_ws is None:
+                return
+            try:
+                await esp32_ws.close()
+            except Exception:
+                pass
+            esp32_ws = None
+
+        async def ensure_esp32_ws():
+            nonlocal esp32_ws, next_connect_at
+            if esp32_ws is not None:
+                return esp32_ws
+            now = asyncio.get_running_loop().time()
+            if now < next_connect_at:
+                return None
+            try:
+                esp32_ws = await websockets.connect(
+                    esp32_ws_url,
+                    open_timeout=5.0,
+                    close_timeout=2.0,
+                    ping_interval=None,
+                    max_size=None,
+                )
+            except Exception as exc:
+                next_connect_at = now + 0.5
+                logger.warning("web.esp32_speaker_proxy_connect_failed", url=esp32_ws_url, error=str(exc))
+                return None
+            logger.info("web.esp32_speaker_proxy_connected", url=esp32_ws_url)
+            return esp32_ws
+
         try:
-            async with websockets.connect(esp32_ws_url, open_timeout=5.0, max_size=None) as esp32_ws:
-                logger.info("web.esp32_speaker_proxy_connected", url=esp32_ws_url)
-                while True:
-                    frame = await ws.receive_bytes()
-                    if frame:
-                        await esp32_ws.send(frame)
+            while True:
+                frame = await ws.receive_bytes()
+                if not frame:
+                    continue
+                sent = False
+                for attempt in range(2):
+                    target = await ensure_esp32_ws()
+                    if target is None:
+                        break
+                    try:
+                        await target.send(frame)
+                        sent = True
+                        break
+                    except Exception as exc:
+                        logger.warning(
+                            "web.esp32_speaker_proxy_send_failed",
+                            url=esp32_ws_url,
+                            attempt=attempt + 1,
+                            error=str(exc),
+                        )
+                        await close_esp32_ws()
+                        next_connect_at = 0.0
+                if not sent:
+                    dropped_frames += 1
+                    if dropped_frames == 1 or dropped_frames % 50 == 0:
+                        logger.warning(
+                            "web.esp32_speaker_proxy_dropped",
+                            dropped_frames=dropped_frames,
+                            forwarded_frames=frames,
+                            bytes=bytes_sent,
+                        )
+                    continue
+                frames += 1
+                bytes_sent += len(frame)
+                if frames == 1 or frames % 100 == 0:
+                    logger.info(
+                        "web.esp32_speaker_proxy_forwarded",
+                        frames=frames,
+                        bytes=bytes_sent,
+                    )
         except WebSocketDisconnect:
             pass
         except Exception:
@@ -1544,7 +1645,8 @@ class WebGateway:
             except Exception:
                 pass
         finally:
-            logger.info("web.esp32_speaker_proxy_closed")
+            await close_esp32_ws()
+            logger.info("web.esp32_speaker_proxy_closed", frames=frames, bytes=bytes_sent, dropped_frames=dropped_frames)
 
     async def api_esp32_reboot(self, request: Request) -> JSONResponse:
         status, body, _ = await self.server.esp32.proxy_post("/device/reboot", {})
@@ -2126,6 +2228,9 @@ class WebGateway:
             task = self._active_request_tasks.pop(ws, None)
             if task and not task.done():
                 task.cancel()
+            relay_task = self._esp32_relay_tasks.pop(ws, None)
+            if relay_task and not relay_task.done():
+                relay_task.cancel()
             await self.bridge.remove_client(ws)
 
     async def _handle_ws_message(self, ws: WebSocket, msg: dict[str, Any]) -> None:
@@ -2340,15 +2445,19 @@ class WebGateway:
             await ws.send_json(result)
 
         elif msg_type == "start_esp32_relay":
-            if self.server._wake_loop:
-                self.server._wake_loop.start_browser_relay()
+            existing = self._esp32_relay_tasks.get(ws)
+            if existing and not existing.done():
                 await ws.send_json({"ok": True, "request_id": request_id})
             else:
-                await ws.send_json({"ok": False, "error": "wake loop not active", "request_id": request_id})
+                task = asyncio.create_task(self._relay_esp32_audio_to_browser(ws))
+                self._esp32_relay_tasks[ws] = task
+                task.add_done_callback(lambda _t, _ws=ws: self._esp32_relay_tasks.pop(_ws, None))
+                await ws.send_json({"ok": True, "request_id": request_id})
 
         elif msg_type == "stop_esp32_relay":
-            if self.server._wake_loop:
-                self.server._wake_loop.stop_browser_relay()
+            relay_task = self._esp32_relay_tasks.pop(ws, None)
+            if relay_task and not relay_task.done():
+                relay_task.cancel()
             await ws.send_json({"ok": True, "request_id": request_id})
 
         elif msg_type == "estop":
@@ -2358,6 +2467,61 @@ class WebGateway:
 
         else:
             await ws.send_json({"ok": False, "error": f"unknown type: {msg_type}", "request_id": request_id})
+
+    async def _relay_esp32_audio_to_browser(self, ws: WebSocket) -> None:
+        """Forward ESP32 PCM16 frames directly to one browser WebSocket client."""
+        from lampgo.device.audio_stream import build_ws_audio_url
+
+        url = None
+        deadline = asyncio.get_running_loop().time() + 6.0
+        while self.server.esp32 and asyncio.get_running_loop().time() < deadline:
+            url = build_ws_audio_url(self.server.esp32)
+            if url:
+                break
+            await asyncio.sleep(0.25)
+        if not url:
+            logger.warning("web.esp32_audio_relay_no_url")
+            try:
+                await ws.send_json({"type": "event", "event": "Esp32AudioRelayError", "data": {"error": "esp32 audio unavailable"}})
+            except Exception:
+                pass
+            return
+
+        try:
+            import websockets
+        except ImportError:
+            logger.warning("web.esp32_audio_relay_no_websockets")
+            try:
+                await ws.send_json({"type": "event", "event": "Esp32AudioRelayError", "data": {"error": "websockets not installed"}})
+            except Exception:
+                pass
+            return
+
+        frames = 0
+        bytes_sent = 0
+        logger.info("web.esp32_audio_relay_connecting", url=url)
+        try:
+            async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None, max_size=None) as esp32_ws:
+                logger.info("web.esp32_audio_relay_connected", url=url)
+                while True:
+                    data = await asyncio.wait_for(esp32_ws.recv(), timeout=5.0)
+                    if not isinstance(data, bytes) or not data:
+                        continue
+                    await ws.send_bytes(data)
+                    frames += 1
+                    bytes_sent += len(data)
+                    if frames == 1 or frames % 100 == 0:
+                        logger.info("web.esp32_audio_relay_forwarded", frames=frames, bytes=bytes_sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("web.esp32_audio_relay_failed", url=url, frames=frames, bytes=bytes_sent)
+            try:
+                await ws.send_json({"type": "event", "event": "Esp32AudioRelayError", "data": {"error": "esp32 audio relay failed"}})
+            except Exception:
+                pass
+        finally:
+            logger.info("web.esp32_audio_relay_closed", url=url, frames=frames, bytes=bytes_sent)
 
     async def _send_cancel_response(self, ws: WebSocket, request_id: str) -> None:
         """Publish cancellation events and send a response after stop_loop."""

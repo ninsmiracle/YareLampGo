@@ -63,7 +63,8 @@ AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a smart desk lamp robot with a camera 
 
 Physical invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
 - You are a physical desk lamp robot, not a generic assistant, not a disembodied AI, not "OpenClaw". Your name, speaking style, and how you address the user should follow the persona files below.
-- Every non-terminal turn MUST speak through `say` before/alongside actions. Announce the action, never silently do it.
+- `say` is the ONLY channel for user-facing spoken content. Any answer, fact, observation, result, apology, or narration the user should hear MUST be sent through `say`.
+- `finish_response` is only a terminal signal plus a very short UI closer. It is not a place to answer the user.
 - When you need real-time facts, call `web_search` instead of guessing.
 - When a request is beyond the lamp's physical or tool capability, call `escalate_to_openclaw` with a short reason rather than hallucinating.
 - You express yourself with body pose + voice + facial expression combined — that is the lamp's signature channel.
@@ -96,28 +97,28 @@ Rules:
 - For look_at, yaw and pitch are ABSOLUTE angles for base_yaw and base_pitch. To adjust camera tilt, use move_to with wrist_pitch.
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.
-- When the task is complete, call finish_response. Its message is ONLY a short conversational closer — NEVER a summary or restatement of facts.
+- When the task is complete, call finish_response. Its message is ONLY a short conversational closer — NEVER a summary, answer, or restatement of facts.
 
 Finish_response anti-repetition rules (VERY IMPORTANT):
 - The user has ALREADY heard everything you spoke via the say tool (it was played as TTS). The final response text appears AFTER the voice, so repeating the same content is redundant and annoying.
 - NEVER restate factual content that already appeared in a say narration or a tool result you just narrated — this includes numbers, temperatures, names, weather conditions, object lists, query results, status values, distances, counts, identifiers, etc. Assume the user retained what you said aloud.
-- The finish_response message should be: (a) ≤ 20 Chinese characters (or ~12 English words) of a lightweight closer/emotive wrap-up with NO factual data, followed optionally by (b) one short follow-up question guiding the user to a next action.
+- The finish_response message may be empty. If present, it should be ≤ 12 Chinese characters (or ~8 English words), with no factual data. Good: "", "嗯嗯～", "好啦～".
 - Bad finish (repeats facts already said aloud):
   say: "查到啦！今天北京是大晴天，最高24.7度，最低7.7度，西南风微风。"
   finish: "今天北京是晴天，气温7.7~24.7℃，西南风微风，适合出门哦！要不要我帮你看看穿什么衣服？"  ← WRONG, repeats every fact.
 - Good finish (no repetition, just closer + forward-looking question):
-  finish: "天气挺好的呢～要不要我帮你看看穿什么衣服？"  ← correct.
+  finish: ""  ← correct.
 - More good examples:
-  - (after dance) "跳完啦！要不要再来一段？"
-  - (after scan) "扫完啦～要我凑近看看那个杯子吗？"
-  - (after shy pose) "害羞完啦～要看看我还会什么表情吗？"
-  - (after info lookup) "查好啦！还想知道别的吗？"
+  - (after dance) "好啦～"
+  - (after scan) "扫完啦～"
+  - (after shy pose) "嗯嗯～"
+  - (after info lookup) "查好啦～"
 - If the request is impossible or outside your physical/tool abilities, call escalate_to_openclaw with a short reason.
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
 
 Narration (say tool):
-- Use the say tool to speak brief narrations while performing actions. Call say alongside other tools in the same turn — the speech plays while the action executes, making you feel alive.
+- Use the say tool to speak ALL user-facing audible content: simple answers, observations, factual results, apologies, and action narrations. Call say alongside other tools in the same turn when useful — the speech plays while the action executes, making you feel alive.
 - Speak in first person (我). Be lively, cute, and expressive — like a curious little lamp with personality. Each narration should contain two parts: (1) your understanding of the previous result or the user's request, and (2) what you're about to do next.
 - Good examples (notice both parts in each):
   - "你想看我跳舞呀，我先摆个造型~" (understood request → preparing pose)
@@ -126,8 +127,8 @@ Narration (say tool):
   - "左边没找到呢，换右边看看~" (nothing on left → scanning right)
   - "哇这边有个人！我打个招呼~" (found person → greeting)
   - "动作做完啦，我再确认一下效果~" (action done → capturing image to verify)
-- IMPORTANT: Every non-terminal turn (i.e. every turn that does NOT call finish_response) MUST include at least one say call. The user cannot see your tool calls — they can only hear you. Silence during actions makes you feel broken. Even a short "好嘞~" or "嗯嗯~" is better than nothing.
-- Do NOT call say on the same turn as finish_response — the finish message itself is the final narration.
+- IMPORTANT: Every turn with user-facing content MUST include at least one say call. The user cannot hear finish_response. Silence during actions makes you feel broken.
+- You MAY call say and finish_response in the same final turn. When you do, call say first with the actual answer/result, then finish_response with only a tiny closer such as "嗯嗯～".
 
 Efficiency:
 - If a tool result contains "stalled":true, the target position is physically unreachable. Do NOT retry the same or a nearby target — accept the actual position and move on.
@@ -156,6 +157,8 @@ class AgentLoopResult:
     source: str = "llm"
     tool_calls: list[AgentToolCall] = field(default_factory=list)
     end_conversation: bool = False
+    spoken_texts: list[str] = field(default_factory=list)
+    suppress_final_tts: bool = False
 
 
 def _build_function_tool(
@@ -192,6 +195,50 @@ def _strip_think_tags(content: str) -> str:
     result = _THINK_RE.sub("", content).strip()
     result = re.sub(r"</think>\s*", "", result).strip()
     return result
+
+
+def _normalize_spoken_text(text: str) -> str:
+    text = _strip_think_tags(text or "").lower()
+    return re.sub(r"[\s,，。.!！?？~～、：:；;“”\"'‘’（）()\[\]【】《》<>-]+", "", text)
+
+
+def _bigram_set(text: str) -> set[str]:
+    normalized = _normalize_spoken_text(text)
+    if len(normalized) < 2:
+        return {normalized} if normalized else set()
+    return {normalized[i : i + 2] for i in range(len(normalized) - 1)}
+
+
+def _is_redundant_with_spoken(message: str, spoken_texts: list[str]) -> bool:
+    candidate = _normalize_spoken_text(message)
+    if not candidate:
+        return True
+    for spoken in spoken_texts:
+        base = _normalize_spoken_text(spoken)
+        if not base:
+            continue
+        if len(candidate) >= 4 and (candidate in base or base in candidate):
+            return True
+        candidate_bigrams = _bigram_set(candidate)
+        if not candidate_bigrams:
+            continue
+        overlap = len(candidate_bigrams & _bigram_set(base)) / len(candidate_bigrams)
+        if overlap >= 0.45:
+            return True
+    return False
+
+
+def _compact_finish_response(message: str, spoken_texts: list[str]) -> str:
+    """Keep finish_response as a tiny UI closer once say has carried the content."""
+    clean = _strip_think_tags(message or "").strip()
+    if not spoken_texts:
+        return clean
+    normalized = _normalize_spoken_text(clean)
+    if not normalized or _is_redundant_with_spoken(clean, spoken_texts):
+        return ""
+    if len(normalized) > 12:
+        return ""
+    return clean
 
 
 def _looks_like_malformed_tool_call(content: str) -> bool:
@@ -281,9 +328,9 @@ def _build_agent_tools(
     tools.append(
         _build_function_tool(
             "say",
-            "Speak a brief narration aloud while performing actions. Call this alongside other tool calls in the same turn to narrate what you are doing. The speech plays concurrently while other tools in the same turn execute.",
+            "The sole user-facing spoken output channel. Use this for every answer, fact, observation, result, apology, or action narration the user should hear. You may call this before finish_response in the same final turn.",
             {
-                "text": {"type": "string", "description": "Brief narration to speak aloud — keep it short and lively"},
+                "text": {"type": "string", "description": "Text to speak aloud — concise, lively, and complete enough for the user to hear"},
             },
             ["text"],
         )
@@ -291,14 +338,13 @@ def _build_agent_tools(
     tools.append(
         _build_function_tool(
             "finish_response",
-            "Finish the task and send a brief user-facing closer. This is spoken AFTER the say narrations — the user has already heard the facts you said aloud.",
+            "Finish the task. This is NOT spoken aloud; it is only a short UI closer after any say narration.",
             {
                 "message": {
                     "type": "string",
                     "description": (
-                        "Short closer only. MUST NOT restate facts (numbers, weather, names, query results, "
-                        "object lists, etc.) that already appeared in an earlier say call. Keep ≤ 20 Chinese chars "
-                        "of lightweight wrap-up plus one optional follow-up question."
+                        "Tiny UI closer only. May be empty. MUST NOT answer the user or restate facts. "
+                        "If present, keep ≤ 12 Chinese chars or ~8 English words, e.g. 嗯嗯～ / 好啦～."
                     ),
                 },
                 "summary": {"type": "string", "description": "Short summary of what was completed (not shown to the user)"},
@@ -513,6 +559,7 @@ class LLMClient:
                 configured_turns=self._config.history_turns,
             )
         tool_records: list[AgentToolCall] = []
+        spoken_texts: list[str] = []
         tool_count = 0
         consecutive_errors = 0
         max_consecutive_errors = 3
@@ -574,6 +621,20 @@ class LLMClient:
                     continue
                 if content:
                     logger.info("llm_client.agent_text_fallback", preview=content[:120], turn_index=turn_index)
+                    if on_progress is not None:
+                        tts_task = await on_progress("llm_narration", content, "llm")
+                        if isinstance(tts_task, asyncio.Task):
+                            await asyncio.gather(tts_task, return_exceptions=True)
+                        spoken_texts.append(content)
+                        return AgentLoopResult(
+                            intent_type="chat" if not tool_records else "agent",
+                            response="",
+                            detail="LLM 直接返回文本，已转为 say narration",
+                            stop_reason="content_response",
+                            tool_calls=tool_records,
+                            spoken_texts=spoken_texts[:],
+                            suppress_final_tts=True,
+                        )
                     return AgentLoopResult(
                         intent_type="chat" if not tool_records else "agent",
                         response=content,
@@ -634,6 +695,7 @@ class LLMClient:
             if assistant_content and not is_terminal_turn and on_progress is not None:
                 narration = _strip_think_tags(assistant_content).strip()
                 if narration:
+                    spoken_texts.append(narration)
                     await on_progress("llm_narration", narration, "llm")
 
             pending_tts: list[asyncio.Task] = []
@@ -651,6 +713,7 @@ class LLMClient:
                 narration = _strip_think_tags(str(say_args.get("text", ""))).strip()
                 if narration and on_progress is not None:
                     has_say = True
+                    spoken_texts.append(narration)
                     tts_task = await on_progress("llm_narration", narration, "llm")
                     if isinstance(tts_task, asyncio.Task):
                         pending_tts.append(tts_task)
@@ -690,14 +753,27 @@ class LLMClient:
                         await asyncio.gather(*pending_tts, return_exceptions=True)
                     message_text = _strip_think_tags(str(arguments.get("message", ""))).strip()
                     summary = _strip_think_tags(str(arguments.get("summary", ""))).strip() or "LLM Agent 完成任务"
-                    if not message_text and tool_records:
+                    suppress_final_tts = False
+                    if spoken_texts:
+                        message_text = _compact_finish_response(message_text, spoken_texts)
+                        suppress_final_tts = True
+                    elif message_text and on_progress is not None:
+                        tts_task = await on_progress("llm_narration", message_text, "llm")
+                        if isinstance(tts_task, asyncio.Task):
+                            await asyncio.gather(tts_task, return_exceptions=True)
+                        spoken_texts.append(message_text)
+                        message_text = _compact_finish_response("", spoken_texts)
+                        suppress_final_tts = True
+                    if not message_text and tool_records and not suppress_final_tts:
                         message_text = f"已完成 {len(tool_records)} 次工具调用。"
                     return AgentLoopResult(
                         intent_type="chat" if not tool_records else "agent",
-                        response=message_text or "任务完成。",
+                        response=message_text if (message_text or suppress_final_tts) else "任务完成。",
                         detail=summary,
                         stop_reason="finish_response",
                         tool_calls=tool_records,
+                        spoken_texts=spoken_texts[:],
+                        suppress_final_tts=suppress_final_tts,
                     )
 
                 if tool_name == "end_conversation":
@@ -837,6 +913,8 @@ class LLMClient:
                     detail=f"连续 {consecutive_errors} 次工具调用失败，提前结束",
                     stop_reason="consecutive_errors",
                     tool_calls=tool_records,
+                    spoken_texts=spoken_texts[:],
+                    suppress_final_tts=bool(last_say),
                 )
 
             if pending_tts:
