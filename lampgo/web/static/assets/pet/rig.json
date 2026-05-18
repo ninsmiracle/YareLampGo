@@ -1,0 +1,52 @@
+{
+  "model": "/assets/pet/lampgoGLB.glb",
+  "draco": {
+    "decoderPath": "https://www.gstatic.com/draco/versioned/decoders/1.5.6/"
+  },
+  "source": {
+    "primary_pack_go": "/assets/lamp_pack_Go.rar",
+    "fallback_step": "/assets/lampgo.STEP",
+    "primary_assembly": "台灯装配图 2026.4.25 .SLDASM",
+    "secondary_assembly": "台灯外观专利图档.SLDASM"
+  },
+  "joints": {
+    "base_yaw": { "node": "base_yaw", "axis": "y", "direction": 0.55, "offset": 0 },
+    "base_pitch": { "node": "base_pitch", "axis": "z", "direction": -0.42, "offset": 0 },
+    "elbow_pitch": { "node": "elbow_pitch", "axis": "z", "direction": 0.42, "offset": 0 },
+    "wrist_roll": { "node": "wrist_roll", "axis": "y", "direction": 0.55, "offset": 0 },
+    "wrist_pitch": { "node": "wrist_pitch", "axis": "z", "direction": -0.38, "offset": 0 }
+  },
+  "linkRig": {
+    "links": [
+      {
+        "joint": "base_yaw",
+        "pivot": [-0.11, 0.018, -0.007],
+        "attach": ["底座转盘装配图-1#0"]
+      },
+      {
+        "joint": "base_pitch",
+        "pivot": [-0.11, 0.037, -0.006],
+        "attach": ["支撑杆-下-1#0", "支撑杆-下1-1#0", "电机驱动组件-2-1#0"]
+      },
+      {
+        "joint": "elbow_pitch",
+        "pivot": [-0.149, 0.223, -0.006],
+        "attach": ["电机驱动组件-1-1#1", "电机驱动组件-1-2#0"]
+      },
+      {
+        "joint": "wrist_roll",
+        "pivot": [-0.005, 0.191, -0.006],
+        "attach": ["头部转盘装配图-1#0"]
+      },
+      {
+        "joint": "wrist_pitch",
+        "pivot": [0.021, 0.196, -0.007],
+        "attach": ["大嘴堆叠-1#0"]
+      }
+    ]
+  },
+  "notes": [
+    "v1 uses SolidWorks-exported lampgoGLB.glb with a soft Three.js link rig.",
+    "The link grouping is manually inferred from SolidWorks node names and current pose; it targets visual motion trend, not exact physical kinematics."
+  ]
+}

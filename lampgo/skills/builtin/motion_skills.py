@@ -74,7 +74,8 @@ class MoveToSkill(Skill):
             logger.warning("move_to.timeout", target=joints)
             return SkillResult(status="error", message="Motion did not complete within timeout")
 
-        actual = {k: round(ctx.state.get(k, 0.0), 1) for k in joints}
+        current = ctx.motion.current_state
+        actual = {k: round(current.get(k, 0.0), 1) for k in joints}
         data: dict[str, Any] = {"target": joints, "actual": actual}
         if ctx.motion.status.stalled:
             data["stalled"] = True

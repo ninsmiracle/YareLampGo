@@ -219,8 +219,9 @@ class LookAtSkill(Skill):
         while not done.is_set():
             await asyncio.sleep(0.03)
 
-        actual_yaw = round(ctx.state.get("base_yaw", yaw), 1)
-        actual_pitch = round(ctx.state.get("base_pitch", pitch), 1)
+        current = ctx.motion.current_state
+        actual_yaw = round(current.get("base_yaw", yaw), 1)
+        actual_pitch = round(current.get("base_pitch", pitch), 1)
         data: dict[str, Any] = {
             "yaw": yaw,
             "pitch": pitch,
