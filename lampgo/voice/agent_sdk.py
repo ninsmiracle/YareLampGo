@@ -155,6 +155,291 @@ try:
           file=sys.stderr, flush=True)
 except Exception as e:
     print("[lampgo] TTS flush patch failed: %r" % (e,), file=sys.stderr, flush=True)
+
+try:
+    from livekit.agents.voice.agent_session import AgentSession as _LampgoAgentSession
+    from livekit.agents.types import NOT_GIVEN as _LAMPGO_NOT_GIVEN
+
+    _orig_agent_session_init = _LampgoAgentSession.__init__
+
+    def _lampgo_agent_session_init(self, *args, **kwargs):
+        # The ESP32 mic path can feed low-level noise/echo while the agent is
+        # speaking. Disable interruptions unless the SDK caller explicitly
+        # configured turn handling/interruption behavior.
+        if "turn_handling" not in kwargs or kwargs.get("turn_handling") is _LAMPGO_NOT_GIVEN:
+            kwargs.setdefault("allow_interruptions", False)
+            kwargs.setdefault("min_interruption_words", 3)
+            kwargs["aec_warmup_duration"] = max(float(kwargs.get("aec_warmup_duration", 3.0) or 0.0), 8.0)
+        return _orig_agent_session_init(self, *args, **kwargs)
+
+    _LampgoAgentSession.__init__ = _lampgo_agent_session_init
+    print("[lampgo] patched AgentSession interruption defaults (pid=%d)" % os.getpid(),
+          file=sys.stderr, flush=True)
+except Exception as e:
+    print("[lampgo] AgentSession interruption patch failed: %r" % (e,), file=sys.stderr, flush=True)
+
+try:
+    import asyncio
+    import aiohttp
+    from livekit import rtc
+    from livekit.agents import (
+        APIError,
+        APIConnectionError,
+        APIStatusError,
+        APITimeoutError,
+        stt as _lk_stt,
+        utils,
+    )
+    from livekit.plugins.volcengine import _protocol
+    from livekit.plugins.volcengine import stt as _volc_stt
+    from livekit.plugins.volcengine._utils import make_request_id, map_asr_error
+
+    _LAMPGO_ASR_KEEPALIVE_S = float(os.environ.get("LAMPGO_VOLCENGINE_ASR_KEEPALIVE_S", "1.0"))
+
+    async def _lampgo_volc_speech_stream_run(self):
+        request_id = make_request_id()
+        url = f"{self._opts.base_url}/{self._opts.endpoint}"
+        headers = {
+            "X-Api-App-Key": self._app_key,
+            "X-Api-Access-Key": self._access_key,
+            "X-Api-Resource-Id": self._resource_id,
+            "X-Api-Connect-Id": request_id,
+        }
+
+        try:
+            ws = await asyncio.wait_for(
+                self._session.ws_connect(url, headers=headers),
+                self._conn_options.timeout,
+            )
+        except asyncio.TimeoutError as e:
+            raise APITimeoutError("volcengine ASR connect timeout") from e
+        except aiohttp.ClientResponseError as e:
+            raise APIStatusError(
+                message=e.message,
+                status_code=e.status,
+                request_id=request_id,
+                body=None,
+            ) from e
+        except Exception as e:
+            raise APIConnectionError("failed to connect to volcengine ASR") from e
+
+        send_done = asyncio.Event()
+        recv_error = []
+
+        @utils.log_exceptions(logger=_volc_stt.logger)
+        async def send_task():
+            try:
+                payload = _volc_stt._build_request_payload(self._opts, request_id=request_id)
+                await ws.send_bytes(_protocol.build_full_client_request(payload))
+
+                samples_200ms = self._opts.sample_rate // 5
+                audio_bstream = utils.audio.AudioByteStream(
+                    sample_rate=self._opts.sample_rate,
+                    num_channels=self._opts.num_channels,
+                    samples_per_channel=samples_200ms,
+                )
+                silence = b"\\x00\\x00" * samples_200ms * self._opts.num_channels
+                sent_last = False
+
+                while True:
+                    try:
+                        data = await asyncio.wait_for(
+                            self._input_ch.recv(),
+                            timeout=max(_LAMPGO_ASR_KEEPALIVE_S, 0.2),
+                        )
+                    except asyncio.TimeoutError:
+                        if not sent_last:
+                            await ws.send_bytes(_protocol.build_audio_only_request(silence))
+                        continue
+                    except utils.aio.ChanClosed:
+                        break
+
+                    if sent_last:
+                        continue
+
+                    frames = []
+                    flush = False
+                    if isinstance(data, rtc.AudioFrame):
+                        frames.extend(audio_bstream.write(data.data.tobytes()))
+                    elif isinstance(data, self._FlushSentinel):
+                        frames.extend(audio_bstream.flush())
+                        flush = True
+
+                    for frame in frames:
+                        await ws.send_bytes(
+                            _protocol.build_audio_only_request(frame.data.tobytes())
+                        )
+
+                    if flush:
+                        await ws.send_bytes(_protocol.build_audio_only_request(b"", last=True))
+                        sent_last = True
+
+                if not sent_last:
+                    await ws.send_bytes(_protocol.build_audio_only_request(b"", last=True))
+            finally:
+                send_done.set()
+
+        @utils.log_exceptions(logger=_volc_stt.logger)
+        async def recv_task():
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg.type in (
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSING,
+                    ):
+                        if not send_done.is_set():
+                            raise APIStatusError(
+                                message="volcengine ASR connection closed unexpectedly",
+                                status_code=ws.close_code or -1,
+                                request_id=request_id,
+                                body=None,
+                            )
+                        return
+
+                    if msg.type != aiohttp.WSMsgType.BINARY:
+                        _volc_stt.logger.warning("unexpected volcengine ASR message type %s", msg.type)
+                        continue
+
+                    frame = _protocol.parse_response(msg.data)
+                    if frame.message_type == _protocol.MSG_ERROR:
+                        err_msg = ""
+                        if frame.payload_json:
+                            err_msg = str(frame.payload_json.get("error", ""))
+                        if not err_msg:
+                            err_msg = frame.payload.decode("utf-8", errors="ignore")
+                        raise map_asr_error(
+                            frame.error_code or -1,
+                            err_msg,
+                            request_id=request_id,
+                        )
+
+                    if frame.payload_json is None:
+                        continue
+
+                    self._process_payload(frame, request_id=request_id)
+
+                    if frame.is_last:
+                        return
+            except APIError as e:
+                recv_error.append(e)
+                raise
+
+        send = asyncio.create_task(send_task())
+        recv = asyncio.create_task(recv_task())
+
+        try:
+            await asyncio.gather(send, recv)
+        finally:
+            await ws.close()
+            await utils.aio.gracefully_cancel(send, recv)
+            if recv_error and self._speaking:
+                self._event_ch.send_nowait(
+                    _lk_stt.SpeechEvent(type=_lk_stt.SpeechEventType.END_OF_SPEECH)
+                )
+                self._speaking = False
+
+    _volc_stt.SpeechStream._run = _lampgo_volc_speech_stream_run
+    print(
+        "[lampgo] patched Volcengine ASR silence keepalive %.1fs (pid=%d)" %
+        (_LAMPGO_ASR_KEEPALIVE_S, os.getpid()),
+        file=sys.stderr,
+        flush=True,
+    )
+except Exception as e:
+    print("[lampgo] Volcengine ASR keepalive patch failed: %r" % (e,), file=sys.stderr, flush=True)
+
+try:
+    from livekit.agents.types import APIConnectOptions
+    from livekit.plugins.volcengine import tts as _volc_tts
+
+    _LAMPGO_VOLC_TTS_TIMEOUT = float(os.environ.get("LAMPGO_VOLCENGINE_TTS_TIMEOUT_S", "20"))
+    _orig_volc_synthesize_via_ws = _volc_tts._synthesize_via_ws
+    _orig_volc_synthesize_via_http = _volc_tts._synthesize_via_http
+
+    def _lampgo_tts_conn_options(conn_options):
+        if _LAMPGO_VOLC_TTS_TIMEOUT <= 0 or conn_options.timeout >= _LAMPGO_VOLC_TTS_TIMEOUT:
+            return conn_options
+        return APIConnectOptions(
+            max_retry=conn_options.max_retry,
+            retry_interval=conn_options.retry_interval,
+            timeout=_LAMPGO_VOLC_TTS_TIMEOUT,
+        )
+
+    def _lampgo_tts_request_info(kwargs):
+        text = kwargs.get("text") or ""
+        request_id = kwargs.get("request_id") or "?"
+        return request_id, len(str(text))
+
+    async def _lampgo_synthesize_via_ws(*, conn_options, **kwargs):
+        request_id, text_len = _lampgo_tts_request_info(kwargs)
+        print(
+            "[lampgo] Volcengine TTS ws start request_id=%s text_len=%s (pid=%d)" %
+            (request_id, text_len, os.getpid()),
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            result = await _orig_volc_synthesize_via_ws(
+                conn_options=_lampgo_tts_conn_options(conn_options),
+                **kwargs,
+            )
+        except Exception as e:
+            print(
+                "[lampgo] Volcengine TTS ws failed request_id=%s error=%r (pid=%d)" %
+                (request_id, e, os.getpid()),
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
+        print(
+            "[lampgo] Volcengine TTS ws done request_id=%s (pid=%d)" %
+            (request_id, os.getpid()),
+            file=sys.stderr,
+            flush=True,
+        )
+        return result
+
+    async def _lampgo_synthesize_via_http(*, conn_options, **kwargs):
+        request_id, text_len = _lampgo_tts_request_info(kwargs)
+        print(
+            "[lampgo] Volcengine TTS http start request_id=%s text_len=%s (pid=%d)" %
+            (request_id, text_len, os.getpid()),
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            result = await _orig_volc_synthesize_via_http(
+                conn_options=_lampgo_tts_conn_options(conn_options),
+                **kwargs,
+            )
+        except Exception as e:
+            print(
+                "[lampgo] Volcengine TTS http failed request_id=%s error=%r (pid=%d)" %
+                (request_id, e, os.getpid()),
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
+        print(
+            "[lampgo] Volcengine TTS http done request_id=%s (pid=%d)" %
+            (request_id, os.getpid()),
+            file=sys.stderr,
+            flush=True,
+        )
+        return result
+
+    _volc_tts._synthesize_via_ws = _lampgo_synthesize_via_ws
+    _volc_tts._synthesize_via_http = _lampgo_synthesize_via_http
+    print(
+        "[lampgo] patched Volcengine TTS timeout to %.1fs (pid=%d)" %
+        (_LAMPGO_VOLC_TTS_TIMEOUT, os.getpid()),
+        file=sys.stderr,
+        flush=True,
+    )
+except Exception as e:
+    print("[lampgo] Volcengine TTS timeout patch failed: %r" % (e,), file=sys.stderr, flush=True)
 """
 
 
@@ -166,9 +451,11 @@ class AgentSDKManager:
         self._web_port = web_port
         self._port = AGENT_SDK_PORT
         self._process: asyncio.subprocess.Process | None = None
+        self._process_pgid: int | None = None
         self._roles_path: Path | None = None
         self._patch_dir: Path | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._ready_event = asyncio.Event()
 
     @property
     def port(self) -> int:
@@ -264,6 +551,7 @@ class AgentSDKManager:
             f"{self._patch_dir}{os.pathsep}{existing_pp}" if existing_pp else str(self._patch_dir)
         )
 
+        self._ready_event.clear()
         try:
             self._process = await asyncio.create_subprocess_exec(
                 sdk_binary,
@@ -273,11 +561,17 @@ class AgentSDKManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                start_new_session=True,
             )
+            try:
+                self._process_pgid = os.getpgid(self._process.pid)
+            except OSError:
+                self._process_pgid = None
             self._monitor_task = asyncio.create_task(self._monitor())
             logger.info(
                 "agent_sdk.started",
                 pid=self._process.pid,
+                pgid=self._process_pgid,
                 roles_yaml=str(self._roles_path),
                 patch_dir=str(self._patch_dir),
             )
@@ -293,22 +587,34 @@ class AgentSDKManager:
         if self._process is None:
             return
 
-        pid = self._process.pid
-        logger.info("agent_sdk.stopping", pid=pid)
+        proc = self._process
+        pid = proc.pid
+        pgid = self._process_pgid
+        logger.info("agent_sdk.stopping", pid=pid, pgid=pgid)
 
         try:
-            self._process.send_signal(signal.SIGTERM)
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.send_signal(signal.SIGTERM)
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
-                self._process.kill()
-                await self._process.wait()
+                logger.warning("agent_sdk.stop_timeout_killing", pid=pid, pgid=pgid)
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+                await proc.wait()
         except ProcessLookupError:
             pass
         except Exception:
-            logger.exception("agent_sdk.stop_error", pid=pid)
+            logger.exception("agent_sdk.stop_error", pid=pid, pgid=pgid)
 
-        self._process = None
+        if self._process is proc:
+            self._process = None
+        self._process_pgid = None
+        self._ready_event.clear()
 
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
@@ -320,11 +626,26 @@ class AgentSDKManager:
 
         self._cleanup_roles()
         self._cleanup_patch_dir()
-        logger.info("agent_sdk.stopped", pid=pid)
+        logger.info("agent_sdk.stopped", pid=pid, pgid=pgid)
 
     @property
     def is_running(self) -> bool:
         return self._process is not None and self._process.returncode is None
+
+    @property
+    def is_ready(self) -> bool:
+        return self.is_running and self._ready_event.is_set()
+
+    async def wait_ready(self, timeout_s: float = 8.0) -> bool:
+        if self.is_ready:
+            return True
+        if not self.is_running:
+            return False
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return False
+        return self.is_ready
 
     async def _monitor(self) -> None:
         """Read stdout and watch for unexpected exits."""
@@ -336,6 +657,8 @@ class AgentSDKManager:
                 text = line.decode(errors="replace").rstrip()
                 if text:
                     logger.info("agent_sdk.output", line=text)
+                    if "registered worker" in text:
+                        self._ready_event.set()
         except asyncio.CancelledError:
             return
         except Exception:
@@ -344,9 +667,12 @@ class AgentSDKManager:
         rc = proc.returncode
         if rc is not None and rc != 0:
             logger.warning("agent_sdk.exited_unexpectedly", returncode=rc)
-        self._process = None
-        self._cleanup_roles()
-        self._cleanup_patch_dir()
+        if self._process is proc:
+            self._process = None
+            self._process_pgid = None
+            self._ready_event.clear()
+            self._cleanup_roles()
+            self._cleanup_patch_dir()
 
     def _cleanup_patch_dir(self) -> None:
         if self._patch_dir and self._patch_dir.exists():

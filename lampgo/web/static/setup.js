@@ -108,7 +108,16 @@
       dom.ip.textContent = dev ? (dev.ip || "—") : "—";
     }
     if (dom.host) {
-      if (online) {
+      if (status && status.blocked_devices_count && !configured) {
+        dom.host.textContent = "无权限设备已隐藏";
+        dom.host.className = "esp32-status-val esp32-state-chip is-warn";
+      } else if (dev && dev.needs_firmware_update) {
+        dom.host.textContent = "固件需更新";
+        dom.host.className = "esp32-status-val esp32-state-chip is-warn";
+      } else if (dev && dev.paired === false) {
+        dom.host.textContent = "未配对";
+        dom.host.className = "esp32-status-val esp32-state-chip is-warn";
+      } else if (online) {
         dom.host.textContent = "在线";
         dom.host.className = "esp32-status-val esp32-state-chip is-online";
       } else if (configured || enabled) {
@@ -164,7 +173,12 @@
       const label = d.hostname || d.host || d.ip || "?";
       const ip = d.ip ? ` (${d.ip})` : "";
       const ok = d.last_health_ok_at ? " \u2713" : "";
-      opt.textContent = label + ip + ok;
+      const unsupported = d.pairing_supported === false || d.needs_firmware_update === true;
+      const unpaired = d.paired === false;
+      opt.dataset.needsPair = unpaired ? "1" : "";
+      opt.dataset.unsupported = unsupported ? "1" : "";
+      opt.textContent = label + ip + (unsupported ? " · 固件需更新" : (unpaired ? " · 未配对" : "")) + ok;
+      if (unsupported) opt.disabled = true;
       sel.appendChild(opt);
     });
     const manual = document.createElement("option");
@@ -197,7 +211,16 @@
       }
       setManualMode(false);
       const val = dom2.hostSelect.value;
+      const opt = dom2.hostSelect.selectedOptions && dom2.hostSelect.selectedOptions[0];
+      if (opt && opt.dataset.unsupported) {
+        setActionStatus("这台 ESP32 固件需要更新后才能配对");
+        await pollStatus();
+        return;
+      }
       try {
+        if (val && opt && opt.dataset.needsPair) {
+          await pairDevice(val);
+        }
         await fetch("/api/config/device_esp32", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -212,6 +235,20 @@
     });
   }
 
+  async function pairDevice(host) {
+    const res = await fetch("/api/device/pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: host || "" }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) {
+      throw new Error(body.error || (body.result && body.result.error) || "pair_failed");
+    }
+    setActionStatus("已配对设备");
+    return body;
+  }
+
   async function applyManualHost(val) {
     const opt = document.createElement("option");
     opt.value = val;
@@ -221,6 +258,7 @@
     if (dom.ip) dom.ip.textContent = val;
     setManualMode(false);
     try {
+      await pairDevice(val);
       await fetch("/api/config/device_esp32", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -230,7 +268,9 @@
           "device_esp32.mic_enabled": true,
         }),
       });
-    } catch (_) {}
+    } catch (err) {
+      setActionStatus("配对失败：" + (err.message || err));
+    }
     await pollStatus();
   }
 
@@ -308,25 +348,20 @@
 
   if (dom.btnForget) {
     dom.btnForget.addEventListener("click", async () => {
-      if (!confirm("删除设备会清除 ESP32 保存的 WiFi，并让设备重新打开 Lampgo-Setup 热点。通常只在换 WiFi 或换设备时使用。继续？")) return;
-      setActionStatus("删除中…");
+      if (!confirm("解绑设备会解除当前电脑与这台 ESP32 的配对，但保留设备 WiFi。另一台电脑之后可以重新配对。继续？")) return;
+      setActionStatus("解绑中…");
       try {
-        const res = await fetch("/api/device/forget-wifi", { method: "POST" });
+        const res = await fetch("/api/device/unpair", { method: "POST" });
         const body = await res.json().catch(() => ({}));
         if (body && body.ok) {
-          await fetch("/api/config/device_esp32", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ "device_esp32.enabled": false, "device_esp32.mic_enabled": false }),
-          }).catch(() => {});
-          setActionStatus("已删除设备，请重新配网");
+          setActionStatus("已解绑设备");
           const status = await fetchStatus();
           renderStatus(status);
         } else {
-          setActionStatus("删除失败");
+          setActionStatus("解绑失败：" + (body.error || "无权限或设备离线"));
         }
       } catch (err) {
-        setActionStatus("删除失败：" + err.message);
+        setActionStatus("解绑失败：" + err.message);
       }
     });
   }
@@ -390,8 +425,9 @@
   if (dom.forgetAndGo) {
     dom.forgetAndGo.addEventListener("click", async () => {
       dom.forgetAndGo.disabled = true;
-      dom.forgetAndGo.textContent = "正在删除设备…";
+      dom.forgetAndGo.textContent = "正在重置设备…";
       try {
+        await fetch("/api/device/unpair", { method: "POST" }).catch(() => {});
         await fetch("/api/device/forget-wifi", { method: "POST" });
         await fetch("/api/config/device_esp32", {
           method: "POST",
@@ -402,7 +438,7 @@
         renderStatus(status);
       } catch (_) {}
       dom.forgetAndGo.disabled = false;
-      dom.forgetAndGo.textContent = "删除设备并继续 →";
+      dom.forgetAndGo.textContent = "重置设备并继续 →";
       showStep(1);
     });
   }

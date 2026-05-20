@@ -45,7 +45,7 @@ def test_api_config_get_returns_sections_and_provenance(monkeypatch, tmp_path):
     body = response.json()
     assert body["ok"] is True
     result = body["result"]
-    assert set(result["sections"].keys()) == {"device", "voice", "motion", "safety"}
+    assert set(result["sections"].keys()) == {"device", "voice", "motion", "safety", "web", "device_esp32"}
     device = result["sections"]["device"]
     assert "device.motor_port" in device
     cell = device["device.motor_port"]

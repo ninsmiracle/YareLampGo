@@ -1,7 +1,7 @@
-"""WakeLoop — wake-word activation for local mic or ESP32-side WakeNet.
+"""WakeLoop — wake-word activation from ESP32-side WakeNet.
 
 Pipeline:
-  [ESP32 WakeNet /ws/events] or [local mic → openWakeWord]
+  [ESP32 WakeNet /ws/events]
                 → publish WakeWordDetected
                 → browser call joins LiveKit and publishes audio
                 → Lampgo Agent SDK handles ASR/TTS via LiveKit
@@ -30,69 +30,51 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-SAMPLE_RATE = 16000
-RING_BUFFER_SECONDS = 1.0
-CHUNK_BYTES = 960  # 30ms × 16kHz × 16-bit = 960 bytes per ESP32 frame
-RING_BUFFER_CHUNKS = int(RING_BUFFER_SECONDS * SAMPLE_RATE * 2 / CHUNK_BYTES)
-DEVICE_WAKE_HEALTH_S = 3.0
+DEVICE_WAKE_IDLE_LOG_S = 30.0
+ESP32_WAKE_MODEL_BY_CONFIG = {
+    "hey_jarvis": "wn9_jarvis_tts",
+    "wn9_jarvis_tts": "wn9_jarvis_tts",
+    "wn9_xiaomeitongxue_tts": "wn9_xiaomeitongxue_tts",
+    "wn9_xiaoyaxiaoya_tts2": "wn9_xiaoyaxiaoya_tts2",
+    "wn9_xiaoluxiaolu_tts2": "wn9_xiaoluxiaolu_tts2",
+    "wn9_hixiaoxing_tts": "wn9_hixiaoxing_tts",
+}
 
 
 class WakeLoop:
-    """Continuous wake-word listener for local mic or ESP32 device events."""
+    """Continuous wake-word listener for ESP32 device events."""
 
     def __init__(self, server: LampgoServer) -> None:
         self._server = server
         cfg = server.config
 
-        self._detector = None
         from lampgo.voice.agent_sdk import AGENT_SDK_PORT
 
         self._bridge = LiveKitBridge(cfg.voice, agent_sdk_port=AGENT_SDK_PORT)
         self._bridge.set_state_callback(self._on_conversation_state)
 
-        self._ring_buffer: deque[bytes] = deque(maxlen=RING_BUFFER_CHUNKS)
-        self._capture_is_esp32 = False
-        self._capture = self._build_capture(cfg)
+        # Kept for the existing manual start_conversation path; ESP32 audio is
+        # published by the browser relay, so there is no local pre-roll buffer.
+        self._ring_buffer: deque[bytes] = deque(maxlen=0)
+        self._capture_is_esp32 = self._esp32_online()
         self._running = False
         self._bridge_start_task: asyncio.Task | None = None
         self._device_wake_task: asyncio.Task | None = None
+        self._device_wake_resume_task: asyncio.Task | None = None
         self._capture_lock = asyncio.Lock()
-        self._browser_call_active = False
         self._next_esp32_retry_at = 0.0
+        self._device_wake_paused_until = 0.0
+        self._next_wake_model_sync_at = 0.0
+        if not self._capture_is_esp32:
+            logger.info("wake_loop.esp32_waiting", wake_word=cfg.voice.wake_word)
 
-    def _build_capture(self, cfg):
-        """Pick ESP32 event-only wake (preferred) or local mic fallback."""
-        prefer_esp32 = cfg.voice.mic_device == "esp32" or cfg.device_esp32.mic_enabled
-        if prefer_esp32 and hasattr(self._server, "esp32") and self._server.esp32:
-            esp32 = self._server.esp32
-            if esp32.is_online():
-                logger.info("wake_loop.using_esp32_mic")
-                self._capture_is_esp32 = True
-                return None
-
-            logger.info("wake_loop.esp32_offline_fallback")
-
-        from lampgo.voice.audio import AudioCapture
-
-        mic_dev = None
-        if cfg.voice.mic_device and cfg.voice.mic_device != "esp32":
-            try:
-                mic_dev = int(cfg.voice.mic_device)
-            except ValueError:
-                mic_dev = cfg.voice.mic_device
-        self._capture_is_esp32 = False
-        self._ensure_local_detector()
-        return AudioCapture(sample_rate=SAMPLE_RATE, device=mic_dev)
-
-    def _ensure_local_detector(self) -> None:
-        if self._detector is not None:
-            return
-        from lampgo.voice.wakeword import WakeWordDetector
-
-        self._detector = WakeWordDetector(
-            model_name=self._server.config.voice.wake_word or "hey_jarvis",
-            threshold=0.5,
-        )
+    def _esp32_online(self) -> bool:
+        if not (hasattr(self._server, "esp32") and self._server.esp32):
+            return False
+        has_active = getattr(self._server.esp32, "has_active_device", None)
+        if callable(has_active):
+            return bool(has_active())
+        return bool(self._server.esp32.is_online())
 
     @property
     def bridge(self) -> LiveKitBridge:
@@ -103,16 +85,13 @@ class WakeLoop:
         return self._bridge.state
 
     async def run(self) -> None:
-        """Main loop: capture audio, detect wake word, bridge to LiveKit."""
-        if self._capture is not None:
-            self._capture.start()
+        """Main loop: listen for ESP32 wake events and recover after discovery."""
         self._running = True
         if self._capture_is_esp32:
             self._start_device_wake_listener()
         logger.info(
             "wake_loop.started",
             wake_word=self._server.config.voice.wake_word,
-            detector_ready=(self._detector.is_ready if self._detector else False),
             device_wake=self._capture_is_esp32,
             livekit_url=self._server.config.voice.livekit_url,
         )
@@ -120,44 +99,24 @@ class WakeLoop:
         try:
             while self._running:
                 await self._maybe_switch_to_esp32()
-                if self._capture_is_esp32:
-                    await asyncio.sleep(0.05)
-                    continue
-                capture = self._capture
-                if capture is None:
-                    await asyncio.sleep(0.05)
-                    continue
-                chunk = await capture.aread_chunk(timeout=0.05)
-                if chunk is None:
-                    await asyncio.sleep(0.01)
-                    continue
-
-                self._ring_buffer.append(chunk)
-
-                if self._browser_call_active:
-                    await self._relay_to_frontend(chunk)
-                    continue
-
-                if self._bridge.state in (ConversationState.JOINING, ConversationState.ACTIVE):
-                    self._bridge.feed_audio(chunk)
-                    continue
-
-                if self._bridge.state != ConversationState.IDLE:
-                    continue
-
-                if self._capture_is_esp32:
-                    continue
-
-                self._ensure_local_detector()
-                if self._detector and self._detector.feed(chunk):
-                    await self._handle_wake_detected(
-                        model=self._server.config.voice.wake_word or "",
-                        source="local",
-                    )
+                if (
+                    self._capture_is_esp32
+                    and not self._device_wake_paused()
+                    and (self._device_wake_task is None or self._device_wake_task.done())
+                ):
+                    self._start_device_wake_listener()
+                await asyncio.sleep(0.05 if self._capture_is_esp32 else 0.25)
 
         except asyncio.CancelledError:
             pass
         finally:
+            if self._device_wake_resume_task and not self._device_wake_resume_task.done():
+                self._device_wake_resume_task.cancel()
+                try:
+                    await self._device_wake_resume_task
+                except asyncio.CancelledError:
+                    pass
+                self._device_wake_resume_task = None
             if self._device_wake_task and not self._device_wake_task.done():
                 self._device_wake_task.cancel()
                 try:
@@ -173,8 +132,6 @@ class WakeLoop:
                     pass
             if self._bridge.state != ConversationState.IDLE:
                 await self._bridge.stop_conversation()
-            if self._capture is not None:
-                self._capture.stop()
             self._running = False
             logger.info("wake_loop.stopped")
 
@@ -182,65 +139,94 @@ class WakeLoop:
         self._running = False
 
     async def set_mic_device(self, mic_device: str) -> None:
-        """Hot-swap the microphone capture device used by wake/call mode."""
+        """Refresh the ESP32 wake listener after voice/device config changes."""
         async with self._capture_lock:
-            old_capture = self._capture
-            self._capture = self._build_capture(self._server.config)
-            if self._capture is not None:
-                self._capture.start()
+            self._capture_is_esp32 = self._esp32_online()
             if self._device_wake_task and not self._device_wake_task.done():
                 self._device_wake_task.cancel()
                 self._device_wake_task = None
+            if self._device_wake_resume_task and not self._device_wake_resume_task.done():
+                self._device_wake_resume_task.cancel()
+                self._device_wake_resume_task = None
             if self._running and self._capture_is_esp32:
                 self._start_device_wake_listener()
-            if old_capture is not None:
-                try:
-                    old_capture.stop()
-                except Exception:
-                    logger.debug("wake_loop.old_capture_stop_failed", exc_info=True)
             self._ring_buffer.clear()
-            logger.info("wake_loop.mic_device_switched", mic_device=mic_device or "default")
+            logger.info(
+                "wake_loop.esp32_wake_refreshed",
+                mic_device=mic_device or "default",
+                device_wake=self._capture_is_esp32,
+            )
 
     async def _maybe_switch_to_esp32(self) -> None:
         """Recover from startup races where ESP32 discovery completes late."""
         if self._capture_is_esp32:
-            return
-        cfg = self._server.config
-        prefer_esp32 = cfg.voice.mic_device == "esp32" or cfg.device_esp32.mic_enabled
-        if not prefer_esp32:
             return
         loop = asyncio.get_running_loop()
         now = loop.time()
         if now < self._next_esp32_retry_at:
             return
         self._next_esp32_retry_at = now + 3.0
-        if hasattr(self._server, "esp32") and self._server.esp32 and self._server.esp32.is_online():
+        if self._esp32_online():
             logger.info("wake_loop.esp32_online_switching")
             await self.set_mic_device("esp32")
 
-    def start_browser_relay(self) -> None:
-        """Enable ESP32 audio relay to the browser for LiveKit publishing."""
-        self._browser_call_active = True
-        logger.info("wake_loop.browser_relay_started")
-
-    def stop_browser_relay(self) -> None:
-        """Disable ESP32 audio relay to the browser."""
-        self._browser_call_active = False
-        logger.info("wake_loop.browser_relay_stopped")
-
-    async def _relay_to_frontend(self, chunk: bytes) -> None:
-        """Publish an ESP32 PCM chunk to the EventBus for WS relay."""
-        from lampgo.core.events import Esp32AudioRelay
-
-        try:
-            await self._server.events.publish(Esp32AudioRelay(pcm=chunk))
-        except Exception:
-            logger.debug("wake_loop.relay_error", exc_info=True)
-
     def _start_device_wake_listener(self) -> None:
+        if self._device_wake_paused():
+            return
         if self._device_wake_task and not self._device_wake_task.done():
             return
         self._device_wake_task = asyncio.create_task(self._device_wake_event_loop())
+
+    def pause_device_wake_listener(self, duration_s: float = 60.0) -> None:
+        """Temporarily close the ESP32 wake WS while call audio uses /ws/audio."""
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        self._device_wake_paused_until = max(self._device_wake_paused_until, now + duration_s)
+        if (
+            self._device_wake_task
+            and not self._device_wake_task.done()
+            and self._device_wake_task is not asyncio.current_task()
+        ):
+            self._device_wake_task.cancel()
+        if self._running and self._capture_is_esp32:
+            if self._device_wake_resume_task is None or self._device_wake_resume_task.done():
+                self._device_wake_resume_task = asyncio.create_task(self._resume_device_wake_when_pause_expires())
+        logger.info("wake_loop.device_wake_paused", duration_s=duration_s)
+
+    def resume_device_wake_listener(self) -> None:
+        """Resume ESP32 wake events after a browser-managed call ends."""
+        self._device_wake_paused_until = 0.0
+        if self._device_wake_resume_task and not self._device_wake_resume_task.done():
+            self._device_wake_resume_task.cancel()
+            self._device_wake_resume_task = None
+        if self._running and self._capture_is_esp32:
+            self._start_device_wake_listener()
+        logger.info("wake_loop.device_wake_resumed")
+
+    def _device_wake_paused(self) -> bool:
+        if self._device_wake_paused_until <= 0:
+            return False
+        return asyncio.get_running_loop().time() < self._device_wake_paused_until
+
+    async def _resume_device_wake_when_pause_expires(self) -> None:
+        """Restart the ESP32 wake listener when a timed pause naturally expires."""
+        try:
+            while self._running and self._capture_is_esp32:
+                paused_until = self._device_wake_paused_until
+                if paused_until <= 0:
+                    return
+                now = asyncio.get_running_loop().time()
+                remaining = paused_until - now
+                if remaining <= 0:
+                    self._device_wake_paused_until = 0.0
+                    self._start_device_wake_listener()
+                    logger.info("wake_loop.device_wake_pause_expired")
+                    return
+                await asyncio.sleep(min(remaining, 1.0))
+        except asyncio.CancelledError:
+            raise
 
     async def _device_wake_event_loop(self) -> None:
         """Listen for ESP32-side wake detections."""
@@ -250,32 +236,48 @@ class WakeLoop:
             logger.error("wake_loop.no_websockets", msg="Install websockets: uv add websockets")
             return
 
-        from lampgo.device.audio_stream import build_ws_events_url
+        from lampgo.device.audio_stream import build_ws_events_url, redact_ws_owner_token
 
         delay = 1.0
         while self._running and self._capture_is_esp32:
+            if self._device_wake_paused():
+                await asyncio.sleep(0.25)
+                continue
+            await self._sync_device_wake_model()
+            claim_owner = getattr(self._server.esp32, "claim_owner", None)
+            if callable(claim_owner):
+                try:
+                    ok = await claim_owner(reason="wake_listener")
+                except Exception:
+                    logger.debug("wake_loop.device_claim_failed", exc_info=True)
+                    ok = False
+                if not ok:
+                    logger.warning("wake_loop.device_claim_denied")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 1.5, 30.0)
+                    continue
             url = build_ws_events_url(self._server.esp32)
             if not url:
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, 30.0)
                 continue
+            safe_url = redact_ws_owner_token(url)
 
             try:
-                logger.info("wake_loop.device_wake_connecting", url=url)
+                logger.info("wake_loop.device_wake_connecting", url=safe_url)
                 async with websockets.connect(
                     url, open_timeout=5, close_timeout=2, ping_interval=None
                 ) as ws:
-                    logger.info("wake_loop.device_wake_connected", url=url)
+                    self._server.esp32.mark_active_healthy()
+                    logger.info("wake_loop.device_wake_connected", url=safe_url)
                     delay = 1.0
-                    while self._running and self._capture_is_esp32:
+                    while self._running and self._capture_is_esp32 and not self._device_wake_paused():
                         try:
                             message = await asyncio.wait_for(
-                                ws.recv(), timeout=DEVICE_WAKE_HEALTH_S
+                                ws.recv(), timeout=DEVICE_WAKE_IDLE_LOG_S
                             )
                         except asyncio.TimeoutError:
-                            if not await self._device_wake_connection_alive():
-                                logger.warning("wake_loop.device_wake_stale", url=url)
-                                break
+                            logger.debug("wake_loop.device_wake_idle", url=safe_url)
                             continue
                         if isinstance(message, bytes):
                             message = message.decode("utf-8", errors="ignore")
@@ -288,26 +290,96 @@ class WakeLoop:
                             continue
                         model = payload.get("model") or self._server.config.voice.wake_word or ""
                         await self._handle_wake_detected(model=f"esp32:{model}", source="esp32")
+                        break
             except asyncio.CancelledError:
                 raise
+            except TimeoutError as exc:
+                logger.warning("wake_loop.device_wake_open_timeout", url=safe_url, error=str(exc))
             except Exception as exc:
-                logger.warning("wake_loop.device_wake_error", url=url, error=str(exc))
+                logger.warning(
+                    "wake_loop.device_wake_error",
+                    url=safe_url,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
 
             if self._running and self._capture_is_esp32:
                 await asyncio.sleep(delay)
-                delay = min(delay * 1.5, 30.0)
+            delay = min(delay * 1.5, 30.0)
 
-    async def _device_wake_connection_alive(self) -> bool:
-        """Best-effort check that the ESP32 still sees our wake event socket."""
+    async def _sync_device_wake_model(self) -> None:
+        """Best-effort keep ESP32 WakeNet model aligned with voice.wake_word."""
+        if not (hasattr(self._server, "esp32") and self._server.esp32):
+            return
+        configured = str(self._server.config.voice.wake_word or "").strip()
+        desired = ESP32_WAKE_MODEL_BY_CONFIG.get(configured)
+        if not desired:
+            return
+        now = asyncio.get_running_loop().time()
+        if now < self._next_wake_model_sync_at:
+            return
+        self._next_wake_model_sync_at = now + 30.0
+
         try:
-            status_code, body, _ = await self._server.esp32.proxy_get("/device/status")
-        except Exception:
-            logger.debug("wake_loop.device_wake_health_error", exc_info=True)
-            return False
-        if status_code != 200 or not isinstance(body, dict):
-            return False
-        clients = body.get("wake_event_clients")
-        return clients is None or int(clients or 0) > 0
+            status, body, _ = await self._server.esp32.proxy_get("/device/status")
+        except Exception as exc:
+            logger.debug(
+                "wake_loop.wake_model_status_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+        if status >= 400 or not isinstance(body, dict):
+            logger.debug("wake_loop.wake_model_status_unavailable", status=status)
+            return
+
+        active = str(body.get("wake_model") or "")
+        requested = str(body.get("wake_requested_model") or "")
+        if active == desired and requested == desired:
+            return
+
+        supported = body.get("wake_supported_models") or []
+        if isinstance(supported, list) and supported and desired not in {str(m) for m in supported}:
+            logger.warning(
+                "wake_loop.wake_model_not_advertised",
+                desired=desired,
+                active=active,
+                requested=requested,
+                supported=supported,
+            )
+            return
+
+        payload = {"wake_model": desired}
+        if hasattr(self._server.esp32, "with_owner_auth"):
+            payload = self._server.esp32.with_owner_auth(payload, reason="wake_model_sync")
+        try:
+            sync_status, sync_body, _ = await self._server.esp32.proxy_post("/device/config", payload)
+        except Exception as exc:
+            logger.warning(
+                "wake_loop.wake_model_sync_error",
+                desired=desired,
+                active=active,
+                requested=requested,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+        if sync_status >= 400:
+            logger.warning(
+                "wake_loop.wake_model_sync_failed",
+                desired=desired,
+                active=active,
+                requested=requested,
+                status=sync_status,
+                body=str(sync_body)[:200],
+            )
+            return
+        logger.info(
+            "wake_loop.wake_model_synced",
+            desired=desired,
+            previous_active=active,
+            previous_requested=requested,
+        )
 
     async def _handle_wake_detected(self, *, model: str, source: str) -> None:
         if self._bridge.state != ConversationState.IDLE:
@@ -316,9 +388,7 @@ class WakeLoop:
             return
 
         logger.info("wake_loop.wake_word_detected", model=model, source=source)
-        if self._detector:
-            self._detector.reset()
-
+        self.pause_device_wake_listener(duration_s=60.0)
         self._ring_buffer.clear()
 
         from lampgo.core.events import WakeWordDetected
@@ -331,15 +401,6 @@ class WakeLoop:
         if self._bridge.state in (ConversationState.ACTIVE, ConversationState.JOINING):
             logger.info("wake_loop.manual_end")
             await self._bridge.stop_conversation()
-
-    async def _start_bridge_conversation(self, backfill: deque[bytes]) -> None:
-        """Start LiveKit without blocking the microphone capture loop."""
-        try:
-            ok = await self._bridge.start_conversation(backfill=backfill)
-            if not ok:
-                logger.warning("wake_loop.bridge_start_failed")
-        finally:
-            self._bridge_start_task = None
 
     async def _on_conversation_state(self, state: ConversationState) -> None:
         """Publish conversation state changes to the EventBus."""

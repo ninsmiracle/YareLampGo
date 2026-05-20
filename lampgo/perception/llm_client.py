@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from copy import deepcopy
 from collections.abc import Awaitable, Callable
@@ -476,6 +477,7 @@ class LLMClient:
         publish_tool_event: Callable[..., Awaitable[None]] | None = None,
         history: list[dict[str, Any]] | None = None,
         call_mode: bool = False,
+        enable_thinking: bool = False,
     ) -> AgentLoopResult:
         """Run a bounded tool-calling loop until the model finishes or escalates.
 
@@ -493,8 +495,8 @@ class LLMClient:
         """
         if not self._config.api_key:
             return AgentLoopResult(
-                intent_type="complex",
-                response="This request is too complex for the fast path. Please use OpenClaw.",
+                intent_type="chat",
+                response="我这边还没有配置大模型 API key，所以没法回答这句。你可以先检查一下 LLM 设置。",
                 detail="LLM 未配置 API key",
                 stop_reason="missing_api_key",
             )
@@ -577,7 +579,7 @@ class LLMClient:
             use_model = audio_model if (turn_index == 1 and audio_model) else None
 
             async def _on_reasoning(chunk: str) -> None:
-                if on_progress is not None:
+                if enable_thinking and on_progress is not None:
                     await on_progress("llm_thinking_delta", chunk, "llm")
 
             async def _on_content(chunk: str) -> None:
@@ -591,13 +593,14 @@ class LLMClient:
                 log_context={"text": text or "[audio]", "turn_index": turn_index},
                 tool_choice=choice,
                 model_override=use_model,
+                enable_thinking=enable_thinking,
                 on_reasoning_delta=_on_reasoning,
                 on_content_delta=_on_content,
             )
             if message is None:
                 return AgentLoopResult(
-                    intent_type="complex",
-                    response="This request is too complex for the fast path. Please use OpenClaw.",
+                    intent_type="chat",
+                    response="我这边连接大模型接口超时了，刚才那句没处理成功。你可以稍等一下再试。",
                     detail="LLM 请求失败",
                     stop_reason="request_failed",
                     tool_calls=tool_records,
@@ -1380,6 +1383,7 @@ class LLMClient:
         log_context: dict[str, Any] | None = None,
         tool_choice: str | dict[str, Any] = "auto",
         model_override: str | None = None,
+        enable_thinking: bool = False,
         on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any] | None:
@@ -1397,6 +1401,7 @@ class LLMClient:
                 log_context=log_context,
                 tool_choice=tool_choice,
                 model_override=model_override,
+                enable_thinking=enable_thinking,
                 on_reasoning_delta=on_reasoning_delta,
                 on_content_delta=on_content_delta,
             )
@@ -1424,6 +1429,8 @@ class LLMClient:
         }
         if is_mimo:
             body["max_completion_tokens"] = max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
+            if not enable_thinking:
+                body["chat_template_kwargs"] = {"enable_thinking": False}
         else:
             body["max_tokens"] = self._config.max_tokens
 
@@ -1437,6 +1444,44 @@ class LLMClient:
         content_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        first_chunk_timeout_s = float(os.environ.get("LAMPGO_LLM_STREAM_FIRST_CHUNK_TIMEOUT_S", "12"))
+
+        async def _fallback_non_stream(reason: str) -> dict[str, Any] | None:
+            fallback_body = dict(body)
+            fallback_body["stream"] = False
+            logger.warning(
+                "llm_client.stream_fallback_nonstream",
+                reason=reason,
+                model=model,
+                timeout_s=first_chunk_timeout_s,
+            )
+            try:
+                timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{self._api_base}/chat/completions",
+                        json=fallback_body,
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    return self._extract_message(resp.json())
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "llm_client.nonstream_fallback_failed",
+                    status_code=exc.response.status_code,
+                    error_type=type(exc).__name__,
+                )
+                return None
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "llm_client.nonstream_fallback_failed",
+                    error_type=type(exc).__name__,
+                    request_url=str(exc.request.url) if exc.request is not None else "",
+                )
+                return None
+            except Exception as exc:
+                logger.warning("llm_client.nonstream_fallback_failed", error_type=type(exc).__name__)
+                return None
 
         try:
             timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
@@ -1448,13 +1493,29 @@ class LLMClient:
                     headers=headers,
                 ) as resp:
                     resp.raise_for_status()
-                    async for raw_line in resp.aiter_lines():
+                    line_iter = resp.aiter_lines().__aiter__()
+                    saw_first_chunk = False
+                    while True:
+                        try:
+                            raw_line = await asyncio.wait_for(
+                                line_iter.__anext__(),
+                                timeout=first_chunk_timeout_s if not saw_first_chunk else 180.0,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            if not saw_first_chunk:
+                                fallback = await _fallback_non_stream("first_stream_chunk_timeout")
+                                if fallback is not None:
+                                    return fallback
+                            raise
                         line = raw_line.strip()
                         if not line or not line.startswith("data:"):
                             continue
                         payload = line[5:].strip()
                         if payload == "[DONE]":
                             break
+                        saw_first_chunk = True
                         try:
                             chunk = json.loads(payload)
                         except json.JSONDecodeError:
@@ -1498,10 +1559,21 @@ class LLMClient:
                                 tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
 
         except httpx.HTTPStatusError as exc:
-            logger.exception("llm_client.stream_failed", status_code=exc.response.status_code)
+            logger.warning(
+                "llm_client.stream_failed",
+                status_code=exc.response.status_code,
+                error_type=type(exc).__name__,
+            )
             return None
-        except Exception:
-            logger.exception("llm_client.stream_failed")
+        except httpx.RequestError as exc:
+            logger.warning(
+                "llm_client.stream_failed",
+                error_type=type(exc).__name__,
+                request_url=str(exc.request.url) if exc.request is not None else "",
+            )
+            return None
+        except Exception as exc:
+            logger.warning("llm_client.stream_failed", error_type=type(exc).__name__)
             return None
 
         message: dict[str, Any] = {"content": "".join(content_parts)}
@@ -1533,6 +1605,7 @@ class LLMClient:
         log_context: dict[str, Any] | None,
         tool_choice: str | dict[str, Any],
         model_override: str | None,
+        enable_thinking: bool,
         on_reasoning_delta: Callable[[str], Awaitable[None]] | None,
         on_content_delta: Callable[[str], Awaitable[None]] | None,
     ) -> dict[str, Any] | None:

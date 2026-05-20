@@ -15,6 +15,7 @@ import queue
 import threading
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import structlog
 
@@ -27,6 +28,25 @@ RECONNECT_DELAY_S = 3.0
 MAX_RECONNECT_DELAY_S = 30.0
 WS_RECV_TIMEOUT_S = 5.0
 STALE_AUDIO_S = 10.0
+
+
+def _stream_ws_port(port: int) -> int:
+    """ESP32 firmware hosts media WebSockets on the stream server."""
+    return port + 1 if port else 81
+
+
+def redact_ws_owner_token(url: str | None) -> str | None:
+    """Return a log/UI-safe WebSocket URL with the pairing token hidden."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        query = urlencode(
+            [(key, "<redacted>" if key == "token" else value) for key, value in parse_qsl(parts.query, keep_blank_values=True)]
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except Exception:
+        return url.replace("token=", "token=<redacted>&")
 
 
 class Esp32AudioCapture:
@@ -114,7 +134,7 @@ class Esp32AudioCapture:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.warning("esp32_audio.ws_error", url=url, error=str(exc))
+                logger.warning("esp32_audio.ws_error", url=redact_ws_owner_token(url), error=str(exc))
 
             if self._running:
                 await asyncio.sleep(delay)
@@ -129,9 +149,10 @@ class Esp32AudioCapture:
             self._running = False
             return
 
-        logger.info("esp32_audio.connecting", url=url)
+        safe_url = redact_ws_owner_token(url)
+        logger.info("esp32_audio.connecting", url=safe_url)
         async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
-            logger.info("esp32_audio.connected", url=url)
+            logger.info("esp32_audio.connected", url=safe_url)
             self._connected = True
             self._last_frame_at = time.monotonic()
             try:
@@ -163,27 +184,27 @@ def build_ws_audio_url(esp32: Esp32DeviceManager) -> str | None:
     """Build the ``ws://host:port/ws/audio`` URL for the active ESP32.
 
     Prefers ``dev.ip`` over ``dev.host`` to avoid flaky mDNS resolution.
+    This intentionally doesn't require ``is_online()``: HTTP health checks can
+    time out while ESP32 streaming WebSockets are still reachable.
     """
-    if not esp32.is_online():
-        return None
     dev = esp32._pick_active()
     if dev is None:
         return None
     host = dev.ip or dev.host
-    port = dev.port or 80
-    return f"ws://{host}:{port}/ws/audio"
+    port = _stream_ws_port(dev.port or 80)
+    query = f"?{esp32.ws_owner_query()}" if hasattr(esp32, "ws_owner_query") else ""
+    return f"ws://{host}:{port}/ws/audio{query}"
 
 
 def build_ws_events_url(esp32: Esp32DeviceManager) -> str | None:
     """Build the ``ws://host:port/ws/events`` URL for ESP32 device events."""
-    if not esp32.is_online():
-        return None
     dev = esp32._pick_active()
     if dev is None:
         return None
     host = dev.ip or dev.host
-    port = dev.port or 80
-    return f"ws://{host}:{port}/ws/events"
+    port = _stream_ws_port(dev.port or 80)
+    query = f"?{esp32.ws_owner_query()}" if hasattr(esp32, "ws_owner_query") else ""
+    return f"ws://{host}:{port}/ws/events{query}"
 
 
 class Esp32AudioSession:
@@ -199,6 +220,7 @@ class Esp32AudioSession:
     def __init__(self, esp32: Esp32DeviceManager) -> None:
         self._esp32 = esp32
         self._pcm = bytearray()
+        self._last_pcm_bytes = 0
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._running = False
@@ -206,6 +228,10 @@ class Esp32AudioSession:
     @property
     def is_recording(self) -> bool:
         return self._running
+
+    @property
+    def last_pcm_bytes(self) -> int:
+        return self._last_pcm_bytes
 
     async def start(self) -> bool:
         """Begin recording. Returns False if device is offline."""
@@ -217,7 +243,7 @@ class Esp32AudioSession:
         self._stop_event.clear()
         self._running = True
         self._task = asyncio.create_task(self._record_loop(url))
-        logger.info("esp32_audio.session_start", url=url)
+        logger.info("esp32_audio.session_start", url=redact_ws_owner_token(url))
         return True
 
     async def stop(self) -> bytes | None:
@@ -251,6 +277,8 @@ class Esp32AudioSession:
         deadline = asyncio.get_event_loop().time() + self.MAX_DURATION_S
         try:
             async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
+                self._esp32.mark_active_healthy()
+                frames = 0
                 while not self._stop_event.is_set():
                     if asyncio.get_event_loop().time() > deadline:
                         break
@@ -263,13 +291,21 @@ class Esp32AudioSession:
                         break
                     if isinstance(data, bytes):
                         self._pcm.extend(data)
+                        frames += 1
+                        if frames == 1 or frames % 100 == 0:
+                            logger.info(
+                                "esp32_audio.session_frame",
+                                frames=frames,
+                                pcm_so_far=len(self._pcm),
+                            )
         except Exception:
-            logger.info("esp32_audio.session_ws_ended", url=url, pcm_so_far=len(self._pcm))
+            logger.info("esp32_audio.session_ws_ended", url=redact_ws_owner_token(url), pcm_so_far=len(self._pcm))
 
     def _build_wav(self) -> bytes | None:
         import struct
 
         pcm_bytes = bytes(self._pcm)
+        self._last_pcm_bytes = len(pcm_bytes)
         self._pcm.clear()
         if len(pcm_bytes) < self.SAMPLE_RATE:
             logger.warning("esp32_audio.session_too_short", bytes=len(pcm_bytes))

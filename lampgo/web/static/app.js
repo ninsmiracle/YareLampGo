@@ -6,6 +6,7 @@
   const chatMessages = document.getElementById("chat-messages");
   const chatForm = document.getElementById("chat-form");
   const chatInput = document.getElementById("chat-input");
+  const chatThinkingToggle = document.getElementById("chat-thinking-toggle");
   const connDot = document.getElementById("conn-dot");
   const connText = document.getElementById("conn-text");
   const connBadge = document.getElementById("conn-badge");
@@ -382,6 +383,23 @@
 
   let ws = null;
   let reqCounter = 0;
+  const WEB_PAGE_OWNER_KEY = "lampgo.webPageOwner";
+  const WEB_PAGE_OWNER_TTL_MS = 30000;
+  const WEB_PAGE_OWNER_REFRESH_MS = 5000;
+  const webPageClientId = (() => {
+    try {
+      let id = sessionStorage.getItem("lampgo.webPageClientId");
+      if (!id) {
+        id = `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+        sessionStorage.setItem("lampgo.webPageClientId", id);
+      }
+      return id;
+    } catch {
+      return `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+    }
+  })();
+  let webPageOwnerActive = true;
+  let webPageOwnerTimer = null;
   const pendingMessages = new Map();
   const pendingUserMessages = new Map();
   const pendingUserEntries = new Map(); // requestId -> { session, entry } for live-transcribed messages
@@ -1618,7 +1636,91 @@
 
   /* ---- WebSocket ---- */
 
+  function readWebPageOwner() {
+    try {
+      const raw = localStorage.getItem(WEB_PAGE_OWNER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeWebPageOwner() {
+    if (!webPageOwnerActive) return;
+    try {
+      const now = Date.now();
+      localStorage.setItem(WEB_PAGE_OWNER_KEY, JSON.stringify({
+        owner: webPageClientId,
+        url: location.href,
+        updatedAt: now,
+        expiresAt: now + WEB_PAGE_OWNER_TTL_MS,
+      }));
+    } catch (err) {
+      console.warn("[page] owner lock unavailable:", err);
+    }
+  }
+
+  function releaseWebPageOwner() {
+    if (webPageOwnerTimer) {
+      clearInterval(webPageOwnerTimer);
+      webPageOwnerTimer = null;
+    }
+    try {
+      const current = readWebPageOwner();
+      if (current && current.owner === webPageClientId) {
+        localStorage.removeItem(WEB_PAGE_OWNER_KEY);
+      }
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  function deactivateSecondaryPage(reason) {
+    if (!webPageOwnerActive) return;
+    webPageOwnerActive = false;
+    releaseWebPageOwner();
+    try { stopAllTts(); } catch (_) { /* ignore */ }
+    try {
+      if (lkRoom || browserCallStartPromise) stopBrowserLiveKitCall();
+    } catch (_) {
+      // The call module may not be initialized yet.
+    }
+    if (ws) {
+      const oldWs = ws;
+      ws = null;
+      try { oldWs.close(); } catch (_) { /* ignore */ }
+    }
+    setConnected(false);
+    if (btnCallStart) btnCallStart.disabled = true;
+    if (btnCallEnd) btnCallEnd.disabled = true;
+    console.info("[page] secondary Lampgo page disconnected:", reason || "another page is active");
+  }
+
+  function startWebPageOwnerHeartbeat() {
+    writeWebPageOwner();
+    if (webPageOwnerTimer) clearInterval(webPageOwnerTimer);
+    webPageOwnerTimer = window.setInterval(writeWebPageOwner, WEB_PAGE_OWNER_REFRESH_MS);
+    window.addEventListener("storage", (ev) => {
+      if (ev.key !== WEB_PAGE_OWNER_KEY || !ev.newValue) return;
+      try {
+        const next = JSON.parse(ev.newValue);
+        if (
+          next &&
+          next.owner &&
+          next.owner !== webPageClientId &&
+          Number(next.expiresAt || 0) > Date.now()
+        ) {
+          deactivateSecondaryPage("another page claimed ownership");
+        }
+      } catch {
+        // Ignore malformed storage events.
+      }
+    });
+    window.addEventListener("beforeunload", releaseWebPageOwner);
+  }
+
   function connect() {
+    if (!webPageOwnerActive) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}/ws`);
 
@@ -1644,7 +1746,7 @@
 
     ws.onclose = () => {
       setConnected(false);
-      setTimeout(connect, 2000);
+      if (webPageOwnerActive) setTimeout(connect, 2000);
     };
 
     ws.onerror = () => ws.close();
@@ -1909,11 +2011,12 @@
     if (!micPopoverEl) return;
     const granted = micDevicesCache.some((d) => d.label);
     const esp = cameraCache.esp32;
+    const espVisible = !!(esp && !esp.hidden && !esp.needs_firmware_update);
     const espOnline = esp && esp.online;
     const espHost = (esp && esp.host) || "";
     const items = [
       { id: "", label: "系统默认麦克风", meta: "跟随浏览器/操作系统设置", group: "browser" },
-      { id: "esp32", label: "ESP32 无线麦克风", meta: espOnline ? `${espHost} · 在线` : "离线", group: "esp32" },
+      ...(espVisible ? [{ id: "esp32", label: "ESP32 无线麦克风", meta: espOnline ? `${espHost} · 在线` : "离线", group: "esp32" }] : []),
       ...micDevicesCache.map((d, i) => ({
         id: d.deviceId,
         label: d.label || `麦克风 ${d.deviceId.slice(0, 8) || i + 1}`,
@@ -1922,7 +2025,7 @@
       })),
     ];
     const subtitle = granted
-      ? `检测到 ${micDevicesCache.length} 个本地 + ESP32`
+      ? `检测到 ${micDevicesCache.length} 个本地${espVisible ? " + ESP32" : ""}`
       : "设备名称需要麦克风授权后显示";
     renderDevicePopover(micPopoverEl, {
       title: "麦克风输入",
@@ -2041,11 +2144,12 @@
     const { cameras, active, available, reason, esp32 } = cameraCache;
     const items = [];
     items.push({ id: "", label: "关闭摄像头", meta: "禁用视觉输入", group: "off" });
-    if (esp32 && esp32.enabled !== false) {
+    const espVisible = !!(esp32 && !esp32.hidden && !esp32.needs_firmware_update);
+    if (espVisible && esp32.enabled !== false) {
       const status = esp32.online ? "在线" : "离线";
       const host = esp32.host || "自动发现";
       items.push({ id: "esp32", label: "ESP32 无线摄像头", meta: `${host} · ${status}`, group: "esp32" });
-    } else {
+    } else if (!esp32 || (!esp32.hidden && !esp32.needs_firmware_update)) {
       items.push({ id: "esp32", label: "ESP32 无线摄像头", meta: "未启用 · 点击启用", group: "esp32" });
     }
     cameras.forEach((c) => {
@@ -2060,7 +2164,7 @@
     let subtitle = "";
     if (loading) subtitle = "正在探测可用摄像头...";
     else if (!available) subtitle = reason || "摄像头探测不可用";
-    else subtitle = `已探测 ${localCount} 个本地 + ESP32 · 运行时切换`;
+    else subtitle = `已探测 ${localCount} 个本地${espVisible ? " + ESP32" : ""} · 运行时切换`;
     renderDevicePopover(cameraPopoverEl, {
       title: "摄像头设备",
       subtitle,
@@ -2328,28 +2432,50 @@
         prevCallState !== "active" &&
         prevCallState !== "leaving"
       ) {
-        startBrowserLiveKitCall({ reason: "wake" });
+        enterBrowserLiveKitCall("wake");
       }
+      return;
+    }
+
+    if (evt === "Esp32AudioRelayStatus") {
+      if (data.state === "connecting") addCallSystemNote("正在连接 ESP32 麦克风…");
+      else if (data.state === "connected") addCallSystemNote("ESP32 麦克风已接入，正在听你说话…");
+      else if (data.state === "closed") addCallSystemNote("ESP32 麦克风通道已关闭");
+      return;
+    }
+    if (evt === "Esp32AudioRelayError") {
+      addCallSystemNote(`ESP32 麦克风连接失败：${data.error || "未知错误"}`);
       return;
     }
 
     if (evt === "VoiceUserText" && data.user_text && data.request_id) {
+      touchBrowserCallActivity("voice_user_text");
       // A new user utterance arrived — if we were already counting down to a
       // goodbye-induced hangup, abort it so the conversation can continue.
       if (hangupPending) hangupCancelled = true;
-      if (!callSessionId || !sessions.find((s) => s.id === callSessionId)) {
-        createCallSession();
+      ensureLiveCallSessionVisible();
+      if (!callUserRequestIds.has(data.request_id)) {
+        addCallUserBubble(data.user_text);
+        callUserRequestIds.add(data.request_id);
+        pushCallMessage("user", data.user_text);
       }
-      if (currentView !== "call") showView("call");
-      addCallUserBubble(data.user_text);
-      addCallAssistantBubble(data.request_id, data.user_text, callPreemptedAwaitingResponse);
+      const existingBubble = pendingMessages.get(data.request_id);
+      if (existingBubble) {
+        updateCallAssistantQuote(existingBubble, data.user_text);
+        clearAssistantLoadingDots(existingBubble);
+      } else {
+        addCallAssistantBubble(data.request_id, data.user_text, callPreemptedAwaitingResponse);
+      }
       callPreemptedAwaitingResponse = false;
-      pushCallMessage("user", data.user_text);
       return;
     }
 
     const requestId = data.request_id || "";
-    const bubble = requestId ? pendingMessages.get(requestId) : null;
+    let bubble = requestId ? pendingMessages.get(requestId) : null;
+    if (!bubble && requestId && shouldCreateCallBubbleForEvent(evt)) {
+      ensureLiveCallSessionVisible();
+      bubble = addCallAssistantBubble(requestId, "正在识别语音…", true);
+    }
     if (!bubble) return;
 
     const log = ensureActivityLog(bubble);
@@ -2363,6 +2489,7 @@
         break;
       case "IntentProgress":
         if (data.message) {
+          touchBrowserCallActivity("intent_progress");
           if (data.stage === "audio_transcribed") {
             updateUserBubbleText(requestId, data.message.replace(/^听到：\s*/, ""));
           }
@@ -2455,7 +2582,10 @@
         addStep(preludeEl, "已取消", "error");
         break;
       case "ChatMessage":
-        if (data.content) appendTextToBubble(bubble, data.content);
+        if (data.content) {
+          touchBrowserCallActivity("chat_message");
+          appendTextToBubble(bubble, data.content);
+        }
         break;
     }
 
@@ -2487,6 +2617,15 @@
       return `${stage}${data.message || ""}`.trim();
     }
     if (evtName === "IntentRouting") return data.text || "";
+    if (evtName === "WakeWordDetected") return data.model ? `model=${data.model}` : "wake detected";
+    if (evtName === "VoiceUserText") return data.user_text || "";
+    if (evtName === "ConversationStateChanged") return data.state || "";
+    if (evtName === "Esp32AudioRelayStatus") {
+      const state = data.state || "";
+      const frames = data.frames != null ? ` · frames=${data.frames}` : "";
+      return `${state}${frames}`;
+    }
+    if (evtName === "Esp32AudioRelayError") return data.error || "";
     if (evtName === "IntentResolved") {
       const parts = [data.intent_type, data.source, data.detail].filter(Boolean);
       return parts.join(" · ");
@@ -3427,7 +3566,13 @@
 
     const requestId = nextId();
     addAssistantBubble(requestId);
-    send({ type: "text", input: text, request_id: requestId, history });
+    send({
+      type: "text",
+      input: text,
+      request_id: requestId,
+      history,
+      enable_thinking: !!(chatThinkingToggle && chatThinkingToggle.checked),
+    });
   });
 
   const VOICE_DOTS_HTML = '<span class="voice-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
@@ -4285,6 +4430,7 @@
 
   let callSessionId = null;
   let prevCallState = "idle";
+  const callUserRequestIds = new Set();
   let lkRoom = null;
   let lkLocalTrack = null;
   let lkModulePromise = null;
@@ -4293,6 +4439,8 @@
   const CALL_LOCK_TTL_MS = 45000;
   const CALL_LOCK_REFRESH_MS = 10000;
   const CALL_WAKE_FRESH_MS = 15000;
+  const CALL_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+  const CALL_AUDIO_ACTIVITY_THROTTLE_MS = 1000;
   const browserCallClientId = (() => {
     try {
       let id = sessionStorage.getItem("lampgo.browserCallClientId");
@@ -4307,11 +4455,17 @@
   })();
   let browserCallStartPromise = null;
   let browserCallLockTimer = null;
+  let browserCallIdleTimer = null;
+  let browserCallLastActivityAt = 0;
+  let browserCallLastAudioActivityAt = 0;
+  let lkRoomName = "";
+  let lkClientCallId = "";
 
   let esp32AudioCtx = null;
   let esp32WorkletNode = null;
   let esp32MediaStream = null;
   let esp32RelayActive = false;
+  let esp32MicRelayStats = null;
   let esp32SpeakerWs = null;
   let esp32SpeakerWsOpening = null;
   let esp32SpeakerPendingFrames = [];
@@ -4320,6 +4474,7 @@
   let esp32SpeakerSource = null;
   let esp32SpeakerProcessor = null;
   let esp32SpeakerKeepaliveEl = null;
+  let esp32SpeakerRelayStats = null;
   let remoteAudioTrack = null;
   let hangupPending = false;
   let hangupCancelled = false;
@@ -4357,6 +4512,44 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
 
   function setBrowserCallState(state) {
     updateCallViewState(state);
+  }
+
+  function clearBrowserCallIdleTimer() {
+    if (browserCallIdleTimer) {
+      window.clearTimeout(browserCallIdleTimer);
+      browserCallIdleTimer = null;
+    }
+  }
+
+  function scheduleBrowserCallIdleTimer() {
+    clearBrowserCallIdleTimer();
+    if (!lkRoom && !browserCallStartPromise) return;
+    const last = browserCallLastActivityAt || Date.now();
+    const waitMs = Math.max(1000, CALL_IDLE_TIMEOUT_MS - (Date.now() - last));
+    browserCallIdleTimer = window.setTimeout(() => {
+      browserCallIdleTimer = null;
+      if (!lkRoom) return;
+      const idleMs = Date.now() - (browserCallLastActivityAt || Date.now());
+      if (idleMs >= CALL_IDLE_TIMEOUT_MS) {
+        console.info("[call] idle timeout; closing LiveKit room", { idleMs });
+        addCallSystemNote("5 分钟没有输入或输出，已自动结束通话");
+        stopBrowserLiveKitCall("idle_timeout");
+      } else {
+        scheduleBrowserCallIdleTimer();
+      }
+    }, waitMs);
+  }
+
+  function touchBrowserCallActivity(source, options = {}) {
+    if (!lkRoom && !browserCallStartPromise) return;
+    const now = Date.now();
+    if (options.audio) {
+      const throttleMs = Number(options.throttleMs || CALL_AUDIO_ACTIVITY_THROTTLE_MS);
+      if (now - browserCallLastAudioActivityAt < throttleMs) return;
+      browserCallLastAudioActivityAt = now;
+    }
+    browserCallLastActivityAt = now;
+    scheduleBrowserCallIdleTimer();
   }
 
   function readBrowserCallLock() {
@@ -4488,6 +4681,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   const ESP32_CALL_SPEAKER_FRAME_SAMPLES = 320; // 20 ms @ 16 kHz.
   const ESP32_CALL_SPEAKER_MAX_PENDING_FRAMES = 80;
   const ESP32_CALL_SPEAKER_MAX_BUFFERED_BYTES = ESP32_CALL_SPEAKER_FRAME_SAMPLES * 2 * 24;
+  const ESP32_CALL_SPEAKER_FULL_SCALE_PEAK = 0.82;
 
   function openEsp32CallSpeakerWs() {
     if (esp32SpeakerWs && esp32SpeakerWs.readyState === WebSocket.OPEN) {
@@ -4630,7 +4824,49 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
 
   function sendEsp32SpeakerSamples(samples, inputRate) {
     if (!samples || !samples.length) return;
-    const pcm16 = floatToPcm16(downsampleFloat32(samples, inputRate, ESP32_CALL_SPEAKER_SAMPLE_RATE));
+    const resampled = downsampleFloat32(samples, inputRate, ESP32_CALL_SPEAKER_SAMPLE_RATE);
+    let sumSq = 0;
+    let peak = 0;
+    for (let i = 0; i < resampled.length; i++) {
+      const v = resampled[i];
+      sumSq += v * v;
+      const abs = Math.abs(v);
+      if (abs > peak) peak = abs;
+    }
+    const rms = Math.sqrt(sumSq / resampled.length);
+    const volumePct = esp32VolumeSlider ? clampEsp32Volume(esp32VolumeSlider.value) : 70;
+    const targetPeak = ESP32_CALL_SPEAKER_FULL_SCALE_PEAK * (volumePct / 100);
+    const adaptiveGain = peak > targetPeak && peak > 0 ? targetPeak / peak : 1.0;
+    if (esp32SpeakerRelayStats) {
+      esp32SpeakerRelayStats.frames += 1;
+      if (rms > 0.01) {
+        esp32SpeakerRelayStats.voicedFrames += 1;
+        esp32SpeakerRelayStats.lastVoiceAt = Date.now();
+        touchBrowserCallActivity("tts_audio", { audio: true });
+      }
+      if (
+        esp32SpeakerRelayStats.frames === 1 ||
+        esp32SpeakerRelayStats.frames % 100 === 0 ||
+        (rms > 0.01 && esp32SpeakerRelayStats.voicedFrames <= 3)
+      ) {
+        console.log(
+          "[call] ESP32 speaker relay audio",
+          `frames=${esp32SpeakerRelayStats.frames}`,
+          `voiced=${esp32SpeakerRelayStats.voicedFrames}`,
+          `rms=${rms.toFixed(4)}`,
+          `peak=${peak.toFixed(4)}`,
+          `target=${targetPeak.toFixed(4)}`,
+          `gain=${adaptiveGain.toFixed(2)}`,
+          `vol=${volumePct}`,
+          `rate=${inputRate}`,
+        );
+      }
+    }
+    const normalized = new Float32Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      normalized[i] = Math.max(-1, Math.min(1, resampled[i] * adaptiveGain));
+    }
+    const pcm16 = floatToPcm16(normalized);
     enqueueEsp32SpeakerPcm(pcm16);
   }
 
@@ -4643,6 +4879,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     cleanupEsp32SpeakerRelay();
     esp32SpeakerPendingFrames = [];
     esp32SpeakerPcmRemainder = new Int16Array(0);
+    esp32SpeakerRelayStats = { frames: 0, voicedFrames: 0, lastVoiceAt: 0 };
     const mediaTrack = remoteTrack && (remoteTrack.mediaStreamTrack || remoteTrack._mediaStreamTrack);
     if (!mediaTrack) {
       console.warn("[call] ESP32 speaker relay skipped: no MediaStreamTrack on remote track");
@@ -4675,7 +4912,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     esp32SpeakerSource.connect(esp32SpeakerProcessor);
     // Keep the processor alive without audible local playback.
     const silentGain = esp32SpeakerCtx.createGain();
-    silentGain.gain.value = 0;
+    silentGain.gain.value = 0.00001;
     esp32SpeakerProcessor.connect(silentGain);
     silentGain.connect(esp32SpeakerCtx.destination);
     esp32SpeakerProcessor._silentGain = silentGain;
@@ -4711,11 +4948,43 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       esp32SpeakerKeepaliveEl = null;
     }
     closeEsp32CallSpeakerWs(true);
+    esp32SpeakerRelayStats = null;
   }
 
   function feedEsp32Audio(pcmBytes) {
     if (!esp32WorkletNode) return;
     const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+    if (esp32MicRelayStats) {
+      let sumSq = 0;
+      let peak = 0;
+      for (let i = 0; i < int16.length; i++) {
+        const v = int16[i] / 32768;
+        sumSq += v * v;
+        const abs = Math.abs(v);
+        if (abs > peak) peak = abs;
+      }
+      const rms = int16.length ? Math.sqrt(sumSq / int16.length) : 0;
+      esp32MicRelayStats.frames += 1;
+      if (rms > 0.01) {
+        esp32MicRelayStats.voicedFrames += 1;
+        esp32MicRelayStats.lastVoiceAt = Date.now();
+        touchBrowserCallActivity("mic_audio", { audio: true });
+      }
+      if (
+        esp32MicRelayStats.frames === 1 ||
+        esp32MicRelayStats.frames % 100 === 0 ||
+        (rms > 0.01 && esp32MicRelayStats.voicedFrames <= 5)
+      ) {
+        console.log(
+          "[call] ESP32 mic relay audio",
+          `frames=${esp32MicRelayStats.frames}`,
+          `voiced=${esp32MicRelayStats.voicedFrames}`,
+          `rms=${rms.toFixed(4)}`,
+          `peak=${peak.toFixed(4)}`,
+          `ctx=${esp32AudioCtx ? esp32AudioCtx.state : "none"}`,
+        );
+      }
+    }
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) {
       float32[i] = int16[i] / 32768;
@@ -4738,6 +5007,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const dest = esp32AudioCtx.createMediaStreamDestination();
     esp32WorkletNode.connect(dest);
     esp32MediaStream = dest.stream;
+    esp32MicRelayStats = { frames: 0, voicedFrames: 0, lastVoiceAt: 0 };
 
     send({ type: "start_esp32_relay" });
     esp32RelayActive = true;
@@ -4758,7 +5028,16 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       try { esp32AudioCtx.close(); } catch (_) { /* ignore */ }
       esp32AudioCtx = null;
     }
+    esp32MicRelayStats = null;
     esp32MediaStream = null;
+  }
+
+  function enterBrowserLiveKitCall(reason = "manual") {
+    if (reason === "wake") {
+      ensureLiveCallSessionVisible();
+      addCallSystemNote("听到唤醒词，正在接入通话…");
+    }
+    return startBrowserLiveKitCall({ reason });
   }
 
   async function startBrowserLiveKitCall(options = {}) {
@@ -4778,25 +5057,31 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       setBrowserCallState("joining");
       const useEsp32 = selectedMicId === "esp32";
       const callAttemptId = `${browserCallClientId}_${Date.now().toString(36)}`;
+      const roomName = `lampgo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+      let room = null;
       try {
+        console.log("[call] starting LiveKit call", { reason, roomName, mic: useEsp32 ? "esp32" : (selectedMicId || "default") });
+        addCallSystemNote("正在获取 LiveKit 通话令牌…");
         const resp = await fetch("/api/livekit/token", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            room_name: "lampgo",
+            room_name: roomName,
             user_identity: `lampgo-web-${Date.now().toString(36)}`,
             voice_agent: "lampgo-jarvis",
             client_call_id: callAttemptId,
+            reason,
           }),
         });
         const body = await resp.json();
         if (!resp.ok || !body.ok) throw new Error((body && body.error) || `HTTP ${resp.status}`);
         const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
         const { token, serverUrl } = body.result;
-        const room = new Room({ adaptiveStream: false, dynacast: false });
+        room = new Room({ adaptiveStream: false, dynacast: false });
         room.on("trackSubscribed", (track) => {
           if (track.kind !== Track.Kind.Audio) return;
           remoteAudioTrack = track;
+          addCallSystemNote("收到 Agent 语音轨道，正在转发到 ESP32 扬声器…");
           if (useEsp32) {
             startEsp32SpeakerRelay(track).catch((err) => {
               console.error("[call] ESP32 speaker relay failed:", err);
@@ -4823,15 +5108,22 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           });
         });
         room.on("disconnected", () => {
+          const endedRoomName = lkRoomName;
+          const endedClientCallId = lkClientCallId;
           cleanupBrowserLiveKitCall();
           setBrowserCallState("idle");
+          notifyLiveKitRoomEnded(endedRoomName, "livekit_disconnected", endedClientCallId);
         });
         await room.connect(serverUrl, token);
+        lkRoomName = roomName;
+        lkClientCallId = callAttemptId;
+        addCallSystemNote("LiveKit 房间已连接，正在发布麦克风…");
 
         if (useEsp32) {
           const mediaTrack = await createEsp32AudioTrack();
           lkLocalTrack = new LocalAudioTrack(mediaTrack);
           console.log("[call] using ESP32 wireless mic via AudioWorklet");
+          addCallSystemNote("ESP32 无线麦克风轨道已创建");
         } else {
           const audioOptions = {
             echoCancellation: true,
@@ -4843,13 +5135,19 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         }
 
         await room.localParticipant.publishTrack(lkLocalTrack, { source: Track.Source.Microphone });
+        console.log("[call] local microphone track published", { reason, roomName, mic: useEsp32 ? "esp32" : (selectedMicId || "default") });
         lkRoom = room;
         setBrowserCallState("active");
+        touchBrowserCallActivity("room_connected");
+        addCallSystemNote("通话已连接，正在等待语音识别…");
         console.log("[call] LiveKit call started, mic:", useEsp32 ? "esp32" : "browser");
         return room;
       } catch (err) {
         console.error("[call] browser LiveKit start failed:", err);
         addCallSystemNote(`通话启动失败：${err.message || err}`);
+        if (room) {
+          try { room.disconnect(); } catch (_) { /* ignore */ }
+        }
         cleanupBrowserLiveKitCall();
         setBrowserCallState("idle");
         return null;
@@ -4946,10 +5244,15 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       cleanup();
     }
 
-    if (lkRoom) stopBrowserLiveKitCall();
+    if (lkRoom) stopBrowserLiveKitCall("goodbye");
   }
 
   function cleanupBrowserLiveKitCall() {
+    clearBrowserCallIdleTimer();
+    browserCallLastActivityAt = 0;
+    browserCallLastAudioActivityAt = 0;
+    lkRoomName = "";
+    lkClientCallId = "";
     if (lkLocalTrack) {
       try { lkLocalTrack.stop(); } catch (_) { /* ignore */ }
       lkLocalTrack = null;
@@ -4964,14 +5267,46 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     releaseBrowserCallLock();
   }
 
-  function stopBrowserLiveKitCall() {
+  function stopBrowserLiveKitCall(reason = "manual") {
     if (lkRoom) {
       const room = lkRoom;
+      const roomName = lkRoomName;
+      const clientCallId = lkClientCallId;
       cleanupBrowserLiveKitCall();
       try { room.disconnect(); } catch (_) { /* ignore */ }
+      notifyLiveKitRoomEnded(roomName, reason, clientCallId);
     }
     setBrowserCallState("idle");
   }
+
+  function notifyLiveKitRoomEnded(roomName, reason = "manual", clientCallId = "") {
+    if (!roomName) return;
+    const payload = JSON.stringify({
+      room_name: roomName,
+      reason,
+      client_call_id: clientCallId,
+    });
+    try {
+      if (navigator.sendBeacon) {
+        const blob = new Blob([payload], { type: "application/json" });
+        if (navigator.sendBeacon("/api/livekit/room/end", blob)) return;
+      }
+    } catch (_) {
+      // Fall through to fetch.
+    }
+    fetch("/api/livekit/room/end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+      keepalive: true,
+    }).catch((err) => {
+      console.warn("[call] failed to notify room end:", err);
+    });
+  }
+
+  window.addEventListener("beforeunload", () => {
+    if (lkRoomName) notifyLiveKitRoomEnded(lkRoomName, "page_unload", lkClientCallId);
+  });
 
   function createCallSession() {
     const id = `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -5003,6 +5338,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       session.title = "\u{1F4DE} " + (text.length > 24 ? text.slice(0, 24) + "…" : text);
     }
     persistSessions();
+  }
+
+  function ensureLiveCallSessionVisible() {
+    if (!callSessionId || !sessions.find((s) => s.id === callSessionId)) {
+      createCallSession();
+    }
+    if (currentView !== "call") showView("call");
+    if (callEmptyState) callEmptyState.style.display = "none";
   }
 
   function finalizeCallSession() {
@@ -5062,7 +5405,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
 
   if (btnCallStart) {
     btnCallStart.addEventListener("click", () => {
-      startBrowserLiveKitCall({ reason: "manual" });
+      enterBrowserLiveKitCall("manual");
     });
   }
   if (btnCallEnd) {
@@ -5133,6 +5476,34 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return bubble;
   }
 
+  function updateCallAssistantQuote(bubble, quoteText) {
+    if (!bubble || !quoteText) return;
+    const quoteEl = bubble.querySelector(".reply-quote-text");
+    if (!quoteEl) return;
+    const truncated = quoteText.length > 40 ? quoteText.slice(0, 40) + "…" : quoteText;
+    quoteEl.textContent = truncated;
+  }
+
+  function shouldCreateCallBubbleForEvent(evt) {
+    if (
+      evt !== "IntentProgress" &&
+      evt !== "ToolCallPlanned" &&
+      evt !== "ToolCallFinished" &&
+      evt !== "AgentFinished" &&
+      evt !== "ChatMessage"
+    ) {
+      return false;
+    }
+    return !!(
+      callSessionId ||
+      browserCallStartPromise ||
+      lkRoom ||
+      prevCallState === "joining" ||
+      prevCallState === "active" ||
+      prevCallState === "leaving"
+    );
+  }
+
   // 把通话视图恢复到“空白起点”：移除所有 bubble、显示 empty-state、清掉当前关联的 callSessionId。
   // 注意不要在直播通话进行中（active/joining/leaving）调用这个函数，否则会抹掉正在进行的 DOM。
   function resetCallView() {
@@ -5146,6 +5517,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     if (callEmptyState) callEmptyState.style.display = "";
     callSessionId = null;
     callPreemptedAwaitingResponse = false;
+    callUserRequestIds.clear();
   }
 
   function renderHistoricalCallUserBubble(text, ts) {
@@ -5666,7 +6038,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       const resp = await fetch("/api/device/capture-audio/stop", { method: "POST" });
       const data = await resp.json();
       if (!data.ok || !data.result || !data.result.audio_data) {
-        addSystemMessage("ESP32 录音太短或失败：" + (data.error || "未知错误"));
+        const message = data.error === "capture_no_frames"
+          ? "没有收到 ESP32 音频帧，请检查端侧麦克风流"
+          : "ESP32 录音太短或失败：" + (data.error || "未知错误");
+        addSystemMessage(message);
         return;
       }
       submitAudioData(data.result.audio_data);
@@ -5707,7 +6082,13 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const pushed = pushMessageToSession("user", "[语音消息]", { voice: true });
     if (pushed) pendingUserEntries.set(requestId, pushed);
     addAssistantBubble(requestId);
-    send({ type: "audio", audio_data: b64, request_id: requestId, history });
+    send({
+      type: "audio",
+      audio_data: b64,
+      request_id: requestId,
+      history,
+      enable_thinking: !!(chatThinkingToggle && chatThinkingToggle.checked),
+    });
   }
 
   async function finishRecording() {
@@ -7185,6 +7566,15 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     ],
   };
 
+  const ESP32_WAKE_MODEL_BY_CONFIG = {
+    hey_jarvis: "wn9_jarvis_tts",
+    wn9_jarvis_tts: "wn9_jarvis_tts",
+    wn9_xiaomeitongxue_tts: "wn9_xiaomeitongxue_tts",
+    wn9_xiaoyaxiaoya_tts2: "wn9_xiaoyaxiaoya_tts2",
+    wn9_xiaoluxiaolu_tts2: "wn9_xiaoluxiaolu_tts2",
+    wn9_hixiaoxing_tts: "wn9_hixiaoxing_tts",
+  };
+
   // Toggle the TTS Model ID input based on the current provider.
   //
   // Design rationale:
@@ -7359,6 +7749,30 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return { ok: true, skipped: false };
   }
 
+  async function pushEsp32WakeModelFromSavedValues(values) {
+    if (!values || values["voice.wake_word"] === undefined) {
+      return { ok: true, skipped: true, reason: "empty" };
+    }
+    const configuredWakeWord = String(values["voice.wake_word"] || "");
+    if (!configuredWakeWord) {
+      return { ok: true, skipped: true, reason: "disabled" };
+    }
+    const wakeModel = ESP32_WAKE_MODEL_BY_CONFIG[configuredWakeWord];
+    if (!wakeModel) {
+      return { ok: false, error: `未知唤醒词：${configuredWakeWord}` };
+    }
+    const res = await fetch("/api/device/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wake_model: wakeModel }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) {
+      return { ok: false, error: body.error || `HTTP ${res.status}` };
+    }
+    return { ok: true, skipped: false };
+  }
+
   async function saveCfgFromButton(btn) {
     // Collect inputs within the card that owns this save button. Group by the
     // field's API section (word before the first `.`) so a card can mix fields
@@ -7445,6 +7859,23 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         }
       } catch (err) {
         if (statusEl) statusEl.textContent = `已保存，但设备未同步：${err.message || "设备离线"}`;
+      }
+    }
+    if (!errors.length && primarySection === "voice" && grouped.voice && grouped.voice["voice.wake_word"] !== undefined) {
+      if (statusEl) statusEl.textContent = "已保存，正在同步 ESP32 唤醒词…";
+      try {
+        const pushed = await pushEsp32WakeModelFromSavedValues(grouped.voice);
+        if (statusEl) {
+          if (pushed.skipped && pushed.reason === "disabled") {
+            statusEl.textContent = "已保存，唤醒词已禁用";
+          } else if (pushed.ok) {
+            statusEl.textContent = pushed.skipped ? "已保存" : "已保存并同步到 ESP32";
+          } else {
+            statusEl.textContent = `已保存，但 ESP32 未同步：${pushed.error || "设备离线"}`;
+          }
+        }
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `已保存，但 ESP32 未同步：${err.message || "设备离线"}`;
       }
     }
     if (needsRestart.length) showColdRestartBanner(needsRestart);
@@ -7572,5 +8003,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   ensureIdleTimer();
   updateRecordButtonState();
   initEsp32VolumeControl();
+  startWebPageOwnerHeartbeat();
   connect();
 })();

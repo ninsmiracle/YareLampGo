@@ -106,6 +106,11 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
         )
 
     messages: list[dict] = body.get("messages", [])
+    chat_template_kwargs = body.get("chat_template_kwargs") if isinstance(body, dict) else None
+    if isinstance(chat_template_kwargs, dict) and "enable_thinking" in chat_template_kwargs:
+        enable_thinking = bool(chat_template_kwargs.get("enable_thinking"))
+    else:
+        enable_thinking = bool(body.get("enable_thinking"))
     user_text = _extract_user_text(messages)
     if not user_text:
         return StreamingResponse(
@@ -220,6 +225,7 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
             "request_id": request_id,
             "history": history,
             "call_mode": True,
+            "enable_thinking": enable_thinking,
         }))
         server._llm_active_task = task  # type: ignore[attr-defined]
         server._llm_active_request_id = request_id  # type: ignore[attr-defined]

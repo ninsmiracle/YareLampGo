@@ -26,6 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from lampgo.core.config import LLMConfig, WebConfig
 from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, IntentRouting
 from lampgo.core.led import LED_EXPRESSIONS
+from lampgo.device.audio_stream import redact_ws_owner_token
 from lampgo.perception.camera import CameraCapture
 from lampgo.web.ws_bridge import WsBridge
 
@@ -132,8 +133,10 @@ class WebGateway:
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
         self._livekit_token_lock = asyncio.Lock()
+        self._livekit_room_lock = asyncio.Lock()
         self._livekit_token_gate_until = 0.0
         self._livekit_token_gate_owner = ""
+        self._livekit_active_rooms: dict[str, dict[str, Any]] = {}
         self.app = self._build_app()
 
     def _build_app(self) -> Starlette:
@@ -158,6 +161,7 @@ class WebGateway:
             Route("/api/openclaw/tasks/{task_id:str}/confirm", self.api_openclaw_confirm, methods=["POST"]),
             Route("/api/openclaw/health", self.api_openclaw_health),
             Route("/api/livekit/token", self.api_livekit_token, methods=["POST"]),
+            Route("/api/livekit/room/end", self.api_livekit_room_end, methods=["POST"]),
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
             Route("/api/estop", self.api_estop, methods=["POST"]),
             # ---- user-editable config / persona / memory ----
@@ -175,6 +179,10 @@ class WebGateway:
             Route("/api/device/status", self.api_esp32_status, methods=["GET"]),
             Route("/api/device/snapshot", self.api_esp32_snapshot, methods=["GET"]),
             Route("/api/device/config", self.api_esp32_config, methods=["GET", "POST"]),
+            Route("/api/device/pair", self.api_esp32_pair, methods=["POST"]),
+            Route("/api/device/unpair", self.api_esp32_unpair, methods=["POST"]),
+            Route("/api/device/claim", self.api_esp32_claim, methods=["POST"]),
+            Route("/api/device/release", self.api_esp32_release, methods=["POST"]),
             Route("/api/device/reboot", self.api_esp32_reboot, methods=["POST"]),
             Route("/api/device/forget-wifi", self.api_esp32_forget_wifi, methods=["POST"]),
             Route("/api/device/probe", self.api_esp32_probe, methods=["POST"]),
@@ -571,7 +579,6 @@ class WebGateway:
             body = await request.json()
         except Exception:
             body = {}
-        from lampgo.voice.agent_sdk import AGENT_SDK_PORT
 
         room_name = str(body.get("room_name") or self.server.config.voice.livekit_room or "lampgo")
         user_identity = str(body.get("user_identity") or f"lampgo-web-{uuid.uuid4().hex[:8]}")
@@ -580,6 +587,15 @@ class WebGateway:
             logger.info("web.livekit_token_legacy_client_rejected", user_identity=user_identity)
             return JSONResponse({"ok": False, "error": "please refresh the web UI before starting a call"}, status_code=409)
         client_call_id = str(body.get("client_call_id"))
+        reason = str(body.get("reason") or "")
+        logger.info(
+            "web.livekit_token_requested",
+            room=room_name,
+            user_identity=user_identity,
+            voice_agent=voice_agent,
+            client_call_id=client_call_id,
+            reason=reason,
+        )
         async with self._livekit_token_lock:
             now = time.monotonic()
             if now < self._livekit_token_gate_until and self._livekit_token_gate_owner != client_call_id:
@@ -592,17 +608,14 @@ class WebGateway:
             self._livekit_token_gate_until = now + 3.0
             self._livekit_token_gate_owner = client_call_id
         try:
-            async with httpx_module.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    f"http://127.0.0.1:{AGENT_SDK_PORT}/rtc/token",
-                    json={
-                        "room_name": room_name,
-                        "user_identity": user_identity,
-                        "voice_agent": voice_agent,
-                    },
+            async with self._livekit_room_lock:
+                return await self._issue_livekit_token_locked(
+                    room_name=room_name,
+                    user_identity=user_identity,
+                    voice_agent=voice_agent,
+                    client_call_id=client_call_id,
+                    reason=reason,
                 )
-                resp.raise_for_status()
-                return JSONResponse({"ok": True, "result": resp.json()})
         except Exception as exc:
             async with self._livekit_token_lock:
                 if self._livekit_token_gate_owner == client_call_id:
@@ -610,6 +623,207 @@ class WebGateway:
                     self._livekit_token_gate_owner = ""
             logger.exception("web.livekit_token_failed")
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    async def _issue_livekit_token_locked(
+        self,
+        *,
+        room_name: str,
+        user_identity: str,
+        voice_agent: str,
+        client_call_id: str,
+        reason: str,
+    ) -> JSONResponse:
+        from lampgo.voice.agent_sdk import AGENT_SDK_PORT
+
+        await self._close_existing_livekit_rooms(
+            keep_room=room_name,
+            reason=f"new_{reason or 'call'}",
+            client_call_id=client_call_id,
+        )
+        agent_sdk = getattr(self.server, "_agent_sdk", None)
+        wait_ready = getattr(agent_sdk, "wait_ready", None)
+        if callable(wait_ready):
+            ready = await wait_ready(timeout_s=10.0)
+            if not ready:
+                logger.info(
+                    "web.livekit_token_agent_not_ready",
+                    room=room_name,
+                    user_identity=user_identity,
+                    voice_agent=voice_agent,
+                    client_call_id=client_call_id,
+                )
+                async with self._livekit_token_lock:
+                    if self._livekit_token_gate_owner == client_call_id:
+                        self._livekit_token_gate_until = 0.0
+                        self._livekit_token_gate_owner = ""
+                return JSONResponse(
+                    {"ok": False, "error": "voice agent is still starting"},
+                    status_code=503,
+                )
+        async with httpx_module.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{AGENT_SDK_PORT}/rtc/token",
+                json={
+                    "room_name": room_name,
+                    "user_identity": user_identity,
+                    "voice_agent": voice_agent,
+                },
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        self._livekit_active_rooms = {
+            room_name: {
+                "client_call_id": client_call_id,
+                "reason": reason,
+                "user_identity": user_identity,
+                "created_at": time.monotonic(),
+            }
+        }
+        logger.info(
+            "web.livekit_room_active",
+            room=room_name,
+            client_call_id=client_call_id,
+            reason=reason,
+        )
+        return JSONResponse({"ok": True, "result": result})
+
+    async def api_livekit_room_end(self, request: Request) -> JSONResponse:
+        """Hard-close a LiveKit room when the browser ends a call."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        room_name = str(body.get("room_name") or "").strip()
+        reason = str(body.get("reason") or "browser_end").strip() or "browser_end"
+        client_call_id = str(body.get("client_call_id") or "").strip()
+        rooms = [room_name] if room_name else list(self._livekit_active_rooms)
+        async with self._livekit_room_lock:
+            closed = await self._delete_livekit_rooms(
+                rooms,
+                reason=reason,
+                client_call_id=client_call_id,
+            )
+        return JSONResponse({"ok": True, "result": {"closed_rooms": closed}})
+
+    def _is_managed_livekit_room(self, room_name: str) -> bool:
+        room = str(room_name or "").strip()
+        if not room:
+            return False
+        configured = str(self.server.config.voice.livekit_room or "lampgo").strip() or "lampgo"
+        return room == configured or room.startswith(f"{configured}-") or room.startswith("lampgo-")
+
+    async def _close_existing_livekit_rooms(
+        self,
+        *,
+        keep_room: str,
+        reason: str,
+        client_call_id: str,
+    ) -> list[str]:
+        """Close every managed LiveKit room except ``keep_room`` before a new call starts."""
+        rooms: set[str] = {
+            name
+            for name in self._livekit_active_rooms
+            if name and name != keep_room and self._is_managed_livekit_room(name)
+        }
+
+        vc = self.server.config.voice
+        if vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret:
+            try:
+                from livekit import api
+
+                lkapi = api.LiveKitAPI(
+                    vc.livekit_url,
+                    vc.livekit_api_key,
+                    vc.livekit_api_secret,
+                )
+                try:
+                    listed = await lkapi.room.list_rooms(api.ListRoomsRequest())
+                    for room in listed.rooms:
+                        name = str(getattr(room, "name", "") or "")
+                        if name != keep_room and self._is_managed_livekit_room(name):
+                            rooms.add(name)
+                finally:
+                    await lkapi.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "web.livekit_room_list_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    keep_room=keep_room,
+                )
+
+        closed = await self._delete_livekit_rooms(
+            sorted(rooms),
+            reason=reason,
+            client_call_id=client_call_id,
+        )
+        if closed:
+            logger.info(
+                "web.livekit_rooms_closed_before_start",
+                keep_room=keep_room,
+                closed_rooms=closed,
+                reason=reason,
+                client_call_id=client_call_id,
+            )
+        return closed
+
+    async def _delete_livekit_rooms(
+        self,
+        rooms: list[str] | set[str] | tuple[str, ...],
+        *,
+        reason: str,
+        client_call_id: str = "",
+    ) -> list[str]:
+        """Delete LiveKit rooms and forget them from the local active-room registry."""
+        vc = self.server.config.voice
+        targets = sorted(
+            {
+                str(room or "").strip()
+                for room in rooms
+                if self._is_managed_livekit_room(str(room or "").strip())
+            }
+        )
+        if not targets:
+            return []
+        if not (vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret):
+            for room in targets:
+                self._livekit_active_rooms.pop(room, None)
+            logger.warning("web.livekit_room_delete_skipped_no_config", rooms=targets, reason=reason)
+            return []
+
+        from livekit import api
+
+        closed: list[str] = []
+        lkapi = api.LiveKitAPI(
+            vc.livekit_url,
+            vc.livekit_api_key,
+            vc.livekit_api_secret,
+        )
+        try:
+            for room in targets:
+                try:
+                    await lkapi.room.delete_room(api.DeleteRoomRequest(room=room))
+                    closed.append(room)
+                    logger.info(
+                        "web.livekit_room_deleted",
+                        room=room,
+                        reason=reason,
+                        client_call_id=client_call_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "web.livekit_room_delete_failed",
+                        room=room,
+                        reason=reason,
+                        client_call_id=client_call_id,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                finally:
+                    self._livekit_active_rooms.pop(room, None)
+        finally:
+            await lkapi.aclose()
+        return closed
 
     async def api_openclaw_confirm(self, request: Request) -> JSONResponse:
         body = await request.json()
@@ -1479,14 +1693,28 @@ class WebGateway:
         status = self.server.esp32.get_status()
         mic_streaming = False
         wake_event_clients = 0
+        wake_ready = False
+        wake_model = ""
+        wake_requested_model = ""
+        wake_supported_models: list[str] = []
         if cfg.mic_enabled and self.server.esp32:
             try:
-                device_status_code, device_body, _ = await self.server.esp32.proxy_get("/device/status")
+                device_status_code, device_body, _ = await asyncio.wait_for(
+                    self.server.esp32.proxy_get("/device/status"),
+                    timeout=1.5,
+                )
                 if device_status_code == 200 and isinstance(device_body, dict):
                     mic_streaming = bool(device_body.get("mic_streaming") and device_body.get("wake_ready"))
                     wake_event_clients = int(device_body.get("wake_event_clients") or 0)
+                    wake_ready = bool(device_body.get("wake_ready"))
+                    wake_model = str(device_body.get("wake_model") or "")
+                    wake_requested_model = str(device_body.get("wake_requested_model") or "")
+                    raw_models = device_body.get("wake_supported_models") or []
+                    if isinstance(raw_models, list):
+                        wake_supported_models = [str(m) for m in raw_models if m]
             except Exception:
                 pass
+        status = self.server.esp32.get_status()
         return JSONResponse(
             {
                 "ok": True,
@@ -1495,10 +1723,17 @@ class WebGateway:
                     "preferred_host": cfg.preferred_host,
                     "mic_enabled": cfg.mic_enabled,
                     "mic_streaming": mic_streaming,
+                    "wake_ready": wake_ready,
+                    "wake_model": wake_model,
+                    "wake_requested_model": wake_requested_model,
+                    "wake_supported_models": wake_supported_models,
                     "wake_event_clients": wake_event_clients,
                     "configured": status["configured"],
                     "online": status["online"],
                     "session_used": status["session_used"],
+                    "owner_id": status.get("owner_id"),
+                    "owner_label": status.get("owner_label"),
+                    "blocked_devices_count": status.get("blocked_devices_count", 0),
                     "device": status["device"],
                     "all_devices": status["all_devices"],
                 },
@@ -1531,7 +1766,73 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
         if not isinstance(patch, dict):
             return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        if self.server.esp32 and hasattr(self.server.esp32, "with_owner_auth"):
+            patch = self.server.esp32.with_owner_auth(patch, reason="config")
         status, body, _ = await self.server.esp32.proxy_post("/device/config", patch)
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_esp32_pair(self, request: Request) -> JSONResponse:
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        host = str(payload.get("host", "")).strip() if isinstance(payload, dict) else ""
+        ok, body, status = await self.server.esp32.pair_device(host=host or None, reason="api")
+        return JSONResponse(
+            {
+                "ok": ok,
+                "result": {
+                    "owner_id": self.server.esp32.owner_id,
+                    "owner_label": self.server.esp32.owner_label,
+                    "device": body,
+                },
+                "error": None if ok else (body.get("error") if isinstance(body, dict) else "pair_failed"),
+            },
+            status_code=200 if ok else (status if status >= 400 else 409),
+        )
+
+    async def api_esp32_unpair(self, request: Request) -> JSONResponse:
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        status, body = await self.server.esp32.unpair_device(reason="api")
+        if 200 <= status < 300:
+            try:
+                from lampgo import personastore
+
+                personastore.patch_overrides_toml({
+                    "device_esp32": {"enabled": False, "mic_enabled": False, "preferred_host": ""},
+                })
+                self.server.config.device_esp32.enabled = False
+                self.server.config.device_esp32.mic_enabled = False
+                self.server.config.device_esp32.preferred_host = ""
+                await self.server.esp32.shutdown()
+                self.server.esp32.reset_session()
+                self.server.esp32.update_config(self.server.config.device_esp32)
+            except Exception:
+                logger.exception("web.device_unpair_cleanup_failed")
+        return JSONResponse(body if isinstance(body, dict) else {"ok": status < 400, "raw": str(body)}, status_code=status)
+
+    async def api_esp32_claim(self, request: Request) -> JSONResponse:
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        ok = await self.server.esp32.claim_owner(reason="api")
+        return JSONResponse(
+            {
+                "ok": ok,
+                "result": {
+                    "owner_id": self.server.esp32.owner_id,
+                    "owner_label": self.server.esp32.owner_label,
+                },
+            },
+            status_code=200 if ok else 409,
+        )
+
+    async def api_esp32_release(self, request: Request) -> JSONResponse:
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        status, body = await self.server.esp32.release_owner(reason="api")
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def ws_esp32_speaker(self, ws: WebSocket) -> None:
@@ -1542,6 +1843,16 @@ class WebGateway:
         if not base_url:
             await ws.close(code=1011)
             return
+        claim_owner = getattr(self.server.esp32, "claim_owner", None)
+        if callable(claim_owner):
+            try:
+                ok = await claim_owner(reason="speaker_proxy")
+            except Exception:
+                logger.debug("web.esp32_speaker_proxy_claim_failed", exc_info=True)
+                ok = False
+            if not ok:
+                await ws.close(code=1008)
+                return
 
         # Speaker WS lives on the stream httpd (port 81) to avoid contention
         # with the mic push task on the main httpd (port 80).
@@ -1549,7 +1860,11 @@ class WebGateway:
         stream_base = re.sub(r":(\d+)$", lambda m: f":{int(m.group(1)) + 1}", base_url)
         if stream_base == base_url:
             stream_base = base_url.rstrip("/") + ":81"
-        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + "/ws/speaker"
+        owner_query = ""
+        if self.server.esp32 and hasattr(self.server.esp32, "ws_owner_query"):
+            owner_query = f"?{self.server.esp32.ws_owner_query()}"
+        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + f"/ws/speaker{owner_query}"
+        safe_esp32_ws_url = redact_ws_owner_token(esp32_ws_url)
         try:
             import websockets
         except ImportError:
@@ -1590,9 +1905,9 @@ class WebGateway:
                 )
             except Exception as exc:
                 next_connect_at = now + 0.5
-                logger.warning("web.esp32_speaker_proxy_connect_failed", url=esp32_ws_url, error=str(exc))
+                logger.warning("web.esp32_speaker_proxy_connect_failed", url=safe_esp32_ws_url, error=str(exc))
                 return None
-            logger.info("web.esp32_speaker_proxy_connected", url=esp32_ws_url)
+            logger.info("web.esp32_speaker_proxy_connected", url=safe_esp32_ws_url)
             return esp32_ws
 
         try:
@@ -1612,7 +1927,7 @@ class WebGateway:
                     except Exception as exc:
                         logger.warning(
                             "web.esp32_speaker_proxy_send_failed",
-                            url=esp32_ws_url,
+                            url=safe_esp32_ws_url,
                             attempt=attempt + 1,
                             error=str(exc),
                         )
@@ -1639,7 +1954,7 @@ class WebGateway:
         except WebSocketDisconnect:
             pass
         except Exception:
-            logger.exception("web.esp32_speaker_proxy_failed", url=esp32_ws_url)
+            logger.exception("web.esp32_speaker_proxy_failed", url=safe_esp32_ws_url)
             try:
                 await ws.close(code=1011)
             except Exception:
@@ -1659,16 +1974,22 @@ class WebGateway:
         Also sets enabled/mic_enabled to false so the backend stops mDNS
         discovery until the next provisioning cycle re-enables them.
         """
-        status, body, _ = await self.server.esp32.proxy_post("/device/forget-wifi", {})
+        try:
+            await self.server.esp32.unpair_device(reason="forget_wifi")
+        except Exception:
+            logger.debug("web.forget_wifi_unpair_failed", exc_info=True)
+        payload = self.server.esp32.owner_auth_payload(reason="forget_wifi") if hasattr(self.server.esp32, "owner_auth_payload") else {}
+        status, body, _ = await self.server.esp32.proxy_post("/device/forget-wifi", payload)
         try:
             await self.server.esp32.shutdown()
             self.server.esp32.reset_session()
             from lampgo import personastore
             personastore.patch_overrides_toml({
-                "device_esp32": {"enabled": False, "mic_enabled": False},
+                "device_esp32": {"enabled": False, "mic_enabled": False, "preferred_host": ""},
             })
             self.server.config.device_esp32.enabled = False
             self.server.config.device_esp32.mic_enabled = False
+            self.server.config.device_esp32.preferred_host = ""
             self.server.esp32.update_config(self.server.config.device_esp32)
         except Exception:
             logger.exception("web.forget_wifi_cleanup_failed")
@@ -1700,6 +2021,14 @@ class WebGateway:
             path = "/" + path
         method = str(payload.get("method", "GET")).upper()
         body = payload.get("body", None)
+        if (
+            method == "POST"
+            and path == "/connect"
+            and isinstance(body, dict)
+            and self.server.esp32
+            and hasattr(self.server.esp32, "pairing_payload")
+        ):
+            body = {**body, **self.server.esp32.pairing_payload()}
 
         if not base_url:
             active = self.server.esp32.get_active_base_url() if self.server.esp32 else None
@@ -1753,10 +2082,17 @@ class WebGateway:
 
         session: Esp32AudioSession = self._esp32_audio_session
         if session.is_recording:
+            if self.server._wake_loop:
+                self.server._wake_loop.pause_device_wake_listener(duration_s=90.0)
             return JSONResponse({"ok": True, "result": {"status": "already_recording"}})
 
+        if self.server._wake_loop:
+            self.server._wake_loop.pause_device_wake_listener(duration_s=90.0)
+        await self._ensure_esp32_mic_stream_enabled()
         ok = await session.start()
         if not ok:
+            if self.server._wake_loop:
+                self.server._wake_loop.resume_device_wake_listener()
             return JSONResponse({"ok": False, "error": "esp32_offline"}, status_code=503)
         return JSONResponse({"ok": True, "result": {"status": "recording"}})
 
@@ -1769,8 +2105,13 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "not_recording"}, status_code=400)
 
         wav_bytes = await session.stop()
+        if self.server._wake_loop:
+            self.server._wake_loop.resume_device_wake_listener()
         if wav_bytes is None:
-            return JSONResponse({"ok": False, "error": "capture_too_short"}, status_code=400)
+            error = "capture_no_frames"
+            if getattr(session, "last_pcm_bytes", 0) > 0:
+                error = "capture_too_short"
+            return JSONResponse({"ok": False, "error": error}, status_code=400)
 
         b64 = base64.b64encode(wav_bytes).decode("ascii")
         return JSONResponse({"ok": True, "result": {"audio_data": b64}})
@@ -1780,6 +2121,8 @@ class WebGateway:
         session = getattr(self, "_esp32_audio_session", None)
         if session is not None:
             session.cancel()
+        if self.server._wake_loop:
+            self.server._wake_loop.resume_device_wake_listener()
         return JSONResponse({"ok": True, "result": {"status": "cancelled"}})
 
     async def api_persona_all(self, request: Request) -> JSONResponse:
@@ -1997,8 +2340,15 @@ class WebGateway:
                     message = choice.get("message") or {}
                     content = str(message.get("content") or "")
                     reasoning_len = len(str(message.get("reasoning_content") or ""))
-        except Exception:
-            logger.exception("memory.summarize.failed")
+        except httpx.RequestError as exc:
+            logger.warning(
+                "memory.summarize.failed",
+                error_type=type(exc).__name__,
+                request_url=str(exc.request.url) if exc.request is not None else "",
+            )
+            return []
+        except Exception as exc:
+            logger.warning("memory.summarize.failed", error_type=type(exc).__name__)
             return []
         bullets: list[str] = []
         for line in (content or "").splitlines():
@@ -2246,7 +2596,15 @@ class WebGateway:
             try:
                 await self.server.events.publish(IntentRouting(text=text, request_id=request_id))
                 history = _sanitize_chat_history(msg.get("history"))
-                result = await self.server.handle_request({"cmd": "text", "input": text, "request_id": request_id, "history": history})
+                result = await self.server.handle_request(
+                    {
+                        "cmd": "text",
+                        "input": text,
+                        "request_id": request_id,
+                        "history": history,
+                        "enable_thinking": bool(msg.get("enable_thinking")),
+                    }
+                )
 
                 intent_type = result.get("result", {}).get("type", "unknown")
                 skill_id = result.get("result", {}).get("skill_id")
@@ -2284,6 +2642,7 @@ class WebGateway:
                         "audio_data": audio_data,
                         "request_id": request_id,
                         "history": history,
+                        "enable_thinking": bool(msg.get("enable_thinking")),
                     }
                 )
                 result["request_id"] = request_id
@@ -2449,6 +2808,8 @@ class WebGateway:
             if existing and not existing.done():
                 await ws.send_json({"ok": True, "request_id": request_id})
             else:
+                if self.server._wake_loop:
+                    self.server._wake_loop.pause_device_wake_listener(duration_s=300.0)
                 task = asyncio.create_task(self._relay_esp32_audio_to_browser(ws))
                 self._esp32_relay_tasks[ws] = task
                 task.add_done_callback(lambda _t, _ws=ws: self._esp32_relay_tasks.pop(_ws, None))
@@ -2458,6 +2819,8 @@ class WebGateway:
             relay_task = self._esp32_relay_tasks.pop(ws, None)
             if relay_task and not relay_task.done():
                 relay_task.cancel()
+            if self.server._wake_loop:
+                self.server._wake_loop.resume_device_wake_listener()
             await ws.send_json({"ok": True, "request_id": request_id})
 
         elif msg_type == "estop":
@@ -2471,6 +2834,21 @@ class WebGateway:
     async def _relay_esp32_audio_to_browser(self, ws: WebSocket) -> None:
         """Forward ESP32 PCM16 frames directly to one browser WebSocket client."""
         from lampgo.device.audio_stream import build_ws_audio_url
+
+        claim_owner = getattr(self.server.esp32, "claim_owner", None) if self.server.esp32 else None
+        if callable(claim_owner):
+            try:
+                ok = await claim_owner(reason="audio_relay")
+            except Exception:
+                logger.debug("web.esp32_audio_relay_claim_failed", exc_info=True)
+                ok = False
+            if not ok:
+                logger.warning("web.esp32_audio_relay_claim_denied")
+                try:
+                    await ws.send_json({"type": "event", "event": "Esp32AudioRelayError", "data": {"error": "ESP32 未配对到当前电脑或固件需更新"}})
+                except Exception:
+                    pass
+                return
 
         url = None
         deadline = asyncio.get_running_loop().time() + 6.0
@@ -2497,31 +2875,136 @@ class WebGateway:
                 pass
             return
 
+        await self._ensure_esp32_mic_stream_enabled()
+
         frames = 0
         bytes_sent = 0
-        logger.info("web.esp32_audio_relay_connecting", url=url)
+        idle_timeouts = 0
+        idle_timeout_s = 5.0
+        reconnect_delay_s = 1.0
+        safe_url = redact_ws_owner_token(url)
+        logger.info("web.esp32_audio_relay_connecting", url=safe_url)
         try:
-            async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None, max_size=None) as esp32_ws:
-                logger.info("web.esp32_audio_relay_connected", url=url)
-                while True:
-                    data = await asyncio.wait_for(esp32_ws.recv(), timeout=5.0)
-                    if not isinstance(data, bytes) or not data:
-                        continue
-                    await ws.send_bytes(data)
-                    frames += 1
-                    bytes_sent += len(data)
-                    if frames == 1 or frames % 100 == 0:
-                        logger.info("web.esp32_audio_relay_forwarded", frames=frames, bytes=bytes_sent)
+            await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus", "data": {"state": "connecting", "url": safe_url}})
+        except Exception:
+            pass
+        try:
+            while True:
+                try:
+                    async with websockets.connect(
+                        url,
+                        open_timeout=5,
+                        close_timeout=2,
+                        ping_interval=None,
+                        max_size=None,
+                    ) as esp32_ws:
+                        self.server.esp32.mark_active_healthy()
+                        safe_url = redact_ws_owner_token(url)
+                        logger.info("web.esp32_audio_relay_connected", url=safe_url)
+                        try:
+                            await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus", "data": {"state": "connected", "url": safe_url}})
+                        except Exception:
+                            pass
+                        reconnect_delay_s = 1.0
+                        while True:
+                            try:
+                                data = await asyncio.wait_for(esp32_ws.recv(), timeout=idle_timeout_s)
+                            except asyncio.TimeoutError:
+                                idle_timeouts += 1
+                                if idle_timeouts == 1 or idle_timeouts % 6 == 0:
+                                    logger.warning(
+                                        "web.esp32_audio_relay_idle",
+                                        url=redact_ws_owner_token(url),
+                                        frames=frames,
+                                        bytes=bytes_sent,
+                                        idle_timeouts=idle_timeouts,
+                                        timeout_s=idle_timeout_s,
+                                    )
+                                continue
+                            if not isinstance(data, bytes) or not data:
+                                continue
+                            idle_timeouts = 0
+                            await ws.send_bytes(data)
+                            frames += 1
+                            bytes_sent += len(data)
+                            if frames == 1 or frames % 100 == 0:
+                                logger.info("web.esp32_audio_relay_forwarded", frames=frames, bytes=bytes_sent)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "web.esp32_audio_relay_reconnect",
+                        url=redact_ws_owner_token(url),
+                        frames=frames,
+                        bytes=bytes_sent,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        delay_s=reconnect_delay_s,
+                    )
+                    await asyncio.sleep(reconnect_delay_s)
+                    reconnect_delay_s = min(reconnect_delay_s * 1.5, 10.0)
+                    next_url = build_ws_audio_url(self.server.esp32)
+                    if next_url:
+                        url = next_url
+                    else:
+                        logger.warning("web.esp32_audio_relay_no_url_retry")
+                        await asyncio.sleep(reconnect_delay_s)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("web.esp32_audio_relay_failed", url=url, frames=frames, bytes=bytes_sent)
+        except Exception as exc:
+            logger.warning(
+                "web.esp32_audio_relay_failed",
+                url=redact_ws_owner_token(url),
+                frames=frames,
+                bytes=bytes_sent,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             try:
                 await ws.send_json({"type": "event", "event": "Esp32AudioRelayError", "data": {"error": "esp32 audio relay failed"}})
             except Exception:
                 pass
         finally:
-            logger.info("web.esp32_audio_relay_closed", url=url, frames=frames, bytes=bytes_sent)
+            safe_url = redact_ws_owner_token(url)
+            logger.info("web.esp32_audio_relay_closed", url=safe_url, frames=frames, bytes=bytes_sent)
+            try:
+                await ws.send_json(
+                    {
+                        "type": "event",
+                        "event": "Esp32AudioRelayStatus",
+                        "data": {"state": "closed", "url": safe_url, "frames": frames, "bytes": bytes_sent},
+                    }
+                )
+            except Exception:
+                pass
+            if self.server._wake_loop:
+                self.server._wake_loop.resume_device_wake_listener()
+
+    async def _ensure_esp32_mic_stream_enabled(self) -> None:
+        """Best-effort nudge so ESP32 starts publishing PCM before call relay."""
+        if not self.server.esp32:
+            return
+        if not self.server.config.device_esp32.mic_enabled:
+            self.server.config.device_esp32.mic_enabled = True
+            self.server.esp32.update_config(self.server.config.device_esp32)
+        try:
+            payload = {"mic_enabled": True}
+            if hasattr(self.server.esp32, "with_owner_auth"):
+                payload = self.server.esp32.with_owner_auth(payload, reason="audio_relay_config")
+            status, body, _ = await asyncio.wait_for(
+                self.server.esp32.proxy_post("/device/config", payload),
+                timeout=1.5,
+            )
+            if status >= 400:
+                logger.warning("web.esp32_audio_relay_mic_enable_failed", status=status, body=str(body)[:200])
+            else:
+                logger.info("web.esp32_audio_relay_mic_enabled", status=status)
+        except Exception as exc:
+            logger.warning(
+                "web.esp32_audio_relay_mic_enable_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
     async def _send_cancel_response(self, ws: WebSocket, request_id: str) -> None:
         """Publish cancellation events and send a response after stop_loop."""
