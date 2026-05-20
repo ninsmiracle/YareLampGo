@@ -34,6 +34,7 @@ class RoutedIntent:
     source: str = ""
     detail: str | None = None
     matched_keyword: str | None = None
+    end_conversation: bool = False
 
 
 NORMALIZE_TABLE = str.maketrans(
@@ -73,6 +74,20 @@ GREETING_PHRASES = {
     "morning",
     "afternoon",
     "evening",
+}
+GOODBYE_PHRASES = {
+    "再见",
+    "拜拜",
+    "bye",
+    "goodbye",
+    "晚安",
+    "下次见",
+    "回头见",
+    "挂断",
+    "结束通话",
+    "退出",
+    "先这样",
+    "不聊了",
 }
 SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "点头": ("nod", None),
@@ -139,14 +154,6 @@ class IntentRouter:
 
     def _keyword_route(self, text: str) -> RoutedIntent:
         normalized = _strip_leading_fillers(_normalize_text(text))
-        if _looks_composite(normalized):
-            logger.info("router.keyword_skipped_composite", text=text, normalized=normalized)
-            return RoutedIntent(
-                intent_type=IntentType.COMPLEX,
-                source="keyword",
-                detail="包含复合结构，跳过关键词快路径",
-            )
-
         greeting_keyword = _match_greeting_phrase(normalized)
         if greeting_keyword:
             logger.info("router.keyword_greeting_hit", text=text, normalized=normalized, keyword=greeting_keyword)
@@ -156,6 +163,26 @@ class IntentRouter:
                 source="keyword",
                 detail="问候语命中",
                 matched_keyword=greeting_keyword,
+            )
+
+        goodbye_keyword = _match_repeated_phrase(normalized, GOODBYE_PHRASES)
+        if goodbye_keyword:
+            logger.info("router.keyword_goodbye_hit", text=text, normalized=normalized, keyword=goodbye_keyword)
+            return RoutedIntent(
+                intent_type=IntentType.CHAT,
+                chat_response="好啦，先这样～",
+                source="keyword",
+                detail="告别语命中",
+                matched_keyword=goodbye_keyword,
+                end_conversation=True,
+            )
+
+        if _looks_composite(normalized):
+            logger.info("router.keyword_skipped_composite", text=text, normalized=normalized)
+            return RoutedIntent(
+                intent_type=IntentType.COMPLEX,
+                source="keyword",
+                detail="包含复合结构，跳过关键词快路径",
             )
 
         if normalized in SKILL_KEYWORDS:
@@ -188,6 +215,7 @@ class IntentRouter:
         publish_tool_event: Callable[..., Awaitable[None]] | None = None,
         history: list[dict[str, Any]] | None = None,
         call_mode: bool = False,
+        enable_thinking: bool = False,
     ):
         if self._llm_client is None:
             raise RuntimeError("LLM client not configured")
@@ -200,6 +228,7 @@ class IntentRouter:
             publish_tool_event=publish_tool_event,
             history=history,
             call_mode=call_mode,
+            enable_thinking=enable_thinking,
         )
 
     async def transcribe_audio(self, audio_data: str) -> str:
@@ -228,11 +257,15 @@ def _strip_leading_fillers(normalized: str) -> str:
 
 
 def _match_greeting_phrase(normalized: str) -> str | None:
+    return _match_repeated_phrase(normalized, GREETING_PHRASES)
+
+
+def _match_repeated_phrase(normalized: str, phrases: set[str]) -> str | None:
     compact = INLINE_PUNCTUATION_RE.sub("", normalized)
-    if compact in GREETING_PHRASES:
+    if compact in phrases:
         return compact
 
-    for phrase in sorted(GREETING_PHRASES, key=len, reverse=True):
+    for phrase in sorted(phrases, key=len, reverse=True):
         remaining = compact
         matched = 0
         while remaining.startswith(phrase):

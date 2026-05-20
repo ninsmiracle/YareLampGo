@@ -556,6 +556,7 @@ class LampgoServer:
             }
 
         request_id = data.get("request_id", "")
+        enable_thinking = bool(data.get("enable_thinking"))
 
         alias = self._resolve_recording_alias(text)
         if alias:
@@ -629,6 +630,7 @@ class LampgoServer:
                 ),
                 history=history,
                 call_mode=call_mode,
+                enable_thinking=enable_thinking,
             )
             if agent_result.intent_type == "complex":
                 await self.events.publish(
@@ -699,14 +701,22 @@ class LampgoServer:
         )
 
         if intent.intent_type == IntentType.CHAT:
+            end_conversation = bool(getattr(intent, "end_conversation", False))
+            response_text = intent.chat_response or ""
+            if end_conversation and call_mode:
+                self._schedule_end_conversation(
+                    request_id=request_id,
+                    response_text=response_text,
+                )
             return {
                 "ok": True,
                 "result": {
                     "type": "chat",
-                    "response": intent.chat_response,
+                    "response": response_text,
                     "source": intent.source,
                     "detail": intent.detail,
                     "matched_keyword": intent.matched_keyword,
+                    "end_conversation": end_conversation,
                 },
             }
 
@@ -775,6 +785,7 @@ class LampgoServer:
                 "input": text,
                 "request_id": request_id,
                 "history": data.get("history") or [],
+                "enable_thinking": bool(data.get("enable_thinking")),
             }
         )
         await self._maybe_tts(result, request_id)
@@ -1212,6 +1223,9 @@ class LampgoServer:
         online = self.esp32.is_online() if self.esp32 else False
         status = self.esp32.get_status() if self.esp32 else {}
         device = status.get("device") if isinstance(status, dict) else None
+        blocked = int(status.get("blocked_devices_count") or 0) if isinstance(status, dict) else 0
+        if not device and blocked > 0:
+            return {"enabled": False, "hidden": True, "blocked_devices_count": blocked}
         host = self.esp32.get_active_host() if self.esp32 else None
         return {
             "enabled": True,
@@ -1219,6 +1233,10 @@ class LampgoServer:
             "host": host or cfg.preferred_host or "",
             "ip": device.get("ip", "") if isinstance(device, dict) else "",
             "port": device.get("port", 80) if isinstance(device, dict) else 80,
+            "paired": device.get("paired") if isinstance(device, dict) else None,
+            "is_paired_to_self": bool(device.get("is_paired_to_self")) if isinstance(device, dict) else False,
+            "needs_firmware_update": bool(device.get("needs_firmware_update")) if isinstance(device, dict) else False,
+            "blocked_devices_count": blocked,
         }
 
     def _handle_set_camera(self, port: str) -> dict:
@@ -1230,6 +1248,12 @@ class LampgoServer:
         """
         value = (port or "").strip()
         if value == "esp32":
+            status = self.esp32.get_status() if self.esp32 else {}
+            device = status.get("device") if isinstance(status, dict) else None
+            if device and device.get("needs_firmware_update"):
+                return {"ok": False, "error": "esp32_firmware_update_required", "result": {"esp32": self._esp32_camera_info()}}
+            if device and device.get("is_paired_to_other"):
+                return {"ok": False, "error": "esp32_paired_to_other", "result": {"esp32": self._esp32_camera_info()}}
             self.config.device_esp32.enabled = True
             self.config.camera.port = ""
             logger.info("camera.switched_to_esp32")
@@ -1684,11 +1708,14 @@ class LampgoServer:
 
     async def run_forever(self) -> None:
         await self.start()
+        local_url = ""
         if self.config.web_enabled:
-            await self._start_web_gateway()
+            local_url = await self._start_web_gateway(print_banner=False) or ""
             vc = self.config.voice
             if vc.wake_word and vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret:
-                self._start_voice_loop()
+                await self._start_voice_loop()
+            if local_url:
+                self._print_connection_banner(local_url)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1697,7 +1724,7 @@ class LampgoServer:
         await stop.wait()
         await self.shutdown()
 
-    async def _start_web_gateway(self) -> None:
+    async def _start_web_gateway(self, *, print_banner: bool = True) -> str | None:
         try:
             import uvicorn
 
@@ -1719,22 +1746,26 @@ class LampgoServer:
                 "server.web_started",
                 url=local_url,
             )
-            self._print_connection_banner(local_url)
+            if print_banner:
+                self._print_connection_banner(local_url)
+            return local_url
         except ImportError:
             logger.error("server.web_missing_deps (pip install starlette uvicorn websockets)")
+            return None
         except Exception:
             logger.exception("server.web_start_failed")
+            return None
 
-    @staticmethod
-    def _print_connection_banner(local_url: str) -> None:
+    def _print_connection_banner(self, local_url: str) -> None:
         """Print a clear banner so users know how to wire up OpenClaw when port changes."""
+        def _mark(ok: bool) -> str:
+            return "✓" if ok else "✗"
+
         try:
             from lampgo.bridge.openclaw_installer import detect_openclaw_integration
 
             status = detect_openclaw_integration()
             overall = status.overall
-            def _mark(ok: bool) -> str:
-                return "✓" if ok else "✗"
             integration_lines = [
                 f"openclaw CLI     : {_mark(status.binary.ok)} {status.binary.detail}",
                 f"lampgo plugin    : {_mark(status.plugin.ok)} {'已安装' if status.plugin.ok else '未安装（运行 `lampgo install-openclaw --yes` 一键安装）'}",
@@ -1747,6 +1778,34 @@ class LampgoServer:
             integration_lines = ["openclaw 集成检测失败（忽略）"]
             overall_line = ""
 
+        vc = self.config.voice
+        livekit_configured = bool(vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret)
+        wake_configured = bool(vc.wake_word)
+        agent_running = bool(self._agent_sdk and self._agent_sdk.is_running)
+        agent_ready = bool(self._agent_sdk and getattr(self._agent_sdk, "is_ready", False))
+        wake_loop_running = bool(self._wake_loop and self._voice_task and not self._voice_task.done())
+        esp32_status = self.esp32.get_status() if self.esp32 else {"online": False}
+        esp32_online = bool(esp32_status.get("online"))
+        esp32_device = esp32_status.get("device") or {}
+        esp32_label = (
+            esp32_device.get("host")
+            or esp32_device.get("ip")
+            or esp32_status.get("preferred_host")
+            or "未发现"
+        )
+        esp32_seen = bool(esp32_device or esp32_status.get("preferred_host"))
+        voice_ready = livekit_configured and wake_configured and agent_ready and wake_loop_running
+        livekit_lines = [
+            f"LiveKit 配置      : {_mark(livekit_configured)} {vc.livekit_url or '未配置'}",
+            f"LiveKit worker    : {_mark(agent_ready)} {'registered worker' if agent_ready else ('启动中/未就绪' if agent_running else '未启动')}",
+            f"唤醒监听          : {_mark(wake_loop_running and wake_configured)} {vc.wake_word or '未启用'}",
+        ]
+        if self.config.device_esp32.enabled:
+            livekit_lines.append(
+                f"ESP32 设备        : {_mark(esp32_online or esp32_seen)} {esp32_label}{'' if esp32_online else '（等待健康检查）'}"
+            )
+        livekit_lines.append(f"通话状态          : {_mark(voice_ready)} {'ready' if voice_ready else 'not ready'}")
+
         lines = [
             "",
             "──────── lampgo ready ────────",
@@ -1757,6 +1816,7 @@ class LampgoServer:
         ]
         if overall_line:
             lines.append(overall_line)
+        lines.extend(livekit_lines)
         lines += [
             "一键修复集成     : uv run lampgo install-openclaw --yes",
             "──────────────────────────────",
@@ -1764,7 +1824,7 @@ class LampgoServer:
         ]
         print("\n".join(lines), flush=True)
 
-    def _start_voice_loop(self) -> None:
+    async def _start_voice_loop(self) -> None:
         try:
             from lampgo.voice.wake_loop import WakeLoop
 
@@ -1775,7 +1835,7 @@ class LampgoServer:
                 wake_word=self.config.voice.wake_word,
                 livekit_url=self.config.voice.livekit_url,
             )
-            self._start_agent_sdk()
+            await self._start_agent_sdk()
         except Exception:
             logger.exception("server.wake_loop_failed")
 
@@ -1815,9 +1875,9 @@ class LampgoServer:
         if missing:
             logger.warning("server.voice_loop_incomplete", missing=missing)
             return
-        self._start_voice_loop()
+        await self._start_voice_loop()
 
-    def _start_agent_sdk(self) -> None:
+    async def _start_agent_sdk(self) -> None:
         """Launch the Xiaomi LiveKit Agent SDK as a managed subprocess."""
         try:
             from lampgo.voice.agent_sdk import AgentSDKManager
@@ -1826,7 +1886,14 @@ class LampgoServer:
                 self.config.voice,
                 web_port=self.config.web.port,
             )
-            asyncio.create_task(self._agent_sdk.start())
+            started = await self._agent_sdk.start()
+            if not started:
+                return
+            ready = await self._agent_sdk.wait_ready(timeout_s=20.0)
+            if ready:
+                logger.info("server.agent_sdk_ready")
+            else:
+                logger.warning("server.agent_sdk_ready_timeout")
         except Exception:
             logger.exception("server.agent_sdk_start_failed")
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from starlette.testclient import TestClient
 
 from lampgo.core.config import DeviceConfig, LampgoConfig
+from lampgo.perception.llm_client import LLMClient
+from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.server import LampgoServer
 from lampgo.web.gateway import WebGateway
 
@@ -183,3 +185,72 @@ def test_web_search_api_key_persists_to_credentials(monkeypatch, tmp_path):
     creds = json.loads((tmp_path / "credentials.json").read_text(encoding="utf-8"))
     assert creds.get("llm_web_search_api_key") == "mimo-ws-secret"
     assert creds.get("llm_api_key") in (None, "sk-openai-main")
+
+
+def test_repeated_goodbye_is_keyword_chat() -> None:
+    intent = IntentRouter().route("再见。再见。")
+
+    assert intent.intent_type == IntentType.CHAT
+    assert intent.end_conversation is True
+    assert intent.matched_keyword == "再见"
+
+
+async def test_llm_request_failure_returns_chat_not_openclaw_handoff(monkeypatch) -> None:
+    client = LLMClient(
+        LampgoConfig().llm.model_copy(
+            update={
+                "provider": "mimo",
+                "api_key": "sk-test",
+                "api_base": "https://api.example/v1",
+                "fast_model": "mimo-v2.5",
+            }
+        ),
+        skill_specs=[],
+    )
+    seen_kwargs = {}
+
+    async def fake_stream_chat_completion(**kwargs):
+        seen_kwargs.update(kwargs)
+        return None
+
+    async def execute_tool(*args, **kwargs):
+        raise AssertionError("request failure should not execute tools")
+
+    monkeypatch.setattr(client, "_stream_chat_completion", fake_stream_chat_completion)
+
+    result = await client.run_agent_loop("你在干嘛？", execute_tool=execute_tool)
+
+    assert result.intent_type == "chat"
+    assert result.stop_reason == "request_failed"
+    assert result.response
+    assert seen_kwargs["enable_thinking"] is False
+
+
+async def test_llm_request_forwards_enable_thinking(monkeypatch) -> None:
+    client = LLMClient(
+        LampgoConfig().llm.model_copy(
+            update={
+                "provider": "mimo",
+                "api_key": "sk-test",
+                "api_base": "https://api.example/v1",
+                "fast_model": "mimo-v2.5",
+            }
+        ),
+        skill_specs=[],
+    )
+    seen_kwargs = {}
+
+    async def fake_stream_chat_completion(**kwargs):
+        seen_kwargs.update(kwargs)
+        return {"content": "好"}
+
+    async def execute_tool(*args, **kwargs):
+        raise AssertionError("content response should not execute tools")
+
+    monkeypatch.setattr(client, "_stream_chat_completion", fake_stream_chat_completion)
+
+    result = await client.run_agent_loop("你在干嘛？", execute_tool=execute_tool, enable_thinking=True)
+
+    assert result.intent_type == "chat"
+    assert result.response == "好"
+    assert seen_kwargs["enable_thinking"] is True

@@ -29,8 +29,6 @@ perception = [
     "opencv-python>=4.8",
 ]
 voice = [
-    "openwakeword>=0.6.0",
-    "onnxruntime>=1.17",
     "livekit>=0.17",
     "livekit-api>=0.7",
     "xiaomi-livekit-agent-sdk>=0.1.0",
@@ -61,14 +59,6 @@ explicit = true
 
 [tool.uv.sources]
 xiaomi-livekit-agent-sdk = { index = "xiaomi" }
-
-[tool.uv]
-override-dependencies = [
-    # openwakeword pulls tflite-runtime which has no wheels for Python 3.12+.
-    # We use onnxruntime as the inference backend, so exclude tflite-runtime
-    # by pinning it to an impossible environment marker.
-    "tflite-runtime ; python_version < '0'",
-]
 
 [build-system]
 requires = ["hatchling"]
