@@ -86,6 +86,9 @@
     blue: "蓝色",
     white: "白色",
     theater: "剧场灯效",
+    theaterred: "红色剧场",
+    theatergreen: "绿色剧场",
+    theaterblue: "蓝色剧场",
     rainbow: "彩虹",
     smiley: "笑脸",
     crying: "哭脸",
@@ -94,10 +97,10 @@
     check: "对勾",
     cross: "叉号",
     music: "音符",
-    blush: "害羞",
+    blush: "脸红",
     angry: "生气",
     surprised: "惊讶",
-    exclaim: "惊叹号",
+    exclaim: "感叹号",
     question: "问号",
     star: "星星",
     up: "向上",
@@ -164,8 +167,53 @@
     set_expression: { title: "设置表情", description: "切换 LED 灯光表情（例如 笑脸、爱心、生气）。" },
   });
 
+  const expressionMetaByName = new Map();
+
+  function expressionMeta(name) {
+    return expressionMetaByName.get(String(name || ""));
+  }
+
   function expressionLabel(name) {
-    return EXPRESSION_LABELS_CN[name] || name;
+    const meta = expressionMeta(name);
+    return (meta && meta.label) || EXPRESSION_LABELS_CN[name] || name;
+  }
+
+  function normalizeExpressionEntries(entries) {
+    const names = [];
+    entries.forEach((entry) => {
+      if (typeof entry === "string") {
+        const name = entry.trim();
+        if (!name) return;
+        if (!expressionMetaByName.has(name)) {
+          expressionMetaByName.set(name, {
+            name,
+            mode: null,
+            label: EXPRESSION_LABELS_CN[name] || name,
+            aliases: [],
+            animated: false,
+          });
+        }
+        names.push(name);
+        return;
+      }
+      if (!entry || typeof entry !== "object") return;
+      const name = String(entry.name || "").trim();
+      if (!name) return;
+      const modeRaw = Number(entry.mode);
+      const mode = Number.isFinite(modeRaw) ? modeRaw : null;
+      const aliases = Array.isArray(entry.aliases)
+        ? entry.aliases.map((alias) => String(alias || "").trim()).filter(Boolean)
+        : [];
+      expressionMetaByName.set(name, {
+        name,
+        mode,
+        label: String(entry.label || EXPRESSION_LABELS_CN[name] || name),
+        aliases,
+        animated: !!entry.animated,
+      });
+      names.push(name);
+    });
+    return names;
   }
 
   function recordingLabel(name) {
@@ -2328,8 +2376,8 @@
       return;
     }
 
-    if (msg.ok && msg.result && msg.result.expressions) {
-      renderExpressions(msg.result.expressions);
+    if (msg.ok && msg.result && (msg.result.expression_catalog || msg.result.expressions)) {
+      renderExpressions(msg.result.expression_catalog || msg.result.expressions);
       return;
     }
 
@@ -3168,21 +3216,33 @@
   }
 
   function renderExpressions(expressions) {
-    if (Array.isArray(expressions)) latestExpressions = expressions.slice();
+    if (Array.isArray(expressions)) latestExpressions = normalizeExpressionEntries(expressions);
     expressionGrid.innerHTML = "";
     const q = expressionQuery.trim().toLowerCase();
     const filtered = q
       ? latestExpressions.filter((name) => {
+          const meta = expressionMeta(name);
           const labelCn = expressionLabel(name);
-          return name.toLowerCase().includes(q) || labelCn.includes(q);
+          const aliases = meta && Array.isArray(meta.aliases) ? meta.aliases.join(" ") : "";
+          return (
+            name.toLowerCase().includes(q) ||
+            labelCn.includes(q) ||
+            aliases.toLowerCase().includes(q)
+          );
         })
       : latestExpressions;
     filtered.forEach((name) => {
+      const meta = expressionMeta(name);
       const labelCn = expressionLabel(name);
+      const metaParts = ["LED 表情"];
+      if (meta && meta.mode !== null && meta.mode !== undefined) metaParts.push(`m${meta.mode}`);
+      if (meta) metaParts.push(meta.animated ? "动态" : "静态");
+      const aliases = meta && Array.isArray(meta.aliases) ? meta.aliases : [];
+      const aliasText = aliases.length ? `\n别名：${aliases.join("、")}` : "";
       const card = makeSkillCard({
         title: labelCn,
-        meta: "LED 表情",
-        tooltip: `切换灯光表情：${labelCn}（${name}）`,
+        meta: metaParts.join(" · "),
+        tooltip: `切换灯光表情：${labelCn}（${name}）${aliasText}`,
         onClick: () => invokeExpression(name),
       });
       expressionGrid.appendChild(card);
@@ -3402,6 +3462,24 @@
     send({ type: "invoke", skill_id: skillId, params: {}, wait: true, request_id: requestId });
   }
 
+  async function invokeSkillViaHttp(skillId, params, requestId) {
+    const resp = await fetch("/api/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ skill_id: skillId, params: params || {}, wait: true, request_id: requestId }),
+    });
+    const data = await resp.json().catch(() => ({
+      ok: false,
+      error: resp.ok ? "invalid_json_response" : resp.statusText,
+    }));
+    data.request_id = requestId;
+    if (!resp.ok && data.ok !== false) {
+      data.ok = false;
+      data.error = data.error || resp.statusText || `HTTP ${resp.status}`;
+    }
+    return data;
+  }
+
   function invokeRecording(name) {
     clearEmptyState();
     const requestId = nextId();
@@ -3423,18 +3501,23 @@
     });
   }
 
-  function invokeExpression(name) {
+  async function invokeExpression(name) {
     clearEmptyState();
     const requestId = nextId();
     const bubble = addAssistantBubble(requestId);
     addStep(getPreludeArea(ensureActivityLog(bubble)), `切换灯光表情 ${expressionLabel(name)}（${name}）`, "active");
-    send({
-      type: "invoke",
-      skill_id: "set_expression",
-      params: { expression: name },
-      wait: true,
-      request_id: requestId,
-    });
+    try {
+      const msg = await invokeSkillViaHttp("set_expression", { expression: name }, requestId);
+      finishPending(msg);
+      if (msg.ok) send({ type: "status", request_id: `led_status_${Date.now()}` });
+    } catch (err) {
+      finishPending({
+        ok: false,
+        error: err && err.message ? err.message : String(err),
+        result: {},
+        request_id: requestId,
+      });
+    }
   }
 
   /* ---- Recording flow ---- */

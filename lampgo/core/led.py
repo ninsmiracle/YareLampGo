@@ -1,14 +1,17 @@
-"""LEDController — ESP32 serial protocol for LED expressions.
+"""LEDController — LED expression protocol.
 
-Protocol (from legacy lelamp_led.py):
+Protocol (from legacy lelamp_led.py / ESP32 NeoPixel firmware):
   - "m<N>\n"  — set mode N (0-29)
   - "b<N>\n"  — set brightness N (1-255)
-Baud rate: 9600.
+
+The controller can talk directly to a local USB serial LED controller, or
+fall back to the paired lampgo-cam ESP32 firmware's /device/led Wi-Fi endpoint.
 """
 
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import structlog
 
@@ -16,44 +19,114 @@ from lampgo.core.config import LEDConfig
 
 logger = structlog.get_logger(__name__)
 
-LED_EXPRESSIONS: dict[str, int] = {
-    "off": 0,
-    "red": 1,
-    "green": 2,
-    "blue": 3,
-    "white": 4,
-    "theater": 5,
-    "rainbow": 9,
-    "smiley": 10,
-    "crying": 11,
-    "left": 12,
-    "right": 13,
-    "check": 14,
-    "cross": 15,
-    "music": 16,
-    "blush": 17,
-    "angry": 18,
-    "surprised": 19,
-    "exclaim": 20,
-    "question": 21,
-    "star": 22,
-    "up": 23,
-    "down": 24,
-    "sleep": 25,
-    "thinking": 26,
-    "heart": 27,
-    "heartbreak": 28,
-    "helpless": 29,
-}
+LED_EXPRESSION_CATALOG: tuple[dict[str, Any], ...] = (
+    {"mode": 0, "name": "off", "label": "熄灭", "aliases": ("black", "关闭"), "animated": False},
+    {"mode": 1, "name": "red", "label": "红色", "aliases": ("红色",), "animated": True},
+    {"mode": 2, "name": "green", "label": "绿色", "aliases": ("绿色",), "animated": True},
+    {"mode": 3, "name": "blue", "label": "蓝色", "aliases": ("蓝色",), "animated": True},
+    {"mode": 4, "name": "white", "label": "白色", "aliases": ("照明", "白色"), "animated": True},
+    {"mode": 5, "name": "theater", "label": "剧场灯效", "aliases": ("剧场",), "animated": True},
+    {"mode": 6, "name": "theaterred", "label": "红色剧场", "aliases": ("redtheater", "红色剧场"), "animated": True},
+    {"mode": 7, "name": "theatergreen", "label": "绿色剧场", "aliases": ("greentheater", "绿色剧场"), "animated": True},
+    {"mode": 8, "name": "theaterblue", "label": "蓝色剧场", "aliases": ("bluetheater", "蓝色剧场"), "animated": True},
+    {"mode": 9, "name": "rainbow", "label": "彩虹", "aliases": ("彩虹",), "animated": True},
+    {"mode": 10, "name": "smiley", "label": "笑脸", "aliases": ("smile", "happy", "开心", "笑脸"), "animated": False},
+    {"mode": 11, "name": "crying", "label": "哭脸", "aliases": ("cry", "sad", "难过", "哭脸"), "animated": False},
+    {"mode": 12, "name": "left", "label": "向左", "aliases": ("左箭头", "左"), "animated": False},
+    {"mode": 13, "name": "right", "label": "向右", "aliases": ("右箭头", "右"), "animated": False},
+    {"mode": 14, "name": "check", "label": "对勾", "aliases": ("yes", "ok", "对勾", "同意"), "animated": False},
+    {"mode": 15, "name": "cross", "label": "叉号", "aliases": ("no", "x", "叉号", "不同意"), "animated": False},
+    {"mode": 16, "name": "music", "label": "音符", "aliases": ("note", "音乐", "音符"), "animated": True},
+    {"mode": 17, "name": "blush", "label": "脸红", "aliases": ("害羞", "脸红"), "animated": False},
+    {"mode": 18, "name": "angry", "label": "生气", "aliases": ("anger", "生气", "愤怒"), "animated": False},
+    {"mode": 19, "name": "surprised", "label": "惊讶", "aliases": ("surprise", "惊讶", "震惊"), "animated": True},
+    {"mode": 20, "name": "exclaim", "label": "感叹号", "aliases": ("exclamation", "感叹号"), "animated": False},
+    {"mode": 21, "name": "question", "label": "问号", "aliases": ("问号", "困惑"), "animated": False},
+    {"mode": 22, "name": "star", "label": "星星", "aliases": ("星星", "优秀"), "animated": False},
+    {"mode": 23, "name": "up", "label": "向上", "aliases": ("上箭头", "上"), "animated": False},
+    {"mode": 24, "name": "down", "label": "向下", "aliases": ("下箭头", "下"), "animated": False},
+    {"mode": 25, "name": "sleep", "label": "睡眠", "aliases": ("睡觉", "休眠"), "animated": False},
+    {"mode": 26, "name": "thinking", "label": "思考", "aliases": ("think", "思考"), "animated": True},
+    {"mode": 27, "name": "heart", "label": "爱心", "aliases": ("love", "心动", "爱心"), "animated": True},
+    {"mode": 28, "name": "heartbreak", "label": "心碎", "aliases": ("broken", "心碎"), "animated": True},
+    {"mode": 29, "name": "helpless", "label": "无奈", "aliases": ("无奈",), "animated": False},
+)
+
+LED_EXPRESSIONS: dict[str, int] = {str(item["name"]): int(item["mode"]) for item in LED_EXPRESSION_CATALOG}
+LED_MODE_NAMES: dict[int, str] = {int(item["mode"]): str(item["name"]) for item in LED_EXPRESSION_CATALOG}
+
+
+def _normalize_mode_key(value: str) -> str:
+    return "".join(ch for ch in value.strip().lower() if ch.isalnum())
+
+
+LED_ALIASES: dict[str, str] = {}
+for _item in LED_EXPRESSION_CATALOG:
+    _name = str(_item["name"])
+    LED_ALIASES[_normalize_mode_key(_name)] = _name
+    for _alias in _item.get("aliases", ()):
+        LED_ALIASES[_normalize_mode_key(str(_alias))] = _name
+
+
+def canonical_expression_name(value: int | str) -> str | None:
+    """Resolve a mode number/name/alias to the canonical expression name."""
+    if isinstance(value, int):
+        return LED_MODE_NAMES.get(value)
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    key = _normalize_mode_key(raw)
+    candidates = [key]
+    if key.startswith("m") and len(key) > 1:
+        candidates.append(key[1:])
+
+    for candidate in candidates:
+        if candidate.isdigit():
+            mode = int(candidate)
+            if mode in LED_MODE_NAMES:
+                return LED_MODE_NAMES[mode]
+        resolved = LED_ALIASES.get(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def resolve_expression_mode(value: int | str) -> int | None:
+    """Resolve a mode number/name/alias to the LED controller mode number."""
+    if isinstance(value, int):
+        return value if value in LED_MODE_NAMES else None
+    canonical = canonical_expression_name(value)
+    return LED_EXPRESSIONS.get(canonical) if canonical else None
+
+
+def led_expression_catalog() -> list[dict[str, Any]]:
+    """Return frontend/API-safe metadata copied from the LED firmware modes."""
+    return [
+        {
+            "mode": int(item["mode"]),
+            "name": str(item["name"]),
+            "label": str(item.get("label") or item["name"]),
+            "aliases": [str(alias) for alias in item.get("aliases", ())],
+            "animated": bool(item.get("animated", False)),
+        }
+        for item in LED_EXPRESSION_CATALOG
+    ]
 
 
 class LEDController:
-    """Manages the ESP32 LED strip via serial."""
+    """Manages LED expressions through serial or the ESP32 Wi-Fi endpoint."""
 
-    def __init__(self, config: LEDConfig) -> None:
+    def __init__(self, config: LEDConfig, esp32_manager: Any | None = None) -> None:
         self._config = config
+        self._esp32_manager = esp32_manager
         self._serial = None
         self._connected = False
+        self._remote_last_ok = False
+
+    def bind_esp32_manager(self, esp32_manager: Any | None) -> None:
+        self._esp32_manager = esp32_manager
 
     def connect(self) -> None:
         if not self._config.port:
@@ -80,12 +153,20 @@ class LEDController:
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        if self._connected:
+            return True
+        manager = self._esp32_manager
+        if manager is None:
+            return False
+        try:
+            return bool(manager.is_online())
+        except Exception:
+            return bool(self._remote_last_ok)
 
     def set_mode(self, mode: int | str) -> bool:
         """Set LED expression by mode number or name."""
         if isinstance(mode, str):
-            resolved = LED_EXPRESSIONS.get(mode.lower().strip())
+            resolved = resolve_expression_mode(mode)
             if resolved is None:
                 logger.warning("led.unknown_mode", mode=mode)
                 return False
@@ -95,11 +176,15 @@ class LEDController:
             logger.warning("led.invalid_mode", mode=mode)
             return False
 
+        if self._serial is None:
+            return self._send_remote({"mode": mode})
         return self._send(f"m{mode}\n")
 
     def set_brightness(self, brightness: int) -> bool:
         """Set LED brightness (1-255)."""
         brightness = max(1, min(255, brightness))
+        if self._serial is None:
+            return self._send_remote({"brightness": brightness})
         return self._send(f"b{brightness}\n")
 
     def off(self) -> bool:
@@ -118,4 +203,60 @@ class LEDController:
         except Exception:
             logger.exception("led.send_failed", cmd=command.strip())
             self._connected = False
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+            self._serial = None
+            return False
+
+    def _send_remote(self, payload: dict[str, Any]) -> bool:
+        manager = self._esp32_manager
+        if manager is None:
+            logger.debug("led.remote_send_skipped (no esp32 manager)", payload=payload)
+            self._remote_last_ok = False
+            return False
+
+        try:
+            base_url = manager.get_active_base_url()
+        except Exception:
+            base_url = None
+        if not base_url:
+            logger.debug("led.remote_send_skipped (no active esp32)", payload=payload)
+            self._remote_last_ok = False
+            return False
+
+        try:
+            body = manager.with_owner_auth(payload, reason="led") if hasattr(manager, "with_owner_auth") else payload
+            import httpx
+
+            resp = httpx.post(f"{base_url}/device/led", json=body, timeout=2.0)
+            ok = resp.status_code < 400
+            if ok:
+                try:
+                    data = resp.json()
+                    ok = bool(data.get("ok", True))
+                except Exception:
+                    ok = True
+            self._remote_last_ok = ok
+            if ok:
+                logger.info("led.remote_sent", payload=payload, base_url=base_url)
+            else:
+                logger.warning(
+                    "led.remote_send_failed",
+                    payload=payload,
+                    base_url=base_url,
+                    status=resp.status_code,
+                    body=resp.text[:200],
+                )
+            return ok
+        except Exception as exc:
+            logger.warning(
+                "led.remote_send_failed",
+                payload=payload,
+                base_url=base_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            self._remote_last_ok = False
             return False

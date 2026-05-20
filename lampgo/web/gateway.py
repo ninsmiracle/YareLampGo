@@ -25,7 +25,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from lampgo.core.config import LLMConfig, WebConfig
 from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, IntentRouting
-from lampgo.core.led import LED_EXPRESSIONS
+from lampgo.core.led import LED_EXPRESSIONS, led_expression_catalog
 from lampgo.device.audio_stream import redact_ws_owner_token
 from lampgo.perception.camera import CameraCapture
 from lampgo.web.ws_bridge import WsBridge
@@ -179,6 +179,7 @@ class WebGateway:
             Route("/api/device/status", self.api_esp32_status, methods=["GET"]),
             Route("/api/device/snapshot", self.api_esp32_snapshot, methods=["GET"]),
             Route("/api/device/config", self.api_esp32_config, methods=["GET", "POST"]),
+            Route("/api/device/led", self.api_esp32_led, methods=["GET", "POST"]),
             Route("/api/device/pair", self.api_esp32_pair, methods=["POST"]),
             Route("/api/device/unpair", self.api_esp32_unpair, methods=["POST"]),
             Route("/api/device/claim", self.api_esp32_claim, methods=["POST"]),
@@ -443,7 +444,15 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": {"aliases": normalized}})
 
     async def api_expressions(self, request: Request) -> JSONResponse:
-        return JSONResponse({"ok": True, "result": {"expressions": self._list_expressions()}})
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "expressions": self._list_expressions(),
+                    "expression_catalog": self._list_expression_catalog(),
+                },
+            }
+        )
 
     async def api_camera_snap(self, request: Request) -> JSONResponse:
         camera = self._make_camera_capture()
@@ -1697,7 +1706,8 @@ class WebGateway:
         wake_model = ""
         wake_requested_model = ""
         wake_supported_models: list[str] = []
-        if cfg.mic_enabled and self.server.esp32:
+        led_status: dict[str, Any] = {}
+        if cfg.enabled and self.server.esp32:
             try:
                 device_status_code, device_body, _ = await asyncio.wait_for(
                     self.server.esp32.proxy_get("/device/status"),
@@ -1709,6 +1719,19 @@ class WebGateway:
                     wake_ready = bool(device_body.get("wake_ready"))
                     wake_model = str(device_body.get("wake_model") or "")
                     wake_requested_model = str(device_body.get("wake_requested_model") or "")
+                    led_status = {
+                        "ready": bool(device_body.get("led_ready")),
+                        "mode": device_body.get("led_mode"),
+                        "mode_name": device_body.get("led_mode_name"),
+                        "brightness": device_body.get("led_brightness"),
+                        "last_command": device_body.get("led_last_command"),
+                        "last_write_ms": device_body.get("led_last_write_ms"),
+                        "driver": device_body.get("led_driver"),
+                        "pixel_pin": device_body.get("led_pixel_pin"),
+                        "pixel_count": device_body.get("led_pixel_count"),
+                        "panel_count": device_body.get("led_panel_count"),
+                        "output_ok": device_body.get("led_output_ok"),
+                    }
                     raw_models = device_body.get("wake_supported_models") or []
                     if isinstance(raw_models, list):
                         wake_supported_models = [str(m) for m in raw_models if m]
@@ -1728,6 +1751,7 @@ class WebGateway:
                     "wake_requested_model": wake_requested_model,
                     "wake_supported_models": wake_supported_models,
                     "wake_event_clients": wake_event_clients,
+                    "led": led_status,
                     "configured": status["configured"],
                     "online": status["online"],
                     "session_used": status["session_used"],
@@ -1770,6 +1794,30 @@ class WebGateway:
             patch = self.server.esp32.with_owner_auth(patch, reason="config")
         status, body, _ = await self.server.esp32.proxy_post("/device/config", patch)
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_esp32_led(self, request: Request) -> JSONResponse:
+        """GET/POST the ESP32 LED UART bridge."""
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        if request.method == "GET":
+            status, body, _ = await self.server.esp32.proxy_get("/device/led")
+            if isinstance(body, (bytes, bytearray)):
+                try:
+                    body = json.loads(bytes(body).decode("utf-8"))
+                except Exception:
+                    body = {"ok": False, "error": "non_json_response"}
+            return JSONResponse(self._with_expression_catalog(body), status_code=status)
+
+        try:
+            patch = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+        if not isinstance(patch, dict):
+            return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        if self.server.esp32 and hasattr(self.server.esp32, "with_owner_auth"):
+            patch = self.server.esp32.with_owner_auth(patch, reason="led")
+        status, body, _ = await self.server.esp32.proxy_post("/device/led", patch)
+        return JSONResponse(self._with_expression_catalog(body), status_code=status)
 
     async def api_esp32_pair(self, request: Request) -> JSONResponse:
         if not self.server.esp32:
@@ -2747,7 +2795,10 @@ class WebGateway:
             await ws.send_json(
                 {
                     "ok": True,
-                    "result": {"expressions": self._list_expressions()},
+                    "result": {
+                        "expressions": self._list_expressions(),
+                        "expression_catalog": self._list_expression_catalog(),
+                    },
                     "request_id": request_id,
                 }
             )
@@ -3048,4 +3099,15 @@ class WebGateway:
         return sorted(names)
 
     def _list_expressions(self) -> list[str]:
-        return sorted(LED_EXPRESSIONS.keys())
+        return [item["name"] for item in self._list_expression_catalog()]
+
+    def _list_expression_catalog(self) -> list[dict[str, Any]]:
+        return led_expression_catalog()
+
+    def _with_expression_catalog(self, body: Any) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            return {"ok": False, "raw": str(body)}
+        merged = dict(body)
+        merged.setdefault("expressions", self._list_expressions())
+        merged.setdefault("expression_catalog", self._list_expression_catalog())
+        return merged

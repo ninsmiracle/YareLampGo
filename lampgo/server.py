@@ -83,16 +83,17 @@ class LampgoServer:
         self.hal = HardwareAbstraction(config.device)
         self.safety = SafetyKernel(config.safety)
         self.motion = MotionRuntime(self.hal, self.safety, config.motion)
+        self.esp32 = Esp32DeviceManager(config.device_esp32)
         # Backward-compatible LED port resolution:
-        # prefer explicit [led].port, then fallback to [device].led_port
+        # prefer explicit [led].port, then fallback to [device].led_port,
+        # then fallback to the paired ESP32 camera/mic firmware's LED UART bridge.
         led_port = config.led.port or config.device.led_port
-        self.led = LEDController(LEDConfig(port=led_port, baud_rate=config.led.baud_rate))
+        self.led = LEDController(LEDConfig(port=led_port, baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
         self.openclaw = OpenClawAdapter(self.registry, self.executor, self.events)
         self.router = IntentRouter()
-        self.esp32 = Esp32DeviceManager(config.device_esp32)
         self._stt: MimoSTT = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
