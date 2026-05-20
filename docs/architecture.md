@@ -101,7 +101,7 @@ LLM 工具列表由当前 `SkillRegistry` 生成。用户在 Web UI 或 OpenClaw
 | 运动 | `lampgo/core/motion.py` | 50Hz 控制循环，支持目标驱动和轨迹驱动。 |
 | 安全 | `lampgo/core/safety.py` | 关节限位、速度/加速度上限、急停状态。 |
 | 动作风格 | `lampgo/core/style.py`、`spring.py`、`trajectory.py` | 平滑、弹簧、呼吸感、重叠动作等表达层。 |
-| LED | `lampgo/core/led.py` | ESP32 串口 LED 表情控制。 |
+| LED | `lampgo/core/led.py` | 本机串口或 ESP32 `/device/led` 串口桥的 LED 表情控制。 |
 | ESP32 设备 | `lampgo/device/esp32.py` | mDNS 发现、健康检查、HTTP 代理、摄像头抓帧。 |
 | ESP32 音频 | `lampgo/device/audio_stream.py` | 通过 WebSocket 接收 ESP32 PCM 音频。 |
 | 摄像头 | `lampgo/perception/camera.py` | 优先 ESP32 摄像头，也支持本地 OpenCV 摄像头。 |

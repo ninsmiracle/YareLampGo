@@ -344,6 +344,17 @@ class Esp32DeviceManager:
             "pairing_state",
             "pairing_supported",
             "ip",
+            "led_ready",
+            "led_mode",
+            "led_mode_name",
+            "led_brightness",
+            "led_last_command",
+            "led_last_write_ms",
+            "led_driver",
+            "led_pixel_pin",
+            "led_pixel_count",
+            "led_panel_count",
+            "led_output_ok",
         ):
             if key in body:
                 dev.extras[key] = body.get(key)

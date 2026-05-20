@@ -8,8 +8,11 @@
 | 3 | blue | 蓝色 | Solid blue |
 | 4 | white | 白色, 照明 | Solid white (desk light) |
 | 5 | theater | 剧场 | Theater chase effect |
+| 6 | theaterred | redtheater, 红色剧场 | Red theater chase effect |
+| 7 | theatergreen | greentheater, 绿色剧场 | Green theater chase effect |
+| 8 | theaterblue | bluetheater, 蓝色剧场 | Blue theater chase effect |
 | 9 | rainbow | 彩虹 | Rainbow cycle |
-| 10 | smiley | 笑脸, 开心 | Smiley face |
+| 10 | smiley | smile, happy, 笑脸, 开心 | Smiley face |
 | 11 | crying | 哭脸, 难过 | Crying face |
 | 12 | left | 左箭头 | Left arrow |
 | 13 | right | 右箭头 | Right arrow |
@@ -26,8 +29,8 @@
 | 24 | down | 下箭头 | Down arrow |
 | 25 | sleep | 睡觉, 休眠 | Sleep/Zzz |
 | 26 | thinking | 思考 | Thinking dots |
-| 27 | heart | 爱心 | Heart |
-| 28 | heartbreak | 心碎 | Broken heart |
+| 27 | heart | love, 爱心, 心动 | Heart |
+| 28 | heartbreak | broken, 心碎 | Broken heart |
 | 29 | helpless | 无奈 | Helpless/sweat |
 
 ## Invocation

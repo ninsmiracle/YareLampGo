@@ -47,7 +47,7 @@ use_degrees = true
 ```
 
 - `motor_port`：Feetech 电机总线串口。
-- `led_port`：ESP32 LED 控制器串口，留空则禁用 LED。
+- `led_port`：本机直连 LED 控制器串口；留空时，如果启用了 ESP32 无线设备，表情会通过 ESP32 的 `/device/led` 串口桥发送。
 - `lamp_id`：用于匹配 `assets/calibration/` 下的校准文件。
 - `use_degrees`：是否使用角度制。
 

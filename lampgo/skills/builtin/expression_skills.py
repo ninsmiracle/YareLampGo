@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lampgo.core.led import LED_EXPRESSIONS
+from lampgo.core.led import LED_EXPRESSIONS, canonical_expression_name
 from lampgo.core.types import SkillResult
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
@@ -28,13 +28,23 @@ class SetExpressionSkill(Skill):
         if not expression:
             return SkillResult(status="error", message="Expression name required")
 
-        if expression.lower().strip() not in LED_EXPRESSIONS:
+        canonical = canonical_expression_name(str(expression))
+        if canonical is None:
             valid = ", ".join(LED_EXPRESSIONS.keys())
             return SkillResult(status="error", message=f"Unknown expression: {expression}. Valid: {valid}")
 
         brightness = params.get("brightness")
         if brightness is not None:
-            ctx.led.set_brightness(int(brightness))
+            if not ctx.led.set_brightness(int(brightness)):
+                return SkillResult(status="error", message="LED controller not connected")
 
-        ctx.led.set_mode(expression)
-        return SkillResult(status="ok", data={"expression": expression})
+        if not ctx.led.set_mode(canonical):
+            return SkillResult(status="error", message="LED controller not connected or expression send failed")
+        return SkillResult(
+            status="ok",
+            data={
+                "expression": canonical,
+                "requested_expression": str(expression),
+                "mode": LED_EXPRESSIONS[canonical],
+            },
+        )
