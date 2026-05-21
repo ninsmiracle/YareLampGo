@@ -25,7 +25,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from lampgo.core.config import LLMConfig, WebConfig
 from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, IntentRouting
-from lampgo.core.led import LED_EXPRESSIONS, led_expression_catalog
+from lampgo.core.led import led_expression_catalog
 from lampgo.device.audio_stream import redact_ws_owner_token
 from lampgo.perception.camera import CameraCapture
 from lampgo.web.ws_bridge import WsBridge
@@ -970,21 +970,18 @@ class WebGateway:
     # Generic configuration endpoints (device / voice / motion / safety)
     # ------------------------------------------------------------------
 
-    # Fields that require a daemon restart to take effect (can't be applied
-    # to a live motion loop without reconnecting hardware).
+    # Fields that require a daemon restart to take effect.
     #
     # Deliberately NOT listed here:
+    #   - device.motor_port → hot-reconnected by `server.reload_motor_runtime`.
     #   - camera.port      → hot-swapped via the set_camera WS command in
     #                        `server._handle_set_camera`; the Web UI also
     #                        rebroadcasts this on save.
     #   - voice.mic_device → hot-swapped via set_mic / WakeLoop.set_mic_device.
     _COLD_RESTART_FIELDS: frozenset[str] = frozenset(
         {
-            "device.motor_port",
-            "device.led_port",
             "device.lamp_id",
             "device.use_degrees",
-            "led.port",
             "led.baud_rate",
             "web.host",
             "web.port",
@@ -995,12 +992,16 @@ class WebGateway:
     _VOICE_HOT_RELOAD_FIELDS: frozenset[str] = frozenset(
         {
             "voice.wake_word",
+            "voice.tts_provider",
+            "voice.tts_model",
+            "voice.tts_voice",
             "voice.livekit_url",
             "voice.livekit_api_key",
             "voice.livekit_api_secret",
             "voice.livekit_room",
             "voice.volcengine_app_id",
             "voice.volcengine_access_token",
+            "voice.livekit_tts_voice",
         }
     )
 
@@ -1009,10 +1010,8 @@ class WebGateway:
     _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         "device": (
             "device.motor_port",
-            "device.led_port",
             "device.lamp_id",
             "device.use_degrees",
-            "led.port",
         ),
         "voice": (
             "voice.stt_provider",
@@ -1207,7 +1206,18 @@ class WebGateway:
             setattr(obj, tail, coerced)
 
     async def api_config_device(self, request: Request) -> JSONResponse:
-        return await self._save_section(request, "device")
+        response = await self._save_section(request, "device")
+        if response.status_code != 200:
+            return response
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except Exception:
+            return response
+        saved = set((payload.get("result") or {}).get("saved") or [])
+        if "device.motor_port" in saved:
+            reload_result = await self.server.reload_motor_runtime()
+            payload.setdefault("result", {}).setdefault("hot_reload", {})["device.motor_port"] = reload_result
+        return JSONResponse(payload, status_code=response.status_code)
 
     async def api_config_voice(self, request: Request) -> JSONResponse:
         result = await self._save_section(request, "voice")
@@ -1307,6 +1317,7 @@ class WebGateway:
                         "temperature": cfg.temperature,
                         "timeout_s": cfg.timeout_s,
                         "history_turns": cfg.history_turns,
+                        "enable_thinking": bool(cfg.enable_thinking),
                         "share_openclaw_memory": share_memory,
                         "provider_presets": self._PROVIDER_PRESETS,
                         # MiMo web search sub-service (see LLMConfig docstring).
@@ -1340,6 +1351,7 @@ class WebGateway:
                 "temperature",
                 "timeout_s",
                 "history_turns",
+                "enable_thinking",
                 "web_search_enabled",
                 "web_search_force",
                 "web_search_limit",
@@ -1361,10 +1373,11 @@ class WebGateway:
         validate = bool(body.get("validate", True))
         dry_run = bool(body.get("dry_run", False))
         # PATCH-like semantics: when the client omits a key from the body,
-        # keep the current value.  This matters because the "MiMo 联网搜索"
-        # card saves with a subset of fields and MUST NOT clobber the main
-        # LLM's api_base / message_type / fast_model.  The short-circuit at
-        # the top of this handler already covers the share-memory-only POST;
+        # keep the current value.  This matters because legacy/API callers
+        # may still save a subset of web_search_* fields and MUST NOT clobber
+        # the main LLM's api_base / message_type / fast_model.
+        # The short-circuit at the top of this handler already covers the
+        # share-memory-only POST;
         # every other partial-update path goes through here.
         current_llm = self.server.config.llm
         provider = str(body.get("provider") or "").strip() or current_llm.provider
@@ -1422,27 +1435,6 @@ class WebGateway:
 
         history_turns_val = _coerce_history_turns(body.get("history_turns"), current_llm.history_turns)
 
-        # ------------------------------------------------------------------
-        # MiMo web search sub-service fields.
-        #
-        # These travel alongside the main LLM settings because (a) the UI
-        # surfaces them in the same card and (b) ``web_search`` falls back
-        # to reusing the main ``api_key`` when ``provider == "mimo"`` (see
-        # ``_resolve_web_search_api_key``).  But they are logically
-        # **independent** of the main LLM path — web search always talks
-        # MiMo OpenAI-compat no matter what ``provider`` / ``message_type``
-        # the primary LLM is set to.  Keep that invariant when touching
-        # this block.
-        # ------------------------------------------------------------------
-        def _coerce_bounded_int(raw: Any, fallback: int, *, lo: int, hi: int) -> int:
-            if raw is None or raw == "":
-                return int(fallback)
-            try:
-                v = int(raw)
-            except (TypeError, ValueError):
-                return int(fallback)
-            return max(lo, min(hi, v))
-
         def _opt_bool(raw: Any, fallback: bool) -> bool:
             if raw is None:
                 return bool(fallback)
@@ -1457,7 +1449,30 @@ class WebGateway:
                 return False
             return bool(fallback)
 
+        enable_thinking_val = _opt_bool(body.get("enable_thinking"), current_llm.enable_thinking)
+
+        # ------------------------------------------------------------------
+        # MiMo web search sub-service fields.
+        #
+        # These travel alongside the main LLM settings for backwards
+        # compatibility with existing config files and API callers.
+        # The frontend no longer exposes them: when ``provider == "mimo"``
+        # web search defaults on and reuses the main MiMo key. The actual
+        # search sub-service remains logically independent of the main LLM
+        # path and always talks MiMo OpenAI-compat.
+        # ------------------------------------------------------------------
+        def _coerce_bounded_int(raw: Any, fallback: int, *, lo: int, hi: int) -> int:
+            if raw is None or raw == "":
+                return int(fallback)
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return int(fallback)
+            return max(lo, min(hi, v))
+
         ws_enabled = _opt_bool(body.get("web_search_enabled"), current_llm.web_search_enabled)
+        if provider == "mimo" and "web_search_enabled" not in body:
+            ws_enabled = True
         ws_force = _opt_bool(body.get("web_search_force"), current_llm.web_search_force)
         ws_limit = _coerce_bounded_int(body.get("web_search_limit"), current_llm.web_search_limit, lo=1, hi=10)
         ws_max_keyword = _coerce_bounded_int(
@@ -1512,6 +1527,7 @@ class WebGateway:
                 "temperature": temperature_val,
                 "timeout_s": timeout_s_val,
                 "history_turns": history_turns_val,
+                "enable_thinking": enable_thinking_val,
                 "web_search_enabled": ws_enabled,
                 "web_search_force": ws_force,
                 "web_search_limit": ws_limit,
@@ -1559,6 +1575,7 @@ class WebGateway:
         cfg.llm.temperature = temperature_val
         cfg.llm.timeout_s = timeout_s_val
         cfg.llm.history_turns = history_turns_val
+        cfg.llm.enable_thinking = enable_thinking_val
         cfg.llm.web_search_enabled = ws_enabled
         cfg.llm.web_search_force = ws_force
         cfg.llm.web_search_limit = ws_limit
@@ -1598,6 +1615,7 @@ class WebGateway:
                     "temperature": temperature_val,
                     "timeout_s": timeout_s_val,
                     "history_turns": history_turns_val,
+                    "enable_thinking": enable_thinking_val,
                     "api_key_preview": personastore.mask_api_key(effective_key),
                     "api_key_is_set": bool(effective_key),
                     "web_search_enabled": ws_enabled,
@@ -2650,7 +2668,11 @@ class WebGateway:
                         "input": text,
                         "request_id": request_id,
                         "history": history,
-                        "enable_thinking": bool(msg.get("enable_thinking")),
+                        "enable_thinking": (
+                            bool(msg.get("enable_thinking"))
+                            if "enable_thinking" in msg
+                            else bool(self.server.config.llm.enable_thinking)
+                        ),
                     }
                 )
 
@@ -2690,7 +2712,11 @@ class WebGateway:
                         "audio_data": audio_data,
                         "request_id": request_id,
                         "history": history,
-                        "enable_thinking": bool(msg.get("enable_thinking")),
+                        "enable_thinking": (
+                            bool(msg.get("enable_thinking"))
+                            if "enable_thinking" in msg
+                            else bool(self.server.config.llm.enable_thinking)
+                        ),
                     }
                 )
                 result["request_id"] = request_id
@@ -2843,6 +2869,11 @@ class WebGateway:
         elif msg_type == "stop_tts":
             cancelled = self.server.cancel_pending_tts()
             await ws.send_json({"ok": True, "result": {"cancelled": cancelled}, "request_id": request_id})
+
+        elif msg_type == "tts_playback_client":
+            active = bool(msg.get("active", True))
+            await self.bridge.claim_tts_client(ws, active=active)
+            await ws.send_json({"ok": True, "result": {"active": active}, "request_id": request_id})
 
         elif msg_type == "start_conversation":
             result = await self.server.handle_request({"cmd": "start_conversation"})

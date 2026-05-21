@@ -6,7 +6,6 @@
   const chatMessages = document.getElementById("chat-messages");
   const chatForm = document.getElementById("chat-form");
   const chatInput = document.getElementById("chat-input");
-  const chatThinkingToggle = document.getElementById("chat-thinking-toggle");
   const connDot = document.getElementById("conn-dot");
   const connText = document.getElementById("conn-text");
   const connBadge = document.getElementById("conn-badge");
@@ -1767,6 +1766,23 @@
     window.addEventListener("beforeunload", releaseWebPageOwner);
   }
 
+  function claimTtsPlaybackClient(active = true) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !webPageOwnerActive) return;
+    const visible = document.visibilityState !== "hidden";
+    ws.send(JSON.stringify({
+      type: "tts_playback_client",
+      active: !!active && visible,
+      client_id: webPageClientId,
+      visible,
+      focused: typeof document.hasFocus === "function" ? document.hasFocus() : true,
+    }));
+  }
+
+  window.addEventListener("focus", () => claimTtsPlaybackClient(true));
+  document.addEventListener("visibilitychange", () => {
+    claimTtsPlaybackClient(document.visibilityState !== "hidden");
+  });
+
   function connect() {
     if (!webPageOwnerActive) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -1783,6 +1799,7 @@
       ws.send(JSON.stringify({ type: "expressions" }));
       ws.send(JSON.stringify({ type: "openclaw_tasks" }));
       ws.send(JSON.stringify({ type: "status" }));
+      claimTtsPlaybackClient();
       // Pre-populate the Hardware settings dropdowns (camera.port /
       // voice.mic_device) so the user never sees "(自定义，保留原值)" as the
       // only option. These probes are cheap on the server and the results
@@ -2469,7 +2486,9 @@
     else if (evt === "OpenClawPromotionRequested" && data.task) upsertOpenClawTask(data.task);
     else if (evt === "OpenClawPromotionDecision" && data.task) upsertOpenClawTask(data.task);
 
-    if (evt === "TtsAudio" && data.audio && !lkRoom) handleTtsAudio(data.audio, data.format || "mp3");
+    if (evt === "TtsAudio" && data.audio && !lkRoom) {
+      handleTtsAudio(data.audio, data.format || "mp3", data.sample_rate || data.sampleRate || 0);
+    }
     if (evt === "ConversationStateChanged" && data.state && !lkRoom) updateCallViewState(data.state);
     if (evt === "WakeWordDetected") {
       if (
@@ -3654,7 +3673,6 @@
       input: text,
       request_id: requestId,
       history,
-      enable_thinking: !!(chatThinkingToggle && chatThinkingToggle.checked),
     });
   });
 
@@ -6170,7 +6188,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       audio_data: b64,
       request_id: requestId,
       history,
-      enable_thinking: !!(chatThinkingToggle && chatThinkingToggle.checked),
     });
   }
 
@@ -6372,6 +6389,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   let ttsCurrentSource = null;
   let ttsCurrentAudioEl = null;
   let ttsCurrentEsp32Ws = null;
+  let ttsEsp32IdleCloseTimer = null;
   let ttsStopped = false;
   const ESP32_TTS_SAMPLE_RATE = 16000;
   const ESP32_TTS_FRAME_SAMPLES = 320; // 20 ms @ 16 kHz, safely under ESP32 frame limit.
@@ -6392,12 +6410,12 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return ttsAudioContext;
   }
 
-  function handleTtsAudio(audioB64, format) {
-    const mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", pcm16: "audio/wav", opus: "audio/ogg" };
+  function handleTtsAudio(audioB64, format, sampleRate) {
+    const mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", opus: "audio/ogg" };
     const mime = mimeMap[format] || "audio/mpeg";
     const bytes = Uint8Array.from(atob(audioB64), (c) => c.charCodeAt(0));
     ttsStopped = false;
-    ttsQueue.push({ bytes, mime, format });
+    ttsQueue.push({ bytes, mime, format, sampleRate: Number(sampleRate) || 24000 });
     if (!ttsPlaying) void playNextTts();
   }
 
@@ -6430,6 +6448,13 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   }
 
   async function openEsp32TtsSpeakerWs() {
+    if (ttsEsp32IdleCloseTimer) {
+      window.clearTimeout(ttsEsp32IdleCloseTimer);
+      ttsEsp32IdleCloseTimer = null;
+    }
+    if (ttsCurrentEsp32Ws && ttsCurrentEsp32Ws.readyState === WebSocket.OPEN) {
+      return ttsCurrentEsp32Ws;
+    }
     const esp = cameraCache && cameraCache.esp32 ? cameraCache.esp32 : null;
     if (esp && esp.online === false) throw new Error("ESP32 设备离线");
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -6454,6 +6479,17 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return speakerWs;
   }
 
+  function scheduleEsp32TtsSpeakerClose() {
+    if (ttsEsp32IdleCloseTimer) window.clearTimeout(ttsEsp32IdleCloseTimer);
+    ttsEsp32IdleCloseTimer = window.setTimeout(() => {
+      ttsEsp32IdleCloseTimer = null;
+      if (ttsCurrentEsp32Ws) {
+        try { ttsCurrentEsp32Ws.close(); } catch (_) { /* ignore */ }
+        ttsCurrentEsp32Ws = null;
+      }
+    }, 800);
+  }
+
   function mixAudioBufferToMono(audioBuffer) {
     const channelCount = Math.max(1, audioBuffer.numberOfChannels || 1);
     const mono = new Float32Array(audioBuffer.length);
@@ -6466,7 +6502,21 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return mono;
   }
 
+  function pcm16BytesToFloat32(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const samples = Math.floor(bytes.byteLength / 2);
+    const out = new Float32Array(samples);
+    for (let i = 0; i < samples; i++) {
+      out[i] = Math.max(-1, Math.min(1, view.getInt16(i * 2, true) / 32768));
+    }
+    return out;
+  }
+
   async function decodeTtsChunkToEsp32Pcm(chunk) {
+    if (chunk.format === "pcm16") {
+      const mono = pcm16BytesToFloat32(chunk.bytes);
+      return floatToPcm16(downsampleFloat32(mono, chunk.sampleRate || 24000, ESP32_TTS_SAMPLE_RATE));
+    }
     const ctx = await unlockTtsPlayback();
     if (!ctx) throw new Error("浏览器不支持 AudioContext 解码");
     const blob = new Blob([chunk.bytes], { type: chunk.mime });
@@ -6477,7 +6527,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return pcm16;
   }
 
-  async function streamPcm16ToEsp32Speaker(pcm16) {
+  async function streamPcm16ToEsp32Speaker(pcm16, keepOpen) {
     const speakerWs = await openEsp32TtsSpeakerWs();
     try {
       for (let offset = 0; offset < pcm16.length && !ttsStopped; offset += ESP32_TTS_FRAME_SAMPLES) {
@@ -6490,21 +6540,44 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       }
       return !ttsStopped;
     } finally {
-      if (ttsCurrentEsp32Ws === speakerWs) ttsCurrentEsp32Ws = null;
-      try { speakerWs.close(); } catch (_) { /* ignore */ }
+      if (keepOpen && !ttsStopped) {
+        scheduleEsp32TtsSpeakerClose();
+      } else {
+        if (ttsCurrentEsp32Ws === speakerWs) ttsCurrentEsp32Ws = null;
+        try { speakerWs.close(); } catch (_) { /* ignore */ }
+      }
     }
   }
 
   async function playTtsChunkViaEsp32(chunk) {
     const pcm16 = await decodeTtsChunkToEsp32Pcm(chunk);
     if (ttsStopped) return true;
-    const ok = await streamPcm16ToEsp32Speaker(pcm16);
+    const ok = await streamPcm16ToEsp32Speaker(pcm16, chunk.format === "pcm16");
     if (ok) console.log("[tts] played through ESP32 speaker");
     return ok;
   }
 
+  async function playRawPcm16ChunkInBrowser(chunk) {
+    const ctx = await unlockTtsPlayback();
+    if (!ctx) throw new Error("浏览器不支持 AudioContext 播放 PCM");
+    const samples = pcm16BytesToFloat32(chunk.bytes);
+    const sampleRate = chunk.sampleRate || 24000;
+    const audioBuffer = ctx.createBuffer(1, samples.length, sampleRate);
+    audioBuffer.copyToChannel(samples, 0);
+    await new Promise((resolve) => {
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      source.onended = () => {
+        ttsCurrentSource = null;
+        resolve();
+      };
+      ttsCurrentSource = source;
+      source.start(0);
+    });
+  }
+
   async function playTtsChunk(chunk) {
-    const blob = new Blob([chunk.bytes], { type: chunk.mime });
     try {
       if (await playTtsChunkViaEsp32(chunk)) return;
     } catch (err) {
@@ -6512,6 +6585,12 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     }
     if (ttsStopped) return;
 
+    if (chunk.format === "pcm16") {
+      await playRawPcm16ChunkInBrowser(chunk);
+      return;
+    }
+
+    const blob = new Blob([chunk.bytes], { type: chunk.mime });
     const ctx = await unlockTtsPlayback();
     if (ctx) {
       try {
@@ -6571,6 +6650,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       try { ttsCurrentEsp32Ws.close(); } catch (_) {}
       ttsCurrentEsp32Ws = null;
     }
+    if (ttsEsp32IdleCloseTimer) {
+      window.clearTimeout(ttsEsp32IdleCloseTimer);
+      ttsEsp32IdleCloseTimer = null;
+    }
     ttsPlaying = false;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "stop_tts" }));
@@ -6610,6 +6693,19 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       throw new Error(err);
     }
     return data.result || {};
+  }
+
+  function applyLlmRuntimeDefaults(result) {
+    if (!result) return;
+    if (typeof result.history_turns === "number") settingsHistoryTurns = result.history_turns;
+  }
+
+  async function refreshLlmRuntimeDefaults() {
+    try {
+      applyLlmRuntimeDefaults(await fetchJson("/api/config/llm"));
+    } catch (err) {
+      console.warn("[settings] failed to load LLM runtime defaults", err);
+    }
   }
 
   // Pick the Base URL for a (provider, message_type) pair from the
@@ -6729,7 +6825,11 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const fieldEl = document.getElementById("cfg-llm-provider-custom-field");
     const inputEl = document.getElementById("cfg-llm-provider-custom");
     const isCustom = selectedProvider === "custom";
-    if (fieldEl) fieldEl.hidden = !isCustom;
+    if (fieldEl) {
+      fieldEl.hidden = !isCustom;
+      fieldEl.classList.toggle("hidden", !isCustom);
+      fieldEl.style.display = isCustom ? "" : "none";
+    }
     if (inputEl) {
       inputEl.disabled = !isCustom;
       if (typeof customValue === "string") inputEl.value = customValue;
@@ -6751,22 +6851,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return customValue;
   }
 
-  // --- MiMo 联网搜索子服务 DOM 引用 ---------------------------------
-  // 这些字段隶属于 LLM 卡片，但语义独立（见 index.html 注释）。统一放
-  // 在一个 helper 里避免 load/save/test 三处重复获取。
-  function _wsEls() {
-    return {
-      enabled: document.getElementById("cfg-llm-web-search-enabled"),
-      force: document.getElementById("cfg-llm-web-search-force"),
-      key: document.getElementById("cfg-llm-web-search-api-key"),
-      limit: document.getElementById("cfg-llm-web-search-limit"),
-      maxKeyword: document.getElementById("cfg-llm-web-search-max-keyword"),
-      country: document.getElementById("cfg-llm-web-search-country"),
-      region: document.getElementById("cfg-llm-web-search-region"),
-      city: document.getElementById("cfg-llm-web-search-city"),
-    };
-  }
-
   async function loadLlmConfig() {
     const provEl = document.getElementById("cfg-llm-provider");
     const customProvEl = document.getElementById("cfg-llm-provider-custom");
@@ -6781,12 +6865,13 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const tempEl = document.getElementById("cfg-llm-temperature");
     const timeoutEl = document.getElementById("cfg-llm-timeout");
     const historyEl = document.getElementById("cfg-llm-history-turns");
+    const thinkingEl = document.getElementById("cfg-llm-enable-thinking");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
-    const ws = _wsEls();
     const status = document.getElementById("cfg-llm-status");
     setSettingsStatus(status, "加载中…");
     try {
       const result = await fetchJson("/api/config/llm");
+      applyLlmRuntimeDefaults(result);
       settingsProviderPresets = result.provider_presets || null;
       if (provEl && result.provider) {
         const known = Array.from(provEl.options).some((opt) => opt.value === result.provider);
@@ -6826,27 +6911,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       }
       if (historyEl && typeof result.history_turns === "number") {
         historyEl.value = String(result.history_turns);
-        settingsHistoryTurns = result.history_turns;
       }
+      if (thinkingEl) thinkingEl.checked = !!result.enable_thinking;
       if (shareEl) shareEl.checked = !!result.share_openclaw_memory;
-      if (ws.enabled) ws.enabled.checked = !!result.web_search_enabled;
-      if (ws.force) ws.force.checked = !!result.web_search_force;
-      if (ws.limit && typeof result.web_search_limit === "number") {
-        ws.limit.value = String(result.web_search_limit);
-      }
-      if (ws.maxKeyword && typeof result.web_search_max_keyword === "number") {
-        ws.maxKeyword.value = String(result.web_search_max_keyword);
-      }
-      if (ws.country) ws.country.value = result.web_search_country || "";
-      if (ws.region) ws.region.value = result.web_search_region || "";
-      if (ws.city) ws.city.value = result.web_search_city || "";
-      if (ws.key) {
-        ws.key.value = "";
-        ws.key.placeholder = result.web_search_api_key_is_set
-          ? (result.web_search_api_key_preview || "已设置（留空保持不变）")
-          : "留空则复用上方 API Key（仅当 Provider=MiMo 时）";
+      if (provEl && provEl.value !== "custom") {
+        applyProviderPreset(provEl.value, { source: "load" });
       }
       setSettingsStatus(status, "");
+      refreshLlmFormatMismatchWarning();
     } catch (err) {
       setSettingsStatus(status, `加载失败：${err.message}`, "error");
     }
@@ -6864,12 +6936,20 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const tempEl = document.getElementById("cfg-llm-temperature");
     const timeoutEl = document.getElementById("cfg-llm-timeout");
     const historyEl = document.getElementById("cfg-llm-history-turns");
+    const thinkingEl = document.getElementById("cfg-llm-enable-thinking");
     const shareEl = document.getElementById("cfg-share-openclaw-memory");
     const status = document.getElementById("cfg-llm-status");
     const btnSave = document.getElementById("btn-cfg-llm-save");
     const btnTest = document.getElementById("btn-cfg-llm-test");
     const providerValue = resolveProviderInput();
     if (!providerValue) return;
+    const normalizedProvider = String(providerValue || "").trim().toLowerCase();
+    const useMimoWebSearch = (
+      normalizedProvider === "mimo" ||
+      normalizedProvider === "xiaomi" ||
+      normalizedProvider === "mimo-anthropic" ||
+      normalizedProvider === "xiaomi-mimo"
+    );
     const parseIntOrNull = (el) => {
       if (!el || el.value === "" || el.value == null) return null;
       const v = parseInt(el.value, 10);
@@ -6900,10 +6980,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
             return Number.isFinite(v) && v >= 0 ? v : null;
           })()
         : null,
+      enable_thinking: thinkingEl ? !!thinkingEl.checked : false,
       share_openclaw_memory: shareEl ? shareEl.checked : undefined,
-      // MiMo 联网搜索字段现在归属独立的 "MiMo 联网搜索" 卡片。
-      // 主 LLM 保存按钮不再捎带它们，避免误覆盖 —— web_search
-      // 子服务的变更请用它自己的保存按钮（saveWebSearchConfig）。
+      web_search_enabled: useMimoWebSearch,
     };
     setSettingsStatus(status, validate ? "正在测试连接…" : "保存中…");
     if (btnSave) btnSave.disabled = true;
@@ -6926,8 +7005,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       if (timeoutEl && typeof result.timeout_s === "number") timeoutEl.value = String(result.timeout_s);
       if (historyEl && typeof result.history_turns === "number") {
         historyEl.value = String(result.history_turns);
-        settingsHistoryTurns = result.history_turns;
       }
+      applyLlmRuntimeDefaults(result);
+      if (thinkingEl) thinkingEl.checked = !!result.enable_thinking;
       setSettingsStatus(
         status,
         validate ? "已应用，下一条消息即生效。" : "已保存。",
@@ -6974,70 +7054,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       }
     } catch (err) {
       setSettingsStatus(status, `连接失败：${err.message}`, "error");
-    }
-  }
-
-  // ----------------------------------------------------------------------
-  // MiMo 联网搜索子服务的独立保存。
-  //
-  // 只 POST web_search_* 字段 + validate:false（本 card 不做 ping，因为
-  // 真要 ping 得拿 MiMo key 去打 xiaomimimo.com，主 LLM 的 /api/config/llm
-  // probe 是按主 Provider 的 base_url 跑的，对这张 card 意义不大）。
-  // 后端在 body 没带主 LLM 字段时会沿用当前运行时 config（见 gateway.py
-  // api_config_llm 里的 `str(body.get(...)) or current_llm.xxx` 模式），
-  // 所以这里安全。
-  // ----------------------------------------------------------------------
-  async function saveWebSearchConfig() {
-    const ws = _wsEls();
-    const status = document.getElementById("cfg-web-search-status");
-    const btn = document.getElementById("btn-cfg-web-search-save");
-    const parseIntOrNull = (el) => {
-      if (!el || el.value === "" || el.value == null) return null;
-      const v = parseInt(el.value, 10);
-      return Number.isFinite(v) && v > 0 ? v : null;
-    };
-    const body = {
-      validate: false,
-      web_search_enabled: ws.enabled ? !!ws.enabled.checked : undefined,
-      web_search_force: ws.force ? !!ws.force.checked : undefined,
-      web_search_api_key: ws.key && ws.key.value ? ws.key.value : "",
-      web_search_limit: parseIntOrNull(ws.limit),
-      web_search_max_keyword: parseIntOrNull(ws.maxKeyword),
-      web_search_country: ws.country ? ws.country.value.trim() : "",
-      web_search_region: ws.region ? ws.region.value.trim() : "",
-      web_search_city: ws.city ? ws.city.value.trim() : "",
-    };
-    setSettingsStatus(status, "保存中…");
-    if (btn) btn.disabled = true;
-    try {
-      const result = await fetchJson("/api/config/llm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (ws.key) {
-        ws.key.value = "";
-        ws.key.placeholder = result.web_search_api_key_is_set
-          ? (result.web_search_api_key_preview || "已设置（留空保持不变）")
-          : "留空则复用主 API Key（仅当主 Provider=MiMo 时）";
-      }
-      if (ws.enabled && typeof result.web_search_enabled === "boolean") {
-        ws.enabled.checked = !!result.web_search_enabled;
-      }
-      if (ws.force && typeof result.web_search_force === "boolean") {
-        ws.force.checked = !!result.web_search_force;
-      }
-      if (ws.limit && typeof result.web_search_limit === "number") {
-        ws.limit.value = String(result.web_search_limit);
-      }
-      if (ws.maxKeyword && typeof result.web_search_max_keyword === "number") {
-        ws.maxKeyword.value = String(result.web_search_max_keyword);
-      }
-      setSettingsStatus(status, "已保存，下一条消息即生效。", "ok");
-    } catch (err) {
-      setSettingsStatus(status, `失败：${err.message}`, "error");
-    } finally {
-      if (btn) btn.disabled = false;
     }
   }
 
@@ -7378,11 +7394,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       btnTest._bound = true;
       btnTest.addEventListener("click", () => testLlmConfig());
     }
-    const btnWebSearchSave = document.getElementById("btn-cfg-web-search-save");
-    if (btnWebSearchSave && !btnWebSearchSave._bound) {
-      btnWebSearchSave._bound = true;
-      btnWebSearchSave.addEventListener("click", () => saveWebSearchConfig());
-    }
     // Persona file switches
     document.querySelectorAll(".persona-file").forEach((btn) => {
       if (btn._bound) return;
@@ -7512,7 +7523,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       loadPersonaAll(),
       loadMemoryCore(),
       loadMemoryDailyList(),
-      loadCfgAll(),
+      loadCfgAll().then(() => autoFillMotorPortFromDetect()),
     ]).catch((err) => console.warn("[settings] refresh failed", err));
   }
 
@@ -7547,6 +7558,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   };
 
   let cfgColdRestartFields = [];
+  let cfgMotorAutodetectStarted = false;
 
   // `camera.port` lives in the backend's "voice" section allowlist (camera is
   // voice-adjacent — vision input for the voice assistant). The generic save
@@ -7562,6 +7574,48 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     cameras: [], // [{port: string, name: string}]
     mics: [],    // [{index: string, name: string}]
   };
+
+  function populateSerialPortDatalist(ports) {
+    const list = document.getElementById("cfg-hw-serial-list");
+    if (!list || !Array.isArray(ports)) return;
+    const seen = new Set();
+    list.innerHTML = "";
+    ports.forEach((port) => {
+      const value = String(port || "").trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      const opt = document.createElement("option");
+      opt.value = value;
+      list.appendChild(opt);
+    });
+  }
+
+  async function autoFillMotorPortFromDetect() {
+    if (cfgMotorAutodetectStarted) return;
+    cfgMotorAutodetectStarted = true;
+    const input = document.querySelector('[data-cfg-input="device.motor_port"]');
+    if (!input || input.disabled || String(input.value || "").trim()) return;
+    const statusEl = document.getElementById("cfg-hw-status");
+    const previousStatus = statusEl ? statusEl.textContent : "";
+    if (statusEl) statusEl.textContent = "正在自动检测电机串口…";
+    try {
+      const res = await fetch("/api/config/detect", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok || !body.ok) throw new Error((body && body.error) || `HTTP ${res.status}`);
+      const result = body.result || {};
+      populateSerialPortDatalist(result.all_ports || []);
+      const motorPort = String(result.motor_port || "").trim();
+      if (motorPort && !input.disabled && !String(input.value || "").trim()) {
+        input.value = motorPort;
+        if (statusEl) statusEl.textContent = `已检测到电机串口 ${motorPort}，保存后会立即热重连。`;
+      } else if (statusEl) {
+        statusEl.textContent = previousStatus || "";
+      }
+    } catch (err) {
+      console.warn("[settings] motor autodetect failed", err);
+      if (statusEl) statusEl.textContent = previousStatus || "";
+    }
+  }
 
   function repopulateCameraPortSelect(desiredValue) {
     const sel = document.querySelector("[data-cfg-camera-port]");
@@ -7629,13 +7683,13 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     sel.value = keep || "";
   }
 
-  // Voices offered per TTS provider. `mimo_default` is the only voice-id we
-  // have verified against MiMo-V2-TTS's public API; edge-tts supports hundreds
-  // more, we surface a curated short list. If the stored value isn't in either
-  // list we keep it as an extra option so saves don't silently rewrite it.
+  // Voices offered per TTS provider. Volcengine supports many more voices; we
+  // surface the default BigTTS voice plus keep custom stored values.
   const TTS_VOICE_OPTIONS = {
-    mimo: [
-      { value: "mimo_default", label: "mimo_default（默认）" },
+    volcengine: [
+      { value: "zh_female_vv_uranus_bigtts", label: "zh_female_vv_uranus_bigtts（默认）" },
+      { value: "zh_female_cancan_mars_bigtts", label: "zh_female_cancan_mars_bigtts" },
+      { value: "zh_male_M392_conversation_wvae_bigtts", label: "zh_male_M392_conversation_wvae_bigtts" },
     ],
     "edge-tts": [
       { value: "zh-CN-XiaoxiaoNeural", label: "zh-CN-XiaoxiaoNeural（晓晓 · 中文女声）" },
@@ -7659,35 +7713,26 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   };
 
   // Toggle the TTS Model ID input based on the current provider.
-  //
-  // Design rationale:
-  //   * Only MiMo uses a `model` field in its HTTP request body. Edge-tts has
-  //     no model concept, so leaving the field editable would just produce a
-  //     confusing "this does nothing" situation — and worse, saving it while
-  //     on edge-tts means the value stays on disk and silently takes effect
-  //     the next time the user switches back to mimo with maybe an invalid id.
-  //   * Disabled inputs are skipped by saveCfgFromButton (see the `input.disabled`
-  //     guard), so disabling here also keeps the POST payload clean.
-  //   * When re-enabling (user switched to mimo), we proactively seed the
-  //     default so the field isn't blank after the first switch.
   function syncTtsModelEnabled() {
     const providerSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
     const modelInput = document.querySelector('[data-cfg-input="voice.tts_model"]');
     const fieldWrap = document.querySelector('[data-cfg-field="voice.tts_model"]');
     if (!providerSel || !modelInput) return;
-    const isMimo = String(providerSel.value || "").toLowerCase() === "mimo";
-    modelInput.disabled = !isMimo;
-    if (fieldWrap) fieldWrap.classList.toggle("is-disabled", !isMimo);
-    if (isMimo && !modelInput.value.trim()) {
-      modelInput.value = "mimo-v2.5-tts";
+    if (!providerSel.value && providerSel.querySelector('option[value="volcengine"]')) {
+      providerSel.value = "volcengine";
     }
+    const provider = String(providerSel.value || "").toLowerCase();
+    const isVolcengine = provider === "volcengine" || provider === "volc";
+    modelInput.disabled = !isVolcengine;
+    if (fieldWrap) fieldWrap.classList.toggle("is-disabled", !isVolcengine);
   }
 
   function repopulateTtsVoiceSelect(desiredValue) {
     const providerSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
     const voiceSel = document.querySelector("[data-cfg-tts-voice]");
     if (!voiceSel) return;
-    const provider = (providerSel && providerSel.value) || "mimo";
+    let provider = (providerSel && providerSel.value) || "volcengine";
+    if (provider === "mimo") provider = "volcengine";
     const options = TTS_VOICE_OPTIONS[provider] || [];
     const keep = desiredValue !== undefined ? desiredValue : voiceSel.value;
     voiceSel.innerHTML = "";
@@ -7894,6 +7939,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     if (statusEl) statusEl.textContent = "保存中…";
     const needsRestart = [];
     const errors = [];
+    const hotReloadNotes = [];
     let cameraPortSaved = null;
     let playbackDefaultSaved = null;
     for (const section of sections) {
@@ -7905,13 +7951,23 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         });
         const body = await res.json();
         if (!body.ok) throw new Error(body.error || "save failed");
-        const { needs_restart, section: refreshed } = body.result || {};
+        const { needs_restart, section: refreshed, hot_reload: hotReload } = body.result || {};
         if (refreshed) {
           Object.entries(refreshed).forEach(([dotted, cell]) => {
             applyCfgFieldValue(dotted, cell);
           });
         }
         if (needs_restart && needs_restart.length) needsRestart.push(...needs_restart);
+        const motorReload = hotReload && hotReload["device.motor_port"];
+        if (motorReload && !motorReload.skipped) {
+          if (motorReload.connected) {
+            hotReloadNotes.push("电机已重连");
+          } else if (motorReload.mode === "virtual" && motorReload.reason === "empty_motor_port") {
+            hotReloadNotes.push("电机已关闭，进入无硬件模式");
+          } else {
+            hotReloadNotes.push(`电机未连接：${motorReload.error || "请检查串口"}`);
+          }
+        }
         if ("camera.port" in grouped[section]) {
           cameraPortSaved = String(grouped[section]["camera.port"] || "");
         }
@@ -7925,7 +7981,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     if (statusEl) {
       statusEl.textContent = errors.length
         ? `保存失败：${errors.join("; ")}`
-        : "已保存";
+        : (hotReloadNotes.length ? `已保存，${hotReloadNotes.join("；")}` : "已保存");
     }
     if (!errors.length && primarySection === "device_esp32" && grouped.device_esp32) {
       if (statusEl) statusEl.textContent = "已保存，正在同步设备…";
@@ -8080,6 +8136,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   // ~/.lampgo/sessions.json, so opening the page in a different browser or
   // after a process restart shows the same history.
   syncSessionsFromServer();
+  refreshLlmRuntimeDefaults();
   // Replay missed events so the left-side event log looks continuous across
   // process restarts and different browsers.
   backfillEventsFromServer();

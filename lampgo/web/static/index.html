@@ -192,13 +192,6 @@
           </div>
 
           <div class="composer-wrap">
-            <div class="composer-options">
-              <label class="composer-thinking-toggle" title="开启后本轮会显示并允许模型输出思考过程；默认关闭">
-                <input id="chat-thinking-toggle" type="checkbox" />
-                <span class="composer-toggle-track" aria-hidden="true"></span>
-                <span>思考模式</span>
-              </label>
-            </div>
             <form id="chat-form" class="composer">
               <div class="mic-group">
                 <button id="btn-mic" class="mic-button" type="button" title="语音输入">
@@ -463,6 +456,12 @@
                 </label>
 
                 <label class="settings-field">
+                  <span class="settings-field-label">Base URL</span>
+                  <input id="cfg-llm-base-url" class="settings-input" type="text" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off">
+                  <span class="settings-field-hint">非自定义 Provider 会自动填入；只有自定义代理或特殊网关需要手动改。</span>
+                </label>
+
+                <label class="settings-field">
                   <span class="settings-field-label">API Key</span>
                   <input id="cfg-llm-api-key" class="settings-input" type="password" placeholder="sk-..." autocomplete="new-password">
                   <span class="settings-field-hint">密钥保存在 <code>~/.lampgo/credentials.json</code>（权限 0600），不会写进 config。</span>
@@ -478,12 +477,6 @@
                   <summary>高级：连接细节、上下文与输出预算</summary>
                   <div class="settings-form settings-form-nested">
                     <label class="settings-field">
-                      <span class="settings-field-label">Base URL</span>
-                      <input id="cfg-llm-base-url" class="settings-input" type="text" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off">
-                      <span class="settings-field-hint">切换 Provider 或消息格式时会自动填入。只有自定义代理或特殊网关需要手动改。</span>
-                    </label>
-
-                    <label class="settings-field">
                       <span class="settings-field-label">消息格式（Message Type）</span>
                       <select id="cfg-llm-message-type" class="settings-input">
                         <option value="openai">OpenAI 兼容（chat.completions）</option>
@@ -497,6 +490,15 @@
                       <input id="cfg-llm-fast-model" class="settings-input" type="text" placeholder="mimo-v2.5" autocomplete="off">
                       <span class="settings-field-hint">用于记忆总结等轻量任务。默认跟主模型一致即可。</span>
                     </label>
+
+                    <div class="settings-field">
+                      <span class="settings-field-label">思考模式</span>
+                      <label class="settings-toggle" title="开启后聊天请求会允许模型输出思考过程；默认关闭">
+                        <input id="cfg-llm-enable-thinking" type="checkbox">
+                        <span>默认开启思考模式</span>
+                      </label>
+                      <span class="settings-field-hint">默认关闭。仅在调试推理模型或需要查看思考过程时开启。</span>
+                    </div>
 
                     <label class="settings-field">
                       <span class="settings-field-label">上下文窗口（context_window）</span>
@@ -525,7 +527,7 @@
                     <label class="settings-field">
                       <span class="settings-field-label">请求超时（timeout_s）</span>
                       <input id="cfg-llm-timeout" class="settings-input" type="number" min="5" max="600" step="5" placeholder="300" autocomplete="off">
-                      <span class="settings-field-hint">联网搜索、多模态或工具调用很慢时再调高。</span>
+                      <span class="settings-field-hint">多模态或工具调用很慢时再调高。</span>
                     </label>
 
                     <label class="settings-field">
@@ -544,107 +546,35 @@
               </div>
             </div>
 
-            <!--
-              ==============================================================
-              MiMo 联网搜索子服务（与主 LLM 独立的一张 card）
-              ==============================================================
-              架构摘要：
-              · 暴露给 agent 的是一个名为 web_search 的普通 function tool；
-              · 命中时后端会**独立**发一条请求到 MiMo 的 OpenAI-compat
-                端点（api.xiaomimimo.com/v1/chat/completions），并附带
-                MiMo 私有的 {"type":"web_search"} tool type；
-              · 这意味着即便主 LLM 选了 Anthropic / OpenAI / Ollama，
-                联网搜索仍然走 MiMo。
-              API key 取用规则（见 lampgo/perception/llm_client.py
-              _resolve_web_search_api_key）：
-                1. 本卡片下方填了专用 key → 用它；
-                2. 没填，但上一张卡片 Provider=MiMo → 复用主 API Key；
-                3. 否则本功能静默禁用（web_search 工具不会注册给 agent）。
-              因为这一套逻辑独立于主 LLM，UI 上单独一张 card 也更直观。
-              ==============================================================
-            -->
-            <div class="settings-card">
-              <div class="settings-card-title">联网搜索</div>
-              <div class="settings-card-desc">打开后，实时问题会交给 MiMo 搜索子服务处理。主模型是 MiMo 时通常不用单独填 Key。</div>
-
-              <div class="settings-form">
-                <label class="settings-field">
-                  <span class="settings-field-label">
-                    <input id="cfg-llm-web-search-enabled" type="checkbox" style="margin-right:6px;"> 启用联网搜索
-                  </span>
-                  <span class="settings-field-hint">需要回答今天、附近、最新价格等实时问题时打开。</span>
-                </label>
-
-                <label class="settings-field">
-                  <span class="settings-field-label">搜索 API Key（可选）</span>
-                  <input id="cfg-llm-web-search-api-key" class="settings-input" type="password" placeholder="留空则复用主 API Key（仅当主 Provider=MiMo 时）" autocomplete="new-password">
-                  <span class="settings-field-hint">主 Provider 不是 MiMo 时，才需要在这里填一个 MiMo Key。</span>
-                </label>
-
-                <details class="settings-disclosure">
-                  <summary>高级：搜索策略和位置</summary>
-                  <div class="settings-form settings-form-nested">
-                    <label class="settings-field">
-                      <span class="settings-field-label">
-                        <input id="cfg-llm-web-search-force" type="checkbox" style="margin-right:6px;"> 强制每次请求都联网
-                      </span>
-                      <span class="settings-field-hint">开启后延迟更高，但新鲜度更稳定。</span>
-                    </label>
-
-                    <label class="settings-field">
-                      <span class="settings-field-label">单次最多抓取网页数</span>
-                      <input id="cfg-llm-web-search-limit" class="settings-input" type="number" min="1" max="10" step="1" placeholder="3" autocomplete="off">
-                      <span class="settings-field-hint">默认 3。值越大越耗 token。</span>
-                    </label>
-
-                    <label class="settings-field">
-                      <span class="settings-field-label">单次最多关键词数</span>
-                      <input id="cfg-llm-web-search-max-keyword" class="settings-input" type="number" min="1" max="10" step="1" placeholder="3" autocomplete="off">
-                      <span class="settings-field-hint">默认 3。</span>
-                    </label>
-
-                    <label class="settings-field settings-field-wide">
-                      <span class="settings-field-label">近似地理位置（可选）</span>
-                      <div class="settings-inline-inputs">
-                        <input id="cfg-llm-web-search-country" class="settings-input" type="text" placeholder="Country" autocomplete="off">
-                        <input id="cfg-llm-web-search-region" class="settings-input" type="text" placeholder="Region" autocomplete="off">
-                        <input id="cfg-llm-web-search-city" class="settings-input" type="text" placeholder="City" autocomplete="off">
-                      </div>
-                      <span class="settings-field-hint">用于本地化搜索。省/市级即可，不需要精确定位。</span>
-                    </label>
-                  </div>
-                </details>
-              </div>
-
-              <div class="settings-actions">
-                <span id="cfg-web-search-status" class="settings-status" aria-live="polite"></span>
-                <button id="btn-cfg-web-search-save" class="send-button" type="button">保存联网搜索设置</button>
-              </div>
-            </div>
-
             <div class="settings-card">
               <div class="settings-card-title">声音和唤醒</div>
-              <div class="settings-card-desc">普通聊天只需要设置播报声音。实时通话需要 LiveKit，默认收起，避免误填后后台反复重连。</div>
+              <div class="settings-card-desc">语音识别和火山播报共用火山引擎 App ID / Token；没有火山配置时会自动使用 Edge TTS 播放回复。</div>
 
               <div class="settings-form" data-cfg-section="voice">
                 <label class="settings-field" data-cfg-field="voice.tts_provider">
                   <span class="settings-field-label">播报服务</span>
                   <select class="settings-input" data-cfg-input="voice.tts_provider">
-                    <option value="mimo">MiMo TTS（复用模型页 Key）</option>
+                    <option value="volcengine">火山引擎 TTS（App ID / Token）</option>
                     <option value="edge-tts">Edge TTS（免费无 Key）</option>
                   </select>
                   <span class="settings-field-hint" data-cfg-tts-provider-hint>
-                    MiMo 会复用「模型」里的 API Key；没有 MiMo Key 时可以选 Edge TTS。
+                    火山引擎使用下方 App ID / Token；未配置时会自动回退到 Edge TTS。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
                 </label>
 
-                <label class="settings-field" data-cfg-field="voice.tts_voice">
-                  <span class="settings-field-label">TTS 声音</span>
-                  <select class="settings-input" data-cfg-input="voice.tts_voice" data-cfg-tts-voice>
-                  </select>
-                  <span class="settings-field-hint">可用声音会跟随播报服务变化；保存后下次对话生效。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
+                <label class="settings-field" data-cfg-field="voice.volcengine_app_id">
+                  <span class="settings-field-label">火山引擎 App ID</span>
+                  <input class="settings-input" type="text" placeholder="your-app-id" data-cfg-input="voice.volcengine_app_id" autocomplete="off">
+                  <span class="settings-field-hint">火山 ASR 与火山 TTS 共用。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_app_id"></span>
+                </label>
+
+                <label class="settings-field" data-cfg-field="voice.volcengine_access_token">
+                  <span class="settings-field-label">火山引擎 Access Token</span>
+                  <input class="settings-input" type="password" placeholder="your-access-token" data-cfg-input="voice.volcengine_access_token" autocomplete="off">
+                  <span class="settings-field-hint">留空时聊天播报会自动回退到 Edge TTS。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_access_token"></span>
                 </label>
 
                 <label class="settings-field" data-cfg-field="voice.wake_word">
@@ -664,56 +594,47 @@
                 </label>
 
                 <details class="settings-disclosure">
-                  <summary>高级：识别模型和 TTS 模型</summary>
+                  <summary>高级：火山 TTS 音色和模型</summary>
                   <div class="settings-form settings-form-nested">
-                    <label class="settings-field" data-cfg-field="voice.stt_provider">
-                      <span class="settings-field-label">STT Provider（语音识别）</span>
-                      <select class="settings-input" data-cfg-input="voice.stt_provider">
-                        <option value="mimo">mimo</option>
+                    <label class="settings-field" data-cfg-field="voice.tts_voice">
+                      <span class="settings-field-label">火山 TTS 音色</span>
+                      <select class="settings-input" data-cfg-input="voice.tts_voice" data-cfg-tts-voice>
                       </select>
-                      <span class="settings-field-hint">目前仅支持 MiMo。</span>
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.stt_provider"></span>
-                    </label>
-                    <label class="settings-field" data-cfg-field="voice.stt_model">
-                      <span class="settings-field-label">STT Model</span>
-                      <select class="settings-input" data-cfg-input="voice.stt_model">
-                        <option value="mimo-v2.5">mimo-v2.5</option>
-                        <option value="mimo-v2-omni">mimo-v2-omni</option>
-                      </select>
-                      <span class="settings-field-hint">语音转文字模型。</span>
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.stt_model"></span>
+                      <span class="settings-field-hint">默认 <code>zh_female_vv_uranus_bigtts</code>；选择 Edge TTS 时这里会切换为 Edge 声音列表。</span>
+                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
                     </label>
                     <label class="settings-field" data-cfg-field="voice.tts_model">
-                      <span class="settings-field-label">TTS Model</span>
+                      <span class="settings-field-label">火山 TTS Model</span>
                       <select class="settings-input" data-cfg-input="voice.tts_model">
-                        <option value="mimo-v2.5-tts">mimo-v2.5-tts</option>
-                        <option value="mimo-v2-tts">mimo-v2-tts</option>
+                        <option value="">火山默认</option>
+                        <option value="seed-tts-2.0-standard">seed-tts-2.0-standard</option>
+                        <option value="seed-tts-2.0-expressive">seed-tts-2.0-expressive</option>
                       </select>
-                      <span class="settings-field-hint">仅 MiMo TTS 使用，Edge TTS 会自动忽略。</span>
+                      <span class="settings-field-hint">仅火山引擎 TTS 使用，Edge TTS 会自动忽略。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_model"></span>
                     </label>
                   </div>
                 </details>
 
                 <details class="settings-disclosure">
-                  <summary>高级：实时通话（LiveKit / 火山引擎）</summary>
+                  <summary>高级：LiveKit 实时通话</summary>
                   <div class="settings-form settings-form-nested">
                     <label class="settings-field settings-field-wide" data-cfg-field="voice.livekit_url">
                       <span class="settings-field-label">LiveKit Server URL</span>
-                      <input class="settings-input" type="text" placeholder="留空关闭实时通话，例如 ws://host:7880" data-cfg-input="voice.livekit_url" autocomplete="off">
-                      <span class="settings-field-hint">留空时不会启动 LiveKit agent，也不会后台重连。</span>
+                      <input class="settings-input" type="text" placeholder="ws://127.0.0.1:7880" data-cfg-input="voice.livekit_url" autocomplete="off">
+                      <span class="settings-field-hint">默认本机 LiveKit 开发服务；如需关闭实时通话，可清空此项。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_url"></span>
                     </label>
 
                     <label class="settings-field" data-cfg-field="voice.livekit_api_key">
                       <span class="settings-field-label">LiveKit API Key</span>
-                      <input class="settings-input" type="text" placeholder="your-api-key" data-cfg-input="voice.livekit_api_key" autocomplete="off">
+                      <input class="settings-input" type="text" placeholder="devkey" data-cfg-input="voice.livekit_api_key" autocomplete="off">
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_api_key"></span>
                     </label>
 
                     <label class="settings-field" data-cfg-field="voice.livekit_api_secret">
                       <span class="settings-field-label">LiveKit API Secret</span>
-                      <input class="settings-input" type="password" placeholder="your-api-secret" data-cfg-input="voice.livekit_api_secret" autocomplete="off">
+                      <input class="settings-input" type="password" placeholder="secret" data-cfg-input="voice.livekit_api_secret" autocomplete="off">
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_api_secret"></span>
                     </label>
 
@@ -729,25 +650,6 @@
                       <span class="settings-field-hint">对话中无语音活动超过此时间后自动结束。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.silence_timeout_s"></span>
                     </label>
-
-                    <label class="settings-field" data-cfg-field="voice.volcengine_app_id">
-                      <span class="settings-field-label">火山引擎 App ID</span>
-                      <input class="settings-input" type="text" placeholder="your-app-id" data-cfg-input="voice.volcengine_app_id" autocomplete="off">
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_app_id"></span>
-                    </label>
-
-                    <label class="settings-field" data-cfg-field="voice.volcengine_access_token">
-                      <span class="settings-field-label">火山引擎 Access Token</span>
-                      <input class="settings-input" type="password" placeholder="" data-cfg-input="voice.volcengine_access_token" autocomplete="off">
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_access_token"></span>
-                    </label>
-
-                    <label class="settings-field" data-cfg-field="voice.livekit_tts_voice">
-                      <span class="settings-field-label">LiveKit 对话声音</span>
-                      <input class="settings-input" type="text" placeholder="BV700_streaming" data-cfg-input="voice.livekit_tts_voice" autocomplete="off">
-                      <span class="settings-field-hint">火山引擎 TTS 声音标识。</span>
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_tts_voice"></span>
-                    </label>
                   </div>
                 </details>
               </div>
@@ -759,24 +661,26 @@
             </div>
 
             <div class="settings-card">
-              <div class="settings-card-title">Web 服务</div>
-              <div class="settings-card-desc">
-                Web UI 与 HTTP Gateway 的监听端口。默认 <code>8420</code>；被 <code>--web-port</code> 覆盖时会标灰提示。修改后需要在启动 lampgo 的终端 <code>Ctrl+C</code> 重跑才会生效（冷重启）。
-              </div>
+              <details class="settings-disclosure">
+                <summary>高级：Web 服务</summary>
+                <div class="settings-card-desc">
+                  Web UI 与 HTTP Gateway 的监听端口。默认 <code>8420</code>；被 <code>--web-port</code> 覆盖时会标灰提示。修改后需要在启动 lampgo 的终端 <code>Ctrl+C</code> 重跑才会生效（冷重启）。
+                </div>
 
-              <div class="settings-form" data-cfg-section="web">
-                <label class="settings-field" data-cfg-field="web.port">
-                  <span class="settings-field-label">Web 端口 (web.port)</span>
-                  <input class="settings-input" type="number" min="1" max="65535" step="1" placeholder="8420" data-cfg-input="web.port">
-                  <span class="settings-field-hint">OpenClaw 插件、外部脚本默认通过此端口访问 lampgo 守护进程。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="web.port"></span>
-                </label>
-              </div>
+                <div class="settings-form settings-form-nested" data-cfg-section="web">
+                  <label class="settings-field" data-cfg-field="web.port">
+                    <span class="settings-field-label">Web 端口 (web.port)</span>
+                    <input class="settings-input" type="number" min="1" max="65535" step="1" placeholder="8420" data-cfg-input="web.port">
+                    <span class="settings-field-hint">OpenClaw 插件、外部脚本默认通过此端口访问 lampgo 守护进程。</span>
+                    <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="web.port"></span>
+                  </label>
+                </div>
 
-              <div class="settings-actions">
-                <span id="cfg-web-status" class="settings-status" aria-live="polite"></span>
-                <button class="send-button" type="button" data-cfg-save="web">保存</button>
-              </div>
+                <div class="settings-actions">
+                  <span id="cfg-web-status" class="settings-status" aria-live="polite"></span>
+                  <button class="send-button" type="button" data-cfg-save="web">保存</button>
+                </div>
+              </details>
             </div>
             </div>
 
@@ -969,13 +873,14 @@
             <div class="settings-card">
               <div class="settings-card-title">本机硬件</div>
               <div class="settings-card-desc">
-                选电机串口、摄像头和麦克风。LED、标定和角度单位一般不用改，已收在高级里。
+                选电机串口、摄像头和麦克风。标定和角度单位一般不用改，已收在高级里。
               </div>
 
               <div class="settings-form" data-cfg-section="hardware">
                 <label class="settings-field" data-cfg-field="device.motor_port">
                   <span class="settings-field-label">电机串口 (motor_port)</span>
                   <input class="settings-input" type="text" placeholder="/dev/tty.usbmodem..." data-cfg-input="device.motor_port" list="cfg-hw-serial-list">
+                  <span class="settings-field-hint">为空时会自动检测并预填；保存后立即热重连电机。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.motor_port"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="camera.port">
@@ -999,13 +904,8 @@
                 </label>
                 <datalist id="cfg-hw-serial-list"></datalist>
                 <details class="settings-disclosure">
-                  <summary>高级：LED、标定和角度单位</summary>
+                  <summary>高级：标定和角度单位</summary>
                   <div class="settings-form settings-form-nested">
-                    <label class="settings-field" data-cfg-field="device.led_port">
-                      <span class="settings-field-label">LED 串口 (led_port)</span>
-                      <input class="settings-input" type="text" placeholder="/dev/tty.usbmodem..." data-cfg-input="device.led_port" list="cfg-hw-serial-list">
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.led_port"></span>
-                    </label>
                     <label class="settings-field" data-cfg-field="device.lamp_id">
                       <span class="settings-field-label">设备标识 (lamp_id)</span>
                       <input class="settings-input" type="text" placeholder="AL02" data-cfg-input="device.lamp_id">

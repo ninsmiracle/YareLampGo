@@ -53,6 +53,59 @@ def test_llm_config_post_persists_canonical_provider_alias(monkeypatch, tmp_path
     assert 'provider = "xiaomi"' not in config_text
 
 
+def test_mimo_provider_post_enables_web_search_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null")))
+    server.config.llm.provider = "openai"
+    server.config.llm.web_search_enabled = False
+    monkeypatch.setattr(server, "reload_llm_client", lambda: None)
+    gateway = WebGateway(server)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/config/llm",
+            json={
+                "validate": False,
+                "provider": "mimo",
+                "api_base": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.5",
+                "fast_model": "mimo-v2.5",
+                "message_type": "openai",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["result"]["web_search_enabled"] is True
+    assert server.config.llm.web_search_enabled is True
+
+
+def test_llm_config_enable_thinking_defaults_off_and_persists(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null")))
+    monkeypatch.setattr(server, "reload_llm_client", lambda: None)
+    gateway = WebGateway(server)
+
+    with TestClient(gateway.app) as client:
+        response = client.get("/api/config/llm")
+        assert response.status_code == 200
+        assert response.json()["result"]["enable_thinking"] is False
+
+        response = client.post(
+            "/api/config/llm",
+            json={"validate": False, "enable_thinking": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["result"]["enable_thinking"] is True
+    assert server.config.llm.enable_thinking is True
+    config_text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "enable_thinking = true" in config_text
+
+
 def test_provider_presets_expose_per_format_base_urls(monkeypatch, tmp_path):
     """Presets must declare api_urls keyed by message_type so the frontend
     can auto-flip Base URL when the user toggles OpenAI ↔ Anthropic
@@ -101,12 +154,12 @@ def test_llm_config_normalizes_mimo_anthropic_alias_to_mimo(monkeypatch, tmp_pat
 
 
 def test_web_search_subset_post_preserves_main_llm_fields(monkeypatch, tmp_path):
-    """The "MiMo 联网搜索" card saves via the same endpoint but with only
-    ``web_search_*`` fields in the body.  The handler must treat omitted
-    main-LLM fields as "keep existing" — otherwise saving web-search
-    settings would silently reset ``api_base`` to empty and
-    ``message_type`` to ``"openai"``, kicking Anthropic users off their
-    chosen endpoint.
+    """Legacy/API callers may still PATCH only ``web_search_*`` fields.
+
+    The handler must treat omitted main-LLM fields as "keep existing" —
+    otherwise saving web-search settings would silently reset ``api_base``
+    to empty and ``message_type`` to ``"openai"``, kicking Anthropic users
+    off their chosen endpoint.
     """
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     server = LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null")))

@@ -13,8 +13,8 @@ import asyncio
 import re
 import signal
 import time
-from collections import deque
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +23,6 @@ import structlog
 from lampgo.bridge.openclaw import OpenClawAdapter
 from lampgo.bridge.state_writer import MinimalState, StateWriter
 from lampgo.core.config import LampgoConfig, LEDConfig
-from lampgo.device import Esp32DeviceManager
-from lampgo.voice.stt import MimoSTT, build_stt
 from lampgo.core.events import (
     AgentFinished,
     ChatMessage,
@@ -42,6 +40,7 @@ from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.virtual_motion import VirtualMotionRuntime
+from lampgo.device import Esp32DeviceManager
 from lampgo.ipc import IPCServer
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.skills.base import SkillContext
@@ -69,6 +68,7 @@ from lampgo.skills.loader import (
 )
 from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.registry import SkillRegistry
+from lampgo.voice.stt import VolcengineASR, build_stt
 
 logger = structlog.get_logger(__name__)
 RECORDING_ALIASES_FILE = "aliases.json"
@@ -84,17 +84,16 @@ class LampgoServer:
         self.safety = SafetyKernel(config.safety)
         self.motion = MotionRuntime(self.hal, self.safety, config.motion)
         self.esp32 = Esp32DeviceManager(config.device_esp32)
-        # Backward-compatible LED port resolution:
-        # prefer explicit [led].port, then fallback to [device].led_port,
-        # then fallback to the paired ESP32 camera/mic firmware's LED UART bridge.
-        led_port = config.led.port or config.device.led_port
-        self.led = LEDController(LEDConfig(port=led_port, baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
+        # LED expressions now go through the paired ESP32 Wi-Fi endpoint. Keep
+        # the old serial config fields readable for legacy files, but do not
+        # open a local LED serial port from the web runtime.
+        self.led = LEDController(LEDConfig(port="", baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
         self.openclaw = OpenClawAdapter(self.registry, self.executor, self.events)
         self.router = IntentRouter()
-        self._stt: MimoSTT = build_stt(config)
+        self._stt: VolcengineASR = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
         self._voice = None
@@ -113,6 +112,8 @@ class LampgoServer:
         self._record_started_at: float = 0.0
         self._record_fps: int = 30
         self._record_motion_was_running: bool = False
+        self._motor_reload_lock = asyncio.Lock()
+        self._started = False
 
     def _use_virtual_motion(self) -> None:
         """Switch motion to the no-hardware in-memory runtime."""
@@ -557,7 +558,11 @@ class LampgoServer:
             }
 
         request_id = data.get("request_id", "")
-        enable_thinking = bool(data.get("enable_thinking"))
+        enable_thinking = (
+            bool(data.get("enable_thinking"))
+            if "enable_thinking" in data
+            else bool(self.config.llm.enable_thinking)
+        )
 
         alias = self._resolve_recording_alias(text)
         if alias:
@@ -786,7 +791,11 @@ class LampgoServer:
                 "input": text,
                 "request_id": request_id,
                 "history": data.get("history") or [],
-                "enable_thinking": bool(data.get("enable_thinking")),
+                "enable_thinking": (
+                    bool(data.get("enable_thinking"))
+                    if "enable_thinking" in data
+                    else bool(self.config.llm.enable_thinking)
+                ),
             }
         )
         await self._maybe_tts(result, request_id)
@@ -993,7 +1002,7 @@ class LampgoServer:
         """Synthesize TTS and publish audio event for web playback.
 
         During an active LiveKit voice call the Agent SDK plays Volcengine TTS
-        directly into the room, so the local edge-tts/MiMo TTS would only be
+        directly into the room, so the local web TTS stream would only be
         wasted bandwidth (and may double-up with the call audio if the Web UI
         is also open). Skip the synthesis but keep the call signature so agent
         loop timing (e.g. ``await asyncio.sleep(1.5)`` after ``say``) is
@@ -1010,18 +1019,23 @@ class LampgoServer:
                 return
 
         try:
-            from lampgo.voice.tts import synthesize_for_web
-            result = await synthesize_for_web(
+            from lampgo.voice.tts import iter_synthesize_for_web
+
+            published = False
+            async for audio_b64, fmt, sample_rate in iter_synthesize_for_web(
                 text,
-                api_key=self.config.llm.api_key,
+                app_id=self.config.voice.volcengine_app_id,
+                access_token=self.config.voice.volcengine_access_token,
                 voice=self.config.voice.tts_voice,
                 provider=self.config.voice.tts_provider,
                 model=self.config.voice.tts_model,
-            )
-            if result:
-                audio_b64, fmt = result
-                await self.events.publish(TtsAudio(audio=audio_b64, format=fmt, request_id=request_id))
-                logger.debug("server.tts_for_web_done", request_id=request_id, format=fmt)
+            ):
+                published = True
+                await self.events.publish(
+                    TtsAudio(audio=audio_b64, format=fmt, sample_rate=sample_rate, request_id=request_id)
+                )
+            if published:
+                logger.debug("server.tts_for_web_done", request_id=request_id)
             else:
                 logger.warning("server.tts_for_web_empty", request_id=request_id)
         except Exception:
@@ -1579,6 +1593,85 @@ class LampgoServer:
             motor_port="(disabled)" if self.config.no_hw else self.config.device.motor_port,
             socket=self.config.socket_path,
         )
+        self._started = True
+
+    async def reload_motor_runtime(self) -> dict[str, Any]:
+        """Hot-reconnect the motor HAL and MotionRuntime after motor_port edits."""
+        if not self._started:
+            return {"ok": True, "skipped": True, "reason": "server_not_started"}
+
+        async with self._motor_reload_lock:
+            port = str(self.config.device.motor_port or "").strip()
+            logger.info("server.motor_runtime_reload_starting", motor_port=port or "<disabled>")
+
+            if self.executor.current_skill_id:
+                await self.executor.cancel_current()
+
+            if self.motion.is_running:
+                try:
+                    self.motion.stop_immediate()
+                except Exception:
+                    pass
+            try:
+                self.motion.stop()
+            except Exception:
+                logger.exception("server.motor_runtime_stop_failed")
+
+            old_hal = self.hal
+            await self._run_blocking_shutdown_step("hal.disconnect", old_hal.disconnect, timeout_s=3.0)
+
+            self.hal = HardwareAbstraction(self.config.device)
+            if not port:
+                self.config.no_hw = True
+                self._use_virtual_motion()
+                logger.info("server.motor_runtime_reload_virtual", reason="empty_motor_port")
+                return {
+                    "ok": True,
+                    "connected": False,
+                    "mode": "virtual",
+                    "reason": "empty_motor_port",
+                }
+
+            new_hal = HardwareAbstraction(self.config.device)
+            try:
+                await asyncio.to_thread(new_hal.connect)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    await asyncio.to_thread(new_hal.disconnect)
+                except Exception:
+                    pass
+                self.hal = HardwareAbstraction(self.config.device)
+                self.config.no_hw = True
+                self._use_virtual_motion()
+                logger.warning(
+                    "server.motor_runtime_reload_failed_virtual",
+                    motor_port=port,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connected": False,
+                    "mode": "virtual",
+                    "port": port,
+                    "error": str(exc),
+                }
+
+            self.hal = new_hal
+            self.motion = MotionRuntime(self.hal, self.safety, self.config.motion)
+            self.config.no_hw = False
+            self.motion.start()
+            home = self.hal.get_calibration_home()
+            if home is not None:
+                from lampgo.skills.builtin.motion_skills import set_calibration_home
+
+                set_calibration_home(home)
+            logger.info("server.motor_runtime_reloaded", motor_port=port)
+            return {
+                "ok": True,
+                "connected": True,
+                "mode": "hardware",
+                "port": port,
+            }
 
     def _get_minimal_state(self) -> MinimalState:
         camera_connected = bool(self.config.camera.port.strip())
@@ -1705,6 +1798,7 @@ class LampgoServer:
             await self._run_blocking_shutdown_step("led.off", self.led.off)
             await self._run_blocking_shutdown_step("led.disconnect", self.led.disconnect)
             await self._run_blocking_shutdown_step("hal.disconnect", self.hal.disconnect, timeout_s=3.0)
+        self._started = False
         logger.info("server.stopped")
 
     async def run_forever(self) -> None:

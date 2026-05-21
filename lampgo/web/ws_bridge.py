@@ -76,7 +76,8 @@ class WsBridge:
 
     def __init__(self, events: EventBus) -> None:
         self._events = events
-        self._clients: set[WebSocket] = set()
+        self._clients: dict[WebSocket, float] = {}
+        self._tts_client: WebSocket | None = None
         self._lock = asyncio.Lock()
         for evt_type in ALL_EVENT_TYPES:
             events.subscribe(evt_type, self._on_event)
@@ -84,13 +85,34 @@ class WsBridge:
 
     async def add_client(self, ws: WebSocket) -> None:
         async with self._lock:
-            self._clients.add(ws)
+            self._clients[ws] = time.monotonic()
+            if self._tts_client is None:
+                self._tts_client = ws
         logger.info("ws_bridge.client_connected", total=len(self._clients))
 
     async def remove_client(self, ws: WebSocket) -> None:
         async with self._lock:
-            self._clients.discard(ws)
+            self._clients.pop(ws, None)
+            if self._tts_client is ws:
+                self._tts_client = self._newest_client_locked()
         logger.info("ws_bridge.client_disconnected", total=len(self._clients))
+
+    async def claim_tts_client(self, ws: WebSocket, *, active: bool = True) -> None:
+        """Mark one WebSocket as the only client that should receive TTS audio.
+
+        Normal events still broadcast to every connected page, but audio must
+        have a single owner. Otherwise multiple open tabs or browsers all play
+        the same streaming chunks and the user hears an echo.
+        """
+        async with self._lock:
+            if ws not in self._clients:
+                return
+            if active:
+                self._clients[ws] = time.monotonic()
+                self._tts_client = ws
+                return
+            if self._tts_client is ws:
+                self._tts_client = self._newest_client_locked(exclude=ws)
 
     # Events whose payload is huge and ephemeral (e.g. base64 audio buffers)
     # must NOT be persisted to ~/.lampgo/events.log:
@@ -102,10 +124,25 @@ class WsBridge:
     #     which in turn made the UI event log appear stuck on old timestamps.
     _NON_PERSISTED_EVENTS: set[str] = {"TtsAudio"}
 
+    def _newest_client_locked(self, *, exclude: WebSocket | None = None) -> WebSocket | None:
+        candidates = [(ws, ts) for ws, ts in self._clients.items() if ws is not exclude]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[1])[0]
+
+    def _broadcast_targets_locked(self, msg: dict[str, Any]) -> list[WebSocket]:
+        if msg.get("event") != "TtsAudio":
+            return list(self._clients.keys())
+        target = self._tts_client
+        if target not in self._clients or getattr(target, "client_state", None) != WebSocketState.CONNECTED:
+            target = self._newest_client_locked()
+            self._tts_client = target
+        return [target] if target is not None else []
+
     async def _on_audio_relay(self, event: Esp32AudioRelay) -> None:
         """Send raw ESP32 PCM as binary WebSocket frames (no JSON overhead)."""
         async with self._lock:
-            clients = list(self._clients)
+            clients = list(self._clients.keys())
         dead: list[WebSocket] = []
         for ws in clients:
             try:
@@ -116,7 +153,9 @@ class WsBridge:
         if dead:
             async with self._lock:
                 for ws in dead:
-                    self._clients.discard(ws)
+                    self._clients.pop(ws, None)
+                    if self._tts_client is ws:
+                        self._tts_client = self._newest_client_locked()
 
     async def _on_event(self, event: Event) -> None:
         msg = self._serialize(event)
@@ -134,7 +173,7 @@ class WsBridge:
 
     async def broadcast(self, msg: dict[str, Any]) -> None:
         async with self._lock:
-            clients = list(self._clients)
+            clients = self._broadcast_targets_locked(msg)
         dead: list[WebSocket] = []
         for ws in clients:
             try:
@@ -145,7 +184,9 @@ class WsBridge:
         if dead:
             async with self._lock:
                 for ws in dead:
-                    self._clients.discard(ws)
+                    self._clients.pop(ws, None)
+                    if self._tts_client is ws:
+                        self._tts_client = self._newest_client_locked()
 
     async def broadcast_status(self, status: dict[str, Any]) -> None:
         """Push a periodic status snapshot to all clients.

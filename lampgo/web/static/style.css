@@ -1476,67 +1476,6 @@ button.device-chip.is-active {
   border-top: 1px solid var(--border);
 }
 
-.composer-options {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  min-height: 24px;
-  margin-bottom: 8px;
-}
-
-.composer-thinking-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  user-select: none;
-}
-
-.composer-thinking-toggle input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.composer-toggle-track {
-  position: relative;
-  width: 34px;
-  height: 18px;
-  border-radius: 999px;
-  background: #e8dfda;
-  border: 1px solid #ded2cc;
-  transition: 0.16s ease;
-}
-
-.composer-toggle-track::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(31, 22, 18, 0.18);
-  transition: 0.16s ease;
-}
-
-.composer-thinking-toggle input:checked + .composer-toggle-track {
-  background: #de9388;
-  border-color: #d88478;
-}
-
-.composer-thinking-toggle input:checked + .composer-toggle-track::after {
-  transform: translateX(16px);
-}
-
-.composer-thinking-toggle input:focus-visible + .composer-toggle-track {
-  box-shadow: 0 0 0 3px rgba(222, 147, 136, 0.22);
-}
-
 .composer {
   display: flex;
   gap: 10px;
@@ -3480,6 +3419,11 @@ section.view[data-view="settings"] .view-header {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+}
+
+.settings-field.hidden,
+.settings-field[hidden] {
+  display: none;
 }
 
 .settings-field-wide {

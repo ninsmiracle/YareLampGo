@@ -194,6 +194,7 @@ class TtsAudio(Event):
 
     audio: str
     format: str = "mp3"
+    sample_rate: int = 0
     request_id: str = ""
 
 

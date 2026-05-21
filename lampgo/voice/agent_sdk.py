@@ -163,11 +163,12 @@ try:
     _orig_agent_session_init = _LampgoAgentSession.__init__
 
     def _lampgo_agent_session_init(self, *args, **kwargs):
-        # The ESP32 mic path can feed low-level noise/echo while the agent is
-        # speaking. Disable interruptions unless the SDK caller explicitly
-        # configured turn handling/interruption behavior.
+        # Enable RTC barge-in by default: when the user speaks over the
+        # assistant, LiveKit can interrupt the current TTS/LLM turn and start
+        # listening again. Keep a small word threshold so speaker echo or a
+        # single noise burst does not instantly cancel playback.
         if "turn_handling" not in kwargs or kwargs.get("turn_handling") is _LAMPGO_NOT_GIVEN:
-            kwargs.setdefault("allow_interruptions", False)
+            kwargs.setdefault("allow_interruptions", True)
             kwargs.setdefault("min_interruption_words", 3)
             kwargs["aec_warmup_duration"] = max(float(kwargs.get("aec_warmup_duration", 3.0) or 0.0), 8.0)
         return _orig_agent_session_init(self, *args, **kwargs)
@@ -497,7 +498,11 @@ class AgentSDKManager:
             web_port=self._web_port,
             volcengine_app_id=self._voice.volcengine_app_id,
             volcengine_access_token=self._voice.volcengine_access_token,
-            livekit_tts_voice=self._voice.livekit_tts_voice or "BV700_streaming",
+            livekit_tts_voice=(
+                self._voice.tts_voice
+                or self._voice.livekit_tts_voice
+                or "zh_female_vv_uranus_bigtts"
+            ),
         )
         tmp = Path(tempfile.mktemp(suffix=".yaml", prefix="lampgo-roles-"))
         tmp.write_text(content, encoding="utf-8")
