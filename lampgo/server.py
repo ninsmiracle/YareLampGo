@@ -1694,7 +1694,7 @@ class LampgoServer:
         logger.info("server.homing", velocity=STARTUP_HOME_VELOCITY, target=home)
         try:
             ctx = self.make_context()
-            result = await self.executor.invoke("move_to", ctx, velocity=STARTUP_HOME_VELOCITY, **home)
+            result = await self.executor.invoke("return_safe", ctx, velocity=STARTUP_HOME_VELOCITY)
             if result.status == "ok":
                 logger.info("server.homed")
             else:
