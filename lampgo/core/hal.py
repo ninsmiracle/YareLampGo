@@ -33,8 +33,10 @@ class HardwareAbstraction:
     Follows the exact same connect → calibrate → configure → sync_read/sync_write
     pattern as LeLampFollower from lelamp_runtime.
     """
+
     _HOME_EDGE_MARGIN_RATIO = 0.15
     _MIN_VALID_RANGE_COUNTS = 80
+    _RECOVERY_LIMIT_MARGIN_COUNTS = 96
 
     def __init__(self, config: DeviceConfig) -> None:
         self._config = config
@@ -46,7 +48,7 @@ class HardwareAbstraction:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self, calibrate: bool = True, *, configure: bool = True) -> None:
         if self._connected:
             raise RuntimeError("HAL already connected")
 
@@ -76,7 +78,8 @@ class HardwareAbstraction:
             logger.info("Motor bus not calibrated — running interactive calibration")
             self.calibrate()
 
-        self._configure()
+        if configure:
+            self._configure()
         self._connected = True
         logger.info("hal.connected", port=self._config.motor_port)
 
@@ -216,51 +219,26 @@ class HardwareAbstraction:
         logger.info("hal.torque_enabled")
 
     def get_calibration_home(self) -> dict[str, float] | None:
-        """Compute the degree-mode value that corresponds to the physical calibration midpoint.
+        """Return the user-confirmed neutral pose in degree-mode coordinates.
 
-        In lerobot DEGREES mode: degrees = (val - mid) * 360 / max_res
-        where mid = (range_min + range_max) / 2.
-        The homing midpoint (where the user placed the arm) is at val = max_res/2 (2047).
-        So home_degrees = (2047 - mid) * 360 / max_res.
+        New calibration files store the neutral pose explicitly. Older files are
+        migrated in-memory by falling back to the historical half-turn neutral.
         """
-        calibration = self._load_calibration()
+        data = self._load_calibration_data()
+        calibration = self._calibration_from_data(data)
         if not calibration:
             return None
-        max_res = 4095
-        half = max_res / 2
+
         home: dict[str, float] = {}
         for name, cal in calibration.items():
-            mid = (cal.range_min + cal.range_max) / 2
-            span = cal.range_max - cal.range_min
-            edge_distance = min(half - cal.range_min, cal.range_max - half)
-
-            # Guardrail: if calibration midpoint (half-turn) sits too close to a range edge,
-            # homing there is usually unsafe (bad midpoint placement during calibration).
-            if span < self._MIN_VALID_RANGE_COUNTS:
-                logger.warning(
-                    "hal.calibration_home_fallback_narrow_range",
-                    joint=name,
-                    range_min=cal.range_min,
-                    range_max=cal.range_max,
-                    span=span,
-                )
-                home[name] = 0.0
+            entry = data.get(name, {}) if isinstance(data, dict) else {}
+            if isinstance(entry, dict) and "neutral_degrees" in entry:
+                home[name] = round(float(entry["neutral_degrees"]), 1)
                 continue
-
-            if edge_distance < span * self._HOME_EDGE_MARGIN_RATIO:
-                logger.warning(
-                    "hal.calibration_home_fallback_offcenter",
-                    joint=name,
-                    range_min=cal.range_min,
-                    range_max=cal.range_max,
-                    half=half,
-                    edge_distance=round(edge_distance, 1),
-                    span=span,
-                )
-                home[name] = 0.0
+            if isinstance(entry, dict) and "neutral_raw" in entry:
+                home[name] = self._raw_to_degrees(float(entry["neutral_raw"]), cal)
                 continue
-
-            home[name] = round((half - mid) * 360 / max_res, 1)
+            home[name] = self._fallback_half_turn_home(name, cal)
         logger.info("hal.calibration_home", home=home)
         return home
 
@@ -306,6 +284,16 @@ class HardwareAbstraction:
                         f"expected {expected}, got {verify}. Check motor connection."
                     )
 
+        neutral_raw = self._bus.sync_read(
+            "Present_Position",
+            list(self._bus.motors),
+            normalize=False,
+        )
+        logger.info(
+            "calibration.neutral_recorded",
+            neutral_raw={k: int(v) for k, v in neutral_raw.items()},
+        )
+
         print("Move all joints through their full ranges of motion.\nPress ENTER to stop recording...")
         range_mins, range_maxes = self._bus.record_ranges_of_motion()
 
@@ -320,7 +308,7 @@ class HardwareAbstraction:
             )
 
         self._bus.write_calibration(calibration)
-        self._save_calibration(calibration)
+        self._save_calibration(calibration, neutral_raw=neutral_raw)
         logger.info("calibration.saved", lamp_id=self._config.lamp_id)
 
     def setup_motors(self) -> None:
@@ -395,10 +383,14 @@ class HardwareAbstraction:
             return
 
         for motor in healthy_motors:
-            # Configure each motor independently so one flaky status packet
-            # does not block the whole arm from starting up.
             self._safe_bus_write("Torque_Enable", motor, 0)
             self._safe_bus_write("Lock", motor, 0)
+
+        self._ensure_hardware_calibration()
+
+        for motor in healthy_motors:
+            # Configure each motor independently so one flaky status packet
+            # does not block the whole arm from starting up.
             self._safe_bus_write("Return_Delay_Time", motor, 0)
             if getattr(self._bus, "protocol_version", None) == 0:
                 self._safe_bus_write("Maximum_Acceleration", motor, 50)
@@ -407,14 +399,25 @@ class HardwareAbstraction:
             self._safe_bus_write("P_Coefficient", motor, 16)
             self._safe_bus_write("I_Coefficient", motor, 0)
             self._safe_bus_write("D_Coefficient", motor, 32)
+
+        self._seed_goal_positions_to_present(healthy_motors)
+        for motor in healthy_motors:
             self._safe_bus_write("Lock", motor, 1)
             self._safe_bus_write("Torque_Enable", motor, 1)
 
-    def _safe_bus_write(self, data_name: str, motor: str, value: Any) -> bool:
+    def _safe_bus_write(
+        self,
+        data_name: str,
+        motor: str,
+        value: Any,
+        *,
+        normalize: bool = True,
+        num_retry: int = 3,
+    ) -> bool:
         if self._bus is None:
             return False
         try:
-            self._bus.write(data_name, motor, value)
+            self._bus.write(data_name, motor, value, normalize=normalize, num_retry=num_retry)
             return True
         except Exception:
             logger.warning(
@@ -422,30 +425,158 @@ class HardwareAbstraction:
                 motor=motor,
                 register=data_name,
                 value=value,
+                normalize=normalize,
+                num_retry=num_retry,
                 exc_info=True,
             )
             return False
 
+    def _ensure_hardware_calibration(self) -> None:
+        if self._bus is None or not self._bus.calibration:
+            return
+        try:
+            if self._bus.is_calibrated:
+                logger.info("hal.calibration_already_active", lamp_id=self._config.lamp_id)
+                return
+            self._bus.write_calibration(self._bus.calibration)
+            logger.info("hal.calibration_applied", lamp_id=self._config.lamp_id)
+        except Exception:
+            logger.warning(
+                "hal.calibration_apply_failed",
+                lamp_id=self._config.lamp_id,
+                exc_info=True,
+            )
+
+    def _seed_goal_positions_to_present(self, motors: list[str]) -> None:
+        if self._bus is None or not motors:
+            return
+
+        try:
+            present_raw = self._bus.sync_read("Present_Position", motors, normalize=False)
+        except Exception:
+            logger.warning("hal.goal_seed_sync_read_failed", motors=motors, exc_info=True)
+            present_raw = {}
+            for motor in motors:
+                try:
+                    present_raw[motor] = self._bus.read("Present_Position", motor, normalize=False)
+                except Exception:
+                    logger.warning("hal.goal_seed_read_failed", motor=motor, exc_info=True)
+
+        if not present_raw:
+            logger.warning("hal.goal_seed_no_present_position", motors=motors)
+            return
+
+        self._expand_hardware_limits_to_present(present_raw)
+
+        seeded: dict[str, int] = {}
+        failed: list[str] = []
+        for motor, raw in present_raw.items():
+            raw_int = int(raw)
+            if self._safe_bus_write("Goal_Position", motor, raw_int, normalize=False):
+                seeded[motor] = raw_int
+            else:
+                failed.append(motor)
+
+        if seeded:
+            logger.info("hal.goal_seeded_to_present", present_raw=seeded)
+        if failed:
+            logger.warning("hal.goal_seed_failed", motors=failed)
+
+    def _expand_hardware_limits_to_present(self, present_raw: dict[str, float]) -> None:
+        if self._bus is None or not self._bus.calibration:
+            return
+
+        for motor, raw in present_raw.items():
+            cal = self._bus.calibration.get(motor)
+            if cal is None:
+                continue
+
+            raw_int = int(raw)
+            recovery_min = max(0, min(cal.range_min, raw_int - self._RECOVERY_LIMIT_MARGIN_COUNTS))
+            recovery_max = min(4095, max(cal.range_max, raw_int + self._RECOVERY_LIMIT_MARGIN_COUNTS))
+            if recovery_min == cal.range_min and recovery_max == cal.range_max:
+                continue
+
+            self._safe_bus_write("Min_Position_Limit", motor, recovery_min, normalize=False)
+            self._safe_bus_write("Max_Position_Limit", motor, recovery_max, normalize=False)
+            logger.warning(
+                "hal.recovery_limits_expanded",
+                motor=motor,
+                present_raw=raw_int,
+                range_min=cal.range_min,
+                range_max=cal.range_max,
+                recovery_min=recovery_min,
+                recovery_max=recovery_max,
+            )
+
     def _calibration_path(self) -> Any:
         return self._config.calibration_dir / f"{self._config.lamp_id}.json"
 
-    def _load_calibration(self) -> dict | None:
+    @staticmethod
+    def _raw_to_degrees(raw: float, cal: Any) -> float:
+        mid = (cal.range_min + cal.range_max) / 2
+        return round((raw - mid) * 360 / 4095, 1)
+
+    def _fallback_half_turn_home(self, name: str, cal: Any) -> float:
+        half = 4095 / 2
+        span = cal.range_max - cal.range_min
+        edge_distance = min(half - cal.range_min, cal.range_max - half)
+
+        if span < self._MIN_VALID_RANGE_COUNTS:
+            logger.warning(
+                "hal.calibration_home_fallback_narrow_range",
+                joint=name,
+                range_min=cal.range_min,
+                range_max=cal.range_max,
+                span=span,
+            )
+            return 0.0
+
+        if edge_distance < span * self._HOME_EDGE_MARGIN_RATIO:
+            logger.warning(
+                "hal.calibration_home_fallback_offcenter",
+                joint=name,
+                range_min=cal.range_min,
+                range_max=cal.range_max,
+                half=half,
+                edge_distance=round(edge_distance, 1),
+                span=span,
+            )
+            return 0.0
+
+        return self._raw_to_degrees(half, cal)
+
+    def _load_calibration_data(self) -> dict | None:
         import json
 
         path = self._calibration_path()
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text())
-            result: dict[str, MotorCalibration] = {}
-            for name, entry in data.items():
-                result[name] = MotorCalibration(**entry)
-            return result
+            return json.loads(path.read_text())
         except Exception:
             logger.warning("calibration.load_failed", path=str(path))
             return None
 
-    def _save_calibration(self, calibration: dict) -> None:
+    def _calibration_from_data(self, data: dict | None) -> dict | None:
+        if not data:
+            return None
+
+        fields = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
+        result: dict[str, MotorCalibration] = {}
+        for name, entry in data.items():
+            if name not in self._config.motors or not isinstance(entry, dict):
+                continue
+            try:
+                result[name] = MotorCalibration(**{field: entry[field] for field in fields})
+            except Exception:
+                logger.warning("calibration.entry_invalid", motor=name, exc_info=True)
+        return result or None
+
+    def _load_calibration(self) -> dict | None:
+        return self._calibration_from_data(self._load_calibration_data())
+
+    def _save_calibration(self, calibration: dict, *, neutral_raw: dict[str, float] | None = None) -> None:
         import json
 
         path = self._calibration_path()
@@ -459,5 +590,9 @@ class HardwareAbstraction:
                 "range_min": cal.range_min,
                 "range_max": cal.range_max,
             }
+            if neutral_raw and name in neutral_raw:
+                raw = int(neutral_raw[name])
+                data[name]["neutral_raw"] = raw
+                data[name]["neutral_degrees"] = self._raw_to_degrees(raw, cal)
         path.write_text(json.dumps(data, indent=2))
         logger.info("calibration.saved_to_file", path=str(path))

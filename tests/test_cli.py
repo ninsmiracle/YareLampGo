@@ -86,9 +86,11 @@ def test_load_config_from_args_degrades_to_no_hw_when_motor_port_missing(monkeyp
         home_on_start=True,
     )
 
+    import lampgo.autodetect as autodetect
     import lampgo.core.config as config_mod
 
     monkeypatch.setattr(config_mod, "load_config", lambda config_path=None, cli_overrides=None: fake_config)
+    monkeypatch.setattr(autodetect, "detect_ports", lambda: {"motor_port": "", "messages": []})
 
     result = cli._load_config_from_args(args)
     assert result is fake_config
