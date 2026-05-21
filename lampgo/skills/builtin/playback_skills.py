@@ -170,7 +170,9 @@ class PlayRecordingSkill(Skill):
         # Return to safe: goal-based (only the target pose is known).
         safe = get_safe_position()
         logger.info("playback.return_safe_start", name=name, target=safe)
-        return_done = ctx.motion.move_to(MotionTarget(joints=dict(safe), max_velocity=60.0))
+        return_done = ctx.motion.move_to(
+            MotionTarget(joints=dict(safe), max_velocity=60.0, anticipation=False)
+        )
         if not await _await_done(return_done, timeout=RETURN_SAFE_TIMEOUT_S):
             logger.warning("playback.return_safe_timeout", name=name, target=safe)
             return SkillResult(status="error", message=f"Playback '{name}' finished but return_safe timed out")

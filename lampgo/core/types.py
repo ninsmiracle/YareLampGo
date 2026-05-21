@@ -32,13 +32,15 @@ class MotionTarget:
     """Desired target for the motion runtime.
 
     ``joints`` may be partial — only the specified joints will move,
-    the rest hold their current positions.
+    the rest hold their current positions. ``anticipation=False`` disables
+    spring windup for recovery moves that should head straight toward target.
     """
 
     joints: dict[str, float]
     max_velocity: float | None = None
     max_acceleration: float | None = None
     style: str | None = None
+    anticipation: bool | None = None
 
 
 @dataclass
