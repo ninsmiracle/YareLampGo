@@ -240,6 +240,7 @@ class MotionRuntime:
         _overlap_prev: dict[str, float] = dict(self._current_state.positions)
         # Circular buffers: key = "primary→secondary", value = list of deltas
         _overlap_buffers: dict[str, list[float]] = {}
+        _last_safe_frame: dict[str, float] = dict(self._current_state.positions)
 
         # --- Streaming state ---
         _active_done: threading.Event | None = None
@@ -379,6 +380,7 @@ class MotionRuntime:
                         ant_cfg = self._config
                         if (
                             ant_cfg.anticipation_enabled
+                            and validated.anticipation is not False
                             and max_dist >= ant_cfg.anticipation_threshold
                             and all(
                                 abs(_springs[j].velocity) < 5.0
@@ -397,6 +399,7 @@ class MotionRuntime:
                                 joints=windup_joints,
                                 max_velocity=validated.max_velocity,
                                 style=validated.style,
+                                anticipation=False,
                             )
                             windup_validated = self._safety.validate_target(
                                 self._current_state, windup_target
@@ -603,9 +606,15 @@ class MotionRuntime:
 
             # --- Safety validate and write (unified path for all sources) ---
             clip_events: list[dict[str, float | str]] = []
+            command_reference = dict(self._current_state.positions)
+            command_reference.update(_last_safe_frame)
             safe_frame = self._safety.validate_frame(
-                self._current_state, next_frame, dt, clip_events=clip_events
+                JointState(positions=command_reference, timestamp=self._current_state.timestamp),
+                next_frame,
+                dt,
+                clip_events=clip_events,
             )
+            _last_safe_frame.update(safe_frame)
             if stream_active and clip_events:
                 _stream_clip_events_in_window += len(clip_events)
                 _stream_clipped_joints_in_window.update(
@@ -656,12 +665,16 @@ class MotionRuntime:
 
             # --- Done detection for MOVE_TO ---
             if self._current_target is not None and not _stream_frames:
-                # Primary: spring settled at target for all commanded joints
-                all_settled = all(
+                spring_settled = all(
                     _springs[j].is_settled(tv)
                     for j, tv in self._current_target.joints.items()
                     if j in _springs
                 )
+                hardware_at_target = all(
+                    abs(self._current_state.get(j, tv) - tv) < 1.0
+                    for j, tv in self._current_target.joints.items()
+                )
+                all_settled = spring_settled and hardware_at_target
 
                 _was_stalled = False
                 if not all_settled:
