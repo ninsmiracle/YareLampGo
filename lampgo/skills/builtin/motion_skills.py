@@ -103,7 +103,7 @@ class ReturnSafeSkill(Skill):
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         velocity = float(params.get("velocity", 60.0))
         safe = get_safe_position()
-        target = MotionTarget(joints=dict(safe), max_velocity=velocity)
+        target = MotionTarget(joints=dict(safe), max_velocity=velocity, anticipation=False)
         logger.info("return_safe.queueing", velocity=velocity, target=safe)
         done_event = ctx.motion.move_to(target)
         logger.info("return_safe.awaiting_done")
