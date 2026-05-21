@@ -41,13 +41,12 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 ```toml
 [device]
 motor_port = "/dev/ttyUSB0"
-led_port = "/dev/ttyUSB1"
 lamp_id = "AL02"
 use_degrees = true
 ```
 
-- `motor_port`：Feetech 电机总线串口。
-- `led_port`：本机直连 LED 控制器串口；留空时，如果启用了 ESP32 无线设备，表情会通过 ESP32 的 `/device/led` 串口桥发送。
+- `motor_port`：Feetech 电机总线串口，可在 Web 硬件页保存后热重连。
+- LED 表情通过 ESP32 Wi-Fi 设备控制，不再需要本机 LED 串口。
 - `lamp_id`：用于匹配 `assets/calibration/` 下的校准文件。
 - `use_degrees`：是否使用角度制。
 
@@ -72,6 +71,7 @@ max_acceleration = 900.0
 provider = "openai"
 model = "gpt-4o-mini"
 fast_model = "gpt-4o-mini"
+enable_thinking = false
 api_base = ""
 temperature = 0.3
 max_tokens = 4096
@@ -95,16 +95,20 @@ export LAMPGO_LLM_MODEL="gpt-4o-mini"
 port = ""
 
 [voice]
-stt_provider = ""
-tts_provider = ""
-tts_voice = "zh-CN-XiaoxiaoNeural"
+stt_provider = "volcengine"
+stt_model = "bigmodel"
+tts_provider = "volcengine"
+tts_model = ""
+tts_voice = "zh_female_vv_uranus_bigtts"
+volcengine_app_id = ""
+volcengine_access_token = ""
 wake_word = ""
 vad_enabled = false
 ```
 
 - `camera.port` 可填 USB 摄像头索引，如 `0` 或 `1`。
-- `stt_provider` 留空时禁用语音转文字。
-- `tts_provider` 留空时禁用语音播报。
+- `stt_provider` 使用火山引擎大模型语音识别。
+- `tts_provider` 可选 `volcengine` 或 `edge-tts`；未配置火山 App ID / Token 时会自动回退到 `edge-tts`。
 - `wake_word` 留空时不启用唤醒词。
 
 ## 查看与修改配置

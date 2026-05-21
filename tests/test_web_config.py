@@ -54,7 +54,8 @@ def test_api_config_get_returns_sections_and_provenance(monkeypatch, tmp_path):
     # (here: server was constructed in-process, so provenance is "default").
     assert cell["source"] in {"default", "cli", "user_config"}
     assert "cold_restart_fields" in result
-    assert "device.motor_port" in result["cold_restart_fields"]
+    assert "device.motor_port" not in result["cold_restart_fields"]
+    assert "device.led_port" not in device
 
 
 def test_api_config_post_motion_writes_overrides_and_hot_applies(monkeypatch, tmp_path):
@@ -94,8 +95,17 @@ def test_api_config_post_motion_writes_overrides_and_hot_applies(monkeypatch, tm
     assert motion["motion.default_max_velocity"]["source"] == "user_config"
 
 
-def test_api_config_post_device_flags_cold_restart(monkeypatch, tmp_path):
+def test_api_config_post_device_hot_reloads_motor_port(monkeypatch, tmp_path):
     gateway = _make_gateway(monkeypatch, tmp_path)
+    gateway.server._started = True
+    reload_called = False
+
+    async def fake_reload_motor_runtime():
+        nonlocal reload_called
+        reload_called = True
+        return {"ok": True, "connected": True, "mode": "hardware", "port": "/dev/tty.usbmodem9999"}
+
+    monkeypatch.setattr(gateway.server, "reload_motor_runtime", fake_reload_motor_runtime)
 
     with TestClient(gateway.app) as client:
         response = client.post(
@@ -106,7 +116,9 @@ def test_api_config_post_device_flags_cold_restart(monkeypatch, tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert "device.motor_port" in body["result"]["needs_restart"]
+    assert body["result"]["needs_restart"] == []
+    assert reload_called is True
+    assert body["result"]["hot_reload"]["device.motor_port"]["connected"] is True
     assert gateway.server.config.device.motor_port == "/dev/tty.usbmodem9999"
     overrides = personastore.get_overrides_toml()
     assert overrides["device"]["motor_port"] == "/dev/tty.usbmodem9999"

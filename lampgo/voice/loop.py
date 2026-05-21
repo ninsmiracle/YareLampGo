@@ -1,13 +1,9 @@
-"""VoiceLoop — mic → VAD → audio → agent loop (omni) → TTS → speaker.
-
-The audio is sent directly to mimo-v2-omni via the server's agent loop,
-eliminating the separate STT step. The omni model natively understands
-audio input and can call tools just like text input.
+"""VoiceLoop — mic → VAD → audio → ASR → agent loop → TTS → speaker.
 
 Pipeline:
   [mic] → VAD → PCM → base64 WAV
-  → server.handle_request(cmd="audio") → agent loop (mimo-v2-omni)
-  → response text → MiMoTTS / EdgeTTS → speaker
+  → server.handle_request(cmd="audio") → Volcengine ASR → agent loop
+  → response text → VolcengineTTS / EdgeTTS → speaker
 """
 
 from __future__ import annotations
@@ -21,7 +17,12 @@ from typing import TYPE_CHECKING
 import structlog
 
 from lampgo.voice.audio import AudioCapture, AudioPlayback
-from lampgo.voice.tts import MiMoTTS, EdgeTTS, TTS_SAMPLE_RATE
+from lampgo.voice.tts import (
+    DEFAULT_VOLCENGINE_TTS_VOICE,
+    TTS_SAMPLE_RATE,
+    EdgeTTS,
+    VolcengineTTS,
+)
 from lampgo.voice.vad import EnergyVAD
 
 if TYPE_CHECKING:
@@ -40,14 +41,16 @@ class VoiceLoop:
         self._server = server
         cfg = server.config
 
-        if cfg.voice.tts_provider == "edge-tts":
-            self._tts: MiMoTTS | EdgeTTS = EdgeTTS(voice=cfg.voice.tts_voice)
+        provider = (cfg.voice.tts_provider or "").strip().lower()
+        has_volcengine_credentials = bool(cfg.voice.volcengine_app_id and cfg.voice.volcengine_access_token)
+        if provider == "edge-tts" or not has_volcengine_credentials:
+            self._tts: VolcengineTTS | EdgeTTS = EdgeTTS(voice=_edge_voice_or_default(cfg.voice.tts_voice))
             self._stream_tts = False
         else:
-            self._tts = MiMoTTS(
-                api_key=cfg.llm.api_key,
-                voice=cfg.voice.tts_voice or "mimo_default",
-                style_prompt=cfg.voice.tts_style_prompt,
+            self._tts = VolcengineTTS(
+                app_id=cfg.voice.volcengine_app_id,
+                access_token=cfg.voice.volcengine_access_token,
+                voice=cfg.voice.tts_voice or DEFAULT_VOLCENGINE_TTS_VOICE,
                 model=cfg.voice.tts_model,
             )
             self._stream_tts = True
@@ -127,7 +130,7 @@ class VoiceLoop:
         await self._speak(reply)
 
     async def _speak(self, text: str) -> None:
-        if self._stream_tts and isinstance(self._tts, MiMoTTS):
+        if self._stream_tts and isinstance(self._tts, VolcengineTTS):
             player = AudioPlayback(sample_rate=TTS_SAMPLE_RATE)
             player.start()
             try:
@@ -188,3 +191,8 @@ def _pcm_to_wav_b64(pcm: bytes, sample_rate: int) -> str:
         b"data", data_len,
     )
     return base64.b64encode(header + pcm).decode()
+
+
+def _edge_voice_or_default(voice: str) -> str:
+    voice = (voice or "").strip()
+    return voice if "-" in voice and voice.endswith("Neural") else "zh-CN-XiaoxiaoNeural"

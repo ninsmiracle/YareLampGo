@@ -52,7 +52,7 @@ uv run lampgo onboard
 | 步骤 | 说明 |
 | --- | --- |
 | `env_check` | 检查 Python、`uv` 和关键依赖。 |
-| `hardware` | 配置电机串口、LED 串口、摄像头、麦克风，支持自动探测。 |
+| `hardware` | 配置电机串口、摄像头、麦克风和 ESP32 无线设备，支持自动探测。 |
 | `llm` | 配置 LLM provider、模型、Base URL 和 API key。 |
 | `persona_memory` | 导入默认或自定义人设与记忆文件。 |
 | `openclaw_plugin` | 检测到 OpenClaw 时提示安装 lampgo 插件和 AgentSkill。 |

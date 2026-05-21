@@ -1,9 +1,10 @@
-"""STT — Speech-to-Text via MiMo chat completions (input_audio)."""
+"""STT — Speech-to-Text via Volcengine ASR."""
 
 from __future__ import annotations
 
 import base64
 import io
+import uuid
 import wave
 from typing import TYPE_CHECKING
 
@@ -14,40 +15,42 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-MIMO_OPENAI_BASE = "https://api.mimomimo.com/v1"
-DEFAULT_MODEL = "mimo-v2.5"
+VOLCENGINE_ASR_FLASH_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
+VOLCENGINE_ASR_RESOURCE_ID = "volc.bigasr.auc_turbo"
+DEFAULT_MODEL = "bigmodel"
 
 
-# ---------------------------------------------------------------------------
-# MiMo STT — unified for mimo-v2.5 / mimo-v2-omni / any compatible model
-# ---------------------------------------------------------------------------
+class VolcengineASR:
+    """Transcribe short recorded audio via Volcengine bigmodel ASR.
 
-
-class MimoSTT:
-    """Transcribe audio via MiMo chat completions with ``input_audio``.
-
-    Works with any model that supports the ``input_audio`` content part
-    on the ``/v1/chat/completions`` endpoint (e.g. mimo-v2.5, mimo-v2-omni).
+    lampgo's browser and wake-loop paths already upload a complete WAV buffer,
+    so the low-latency flash endpoint is the best fit: it accepts base64 audio
+    directly and returns the transcript in a single response.
     """
 
     def __init__(
         self,
-        api_key: str,
-        api_base: str = MIMO_OPENAI_BASE,
+        app_id: str,
+        access_token: str,
         model: str = DEFAULT_MODEL,
+        endpoint: str = VOLCENGINE_ASR_FLASH_URL,
     ) -> None:
-        self._api_key = api_key
-        self._api_base = api_base.rstrip("/")
-        self._model = model
+        self._app_id = app_id.strip()
+        self._access_token = access_token.strip()
+        self._model = (model or "").strip() or DEFAULT_MODEL
+        self._endpoint = endpoint
 
     async def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000) -> str:
-        """Transcribe raw PCM 16-bit mono audio → text."""
+        """Transcribe raw PCM 16-bit mono audio to text."""
         wav_buf = _pcm_to_wav(audio_bytes, sample_rate)
         b64_audio = base64.b64encode(wav_buf).decode("ascii")
-        return await self._call_api(b64_audio)
+        return await self.transcribe_wav_b64(b64_audio)
 
     async def transcribe_wav_b64(self, wav_b64: str) -> str:
-        """Transcribe base64-encoded WAV → text."""
+        """Transcribe base64-encoded WAV to text."""
+        if not self._app_id or not self._access_token:
+            logger.warning("stt.volcengine_missing_credentials")
+            return ""
         return await self._call_api(wav_b64)
 
     async def _call_api(self, b64_audio: str) -> str:
@@ -57,82 +60,67 @@ class MimoSTT:
             logger.warning("stt.no_httpx")
             return ""
 
+        request_id = str(uuid.uuid4())
         body = {
-            "model": self._model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是语音转写助手。忠实转写用户语音，只输出用户说的原文，"
-                        "不要添加任何解释、标点修饰或描述。如果听不清就输出空字符串。"
-                        "保持与说话者相同的语言。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_audio", "input_audio": {"data": b64_audio, "format": "wav"}},
-                        {"type": "text", "text": "请转写这段语音，只返回文字。"},
-                    ],
-                },
-            ],
-            "temperature": 0,
-            "max_completion_tokens": 256,
+            "user": {"uid": self._app_id},
+            "audio": {"data": b64_audio},
+            "request": {
+                "model_name": self._model,
+                "enable_itn": True,
+                "enable_punc": True,
+                "enable_ddc": True,
+                "show_utterances": True,
+            },
         }
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "api-key": self._api_key,
+            "X-Api-App-Key": self._app_id,
+            "X-Api-Access-Key": self._access_token,
+            "X-Api-Resource-Id": VOLCENGINE_ASR_RESOURCE_ID,
+            "X-Api-Request-Id": request_id,
+            "X-Api-Sequence": "-1",
             "Content-Type": "application/json",
         }
 
-        logger.info("stt.calling_api", model=self._model, audio_b64_len=len(b64_audio))
+        logger.info("stt.volcengine_calling_api", request_id=request_id, audio_b64_len=len(b64_audio))
         timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    f"{self._api_base}/chat/completions",
-                    json=body,
-                    headers=headers,
-                )
+                resp = await client.post(self._endpoint, json=body, headers=headers)
+                status_code = resp.headers.get("X-Api-Status-Code", "")
+                status_message = resp.headers.get("X-Api-Message", "")
+                log_id = resp.headers.get("X-Tt-Logid", "")
+                if status_code and status_code != "20000000":
+                    logger.warning(
+                        "stt.volcengine_status_error",
+                        request_id=request_id,
+                        status_code=status_code,
+                        status_message=status_message,
+                        log_id=log_id,
+                    )
+                    return ""
                 resp.raise_for_status()
                 data = resp.json()
         except Exception:
-            logger.exception("stt.request_failed", model=self._model)
+            logger.exception("stt.volcengine_request_failed", request_id=request_id, model=self._model)
             return ""
 
         text = _extract_text(data)
         if text:
-            logger.info("stt.transcribed", text=text[:80], model=self._model)
+            logger.info("stt.volcengine_transcribed", request_id=request_id, text=text[:80], model=self._model)
         else:
-            raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            logger.warning("stt.empty_result", model=self._model, raw_content=str(raw)[:200])
+            logger.warning("stt.volcengine_empty_result", request_id=request_id, keys=list(data.keys()))
         return text
 
 
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
-
-
-def _resolve_mimo_base(raw_base: str) -> str:
-    """MiMo STT always needs the OpenAI-compatible endpoint, never /anthropic/."""
-    if "mimomimo.com" in raw_base:
-        return MIMO_OPENAI_BASE
-    return raw_base
-
-
-def build_stt(config: LampgoConfig) -> MimoSTT:
+def build_stt(config: LampgoConfig) -> VolcengineASR:
     """Construct the STT backend from voice config."""
-    api_key = config.llm.api_key
-    api_base = _resolve_mimo_base(config.llm.api_base)
     model = config.voice.stt_model or DEFAULT_MODEL
-    logger.info("stt.init", model=model, api_base=api_base)
-    return MimoSTT(api_key=api_key, api_base=api_base, model=model)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+    logger.info("stt.init", provider="volcengine", model=model)
+    return VolcengineASR(
+        app_id=config.voice.volcengine_app_id,
+        access_token=config.voice.volcengine_access_token,
+        model=model,
+    )
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
@@ -146,19 +134,22 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
 
 
 def _extract_text(data: dict) -> str:
-    choices = data.get("choices", [])
-    if not choices:
-        return ""
-    message = choices[0].get("message", {})
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                t = item.get("text")
-                if isinstance(t, str) and t.strip():
-                    parts.append(t.strip())
-        return " ".join(parts).strip()
-    return ""
+    result = data.get("result")
+    if isinstance(result, dict):
+        text = result.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+        utterances = result.get("utterances")
+        if isinstance(utterances, list):
+            parts = []
+            for item in utterances:
+                if isinstance(item, dict):
+                    utterance_text = item.get("text")
+                    if isinstance(utterance_text, str) and utterance_text.strip():
+                        parts.append(utterance_text.strip())
+            if parts:
+                return "".join(parts).strip()
+
+    text = data.get("text")
+    return text.strip() if isinstance(text, str) else ""

@@ -1,138 +1,354 @@
-"""TTS — Text-to-Speech via MiMo-V2.5-TTS (streaming PCM) or edge-tts fallback."""
+"""TTS — Text-to-Speech via Volcengine streaming TTS or edge-tts fallback."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
+import struct
 import tempfile
+import uuid
+import wave
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-TTS_SAMPLE_RATE = 24000  # MiMo TTS outputs 24kHz PCM16LE mono
-
-# MiMo's TTS extension lives on the OpenAI-compat ``/chat/completions``
-# endpoint — there is no Anthropic-compat variant.  We therefore hard-code
-# the base URL here: reusing ``config.llm.api_base`` caused 404s the
-# moment a user switched the LLM over to the Anthropic-compat path
-# (``…/anthropic/v1/chat/completions`` does not exist).  MiMoTTS only
-# shares the **API key** with the LLM config; everything else is fixed.
-#
-# Ref: https://platform.mimomimo.com/docs/usage-guide/speech-synthesis-v2.5
-MIMO_TTS_API_BASE = "https://api.mimomimo.com/v1"
+TTS_SAMPLE_RATE = 24000
+DEFAULT_VOLCENGINE_TTS_VOICE = "zh_female_vv_uranus_bigtts"
+VOLCENGINE_TTS_ENDPOINT = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
+VOLCENGINE_SEED_TTS_2_RESOURCE_ID = "seed-tts-2.0"
+VOLCENGINE_SEED_TTS_1_RESOURCE_ID = "seed-tts-1.0"
+VOLCENGINE_SEED_ICL_2_RESOURCE_ID = "seed-icl-2.0"
+VOLCENGINE_BIGTTS_RESOURCE_ID = "volc.service_type.10029"
 
 
-class MiMoTTS:
-    """Streaming TTS using MiMo-V2.5-TTS.
+class MsgType(IntEnum):
+    FULL_CLIENT_REQUEST = 0b0001
+    AUDIO_ONLY_CLIENT = 0b0010
+    FULL_SERVER_RESPONSE = 0b1001
+    AUDIO_ONLY_SERVER = 0b1011
+    ERROR = 0b1111
 
-    Primary mode: stream=True + pcm16 format.
-    Each SSE chunk contains base64-encoded PCM16LE audio that can be
-    fed directly to a sounddevice output stream for real-time playback.
 
-    The base URL is fixed at :data:`MIMO_TTS_API_BASE` (MiMo's OpenAI-compat
-    host).  We intentionally do **not** accept an ``api_base`` argument —
-    this used to mirror the LLM ``api_base`` but that broke the moment a
-    user switched the LLM to MiMo's Anthropic-compat path.  Only the API
-    key is shared with the LLM config.
+class MsgFlag(IntEnum):
+    NO_SEQ = 0b0000
+    POSITIVE_SEQ = 0b0001
+    NEGATIVE_SEQ = 0b0011
+    WITH_EVENT = 0b0100
+
+
+class Serialization(IntEnum):
+    RAW = 0
+    JSON = 1
+
+
+class EventType(IntEnum):
+    START_CONNECTION = 1
+    FINISH_CONNECTION = 2
+    CONNECTION_STARTED = 50
+    CONNECTION_FAILED = 51
+    CONNECTION_FINISHED = 52
+    START_SESSION = 100
+    CANCEL_SESSION = 101
+    FINISH_SESSION = 102
+    SESSION_STARTED = 150
+    SESSION_CANCELED = 151
+    SESSION_FINISHED = 152
+    SESSION_FAILED = 153
+    TASK_REQUEST = 200
+
+
+@dataclass
+class VolcMessage:
+    msg_type: MsgType
+    flag: MsgFlag = MsgFlag.NO_SEQ
+    event: EventType | int = 0
+    session_id: str = ""
+    connect_id: str = ""
+    sequence: int = 0
+    error_code: int = 0
+    payload: bytes = b""
+    serialization: Serialization = Serialization.JSON
+
+    def marshal(self) -> bytes:
+        header_size = 1
+        header = bytes(
+            [
+                (1 << 4) | header_size,
+                (int(self.msg_type) << 4) | int(self.flag),
+                (int(self.serialization) << 4),
+                0,
+            ]
+        )
+        out = io.BytesIO()
+        out.write(header)
+
+        if self.flag == MsgFlag.WITH_EVENT:
+            out.write(struct.pack(">i", int(self.event)))
+            if int(self.event) not in {
+                EventType.START_CONNECTION,
+                EventType.FINISH_CONNECTION,
+                EventType.CONNECTION_STARTED,
+                EventType.CONNECTION_FAILED,
+            }:
+                session = self.session_id.encode("utf-8")
+                out.write(struct.pack(">I", len(session)))
+                out.write(session)
+
+        if self.msg_type in {
+            MsgType.FULL_CLIENT_REQUEST,
+            MsgType.FULL_SERVER_RESPONSE,
+            MsgType.AUDIO_ONLY_CLIENT,
+            MsgType.AUDIO_ONLY_SERVER,
+        } and self.flag in {MsgFlag.POSITIVE_SEQ, MsgFlag.NEGATIVE_SEQ}:
+            out.write(struct.pack(">i", self.sequence))
+        elif self.msg_type == MsgType.ERROR:
+            out.write(struct.pack(">I", self.error_code))
+
+        out.write(struct.pack(">I", len(self.payload)))
+        out.write(self.payload)
+        return out.getvalue()
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> VolcMessage:
+        if len(data) < 4:
+            raise ValueError(f"Volcengine message too short: {len(data)}")
+
+        header_size = data[0] & 0x0F
+        msg_type = MsgType(data[1] >> 4)
+        flag = MsgFlag(data[1] & 0x0F)
+        serialization = Serialization(data[2] >> 4)
+        offset = header_size * 4
+
+        event: EventType | int = 0
+        session_id = ""
+        connect_id = ""
+        sequence = 0
+        error_code = 0
+
+        if msg_type in {
+            MsgType.FULL_CLIENT_REQUEST,
+            MsgType.FULL_SERVER_RESPONSE,
+            MsgType.AUDIO_ONLY_CLIENT,
+            MsgType.AUDIO_ONLY_SERVER,
+        } and flag in {MsgFlag.POSITIVE_SEQ, MsgFlag.NEGATIVE_SEQ}:
+            sequence = struct.unpack(">i", data[offset : offset + 4])[0]
+            offset += 4
+        elif msg_type == MsgType.ERROR:
+            error_code = struct.unpack(">I", data[offset : offset + 4])[0]
+            offset += 4
+
+        if flag == MsgFlag.WITH_EVENT:
+            raw_event = struct.unpack(">i", data[offset : offset + 4])[0]
+            offset += 4
+            try:
+                event = EventType(raw_event)
+            except ValueError:
+                event = raw_event
+
+            if int(event) not in {
+                EventType.CONNECTION_STARTED,
+                EventType.CONNECTION_FAILED,
+                EventType.CONNECTION_FINISHED,
+            }:
+                session_size = struct.unpack(">I", data[offset : offset + 4])[0]
+                offset += 4
+                if session_size:
+                    session_id = data[offset : offset + session_size].decode("utf-8", errors="ignore")
+                    offset += session_size
+
+            if int(event) in {
+                EventType.CONNECTION_STARTED,
+                EventType.CONNECTION_FAILED,
+                EventType.CONNECTION_FINISHED,
+            } and offset + 4 <= len(data):
+                connect_size = struct.unpack(">I", data[offset : offset + 4])[0]
+                offset += 4
+                if connect_size:
+                    connect_id = data[offset : offset + connect_size].decode("utf-8", errors="ignore")
+                    offset += connect_size
+
+        if offset + 4 > len(data):
+            payload = b""
+        else:
+            payload_size = struct.unpack(">I", data[offset : offset + 4])[0]
+            offset += 4
+            payload = data[offset : offset + payload_size] if payload_size else b""
+
+        return cls(
+            msg_type=msg_type,
+            flag=flag,
+            event=event,
+            session_id=session_id,
+            connect_id=connect_id,
+            sequence=sequence,
+            error_code=error_code,
+            payload=payload,
+            serialization=serialization,
+        )
+
+
+class VolcengineTTS:
+    """Streaming TTS using Volcengine V3 bidirectional WebSocket.
+
+    Audio is requested as raw PCM16LE mono at 24 kHz so local playback and web
+    streaming can start as soon as the first audio frame arrives.
     """
 
     def __init__(
         self,
-        api_key: str,
-        voice: str = "mimo_default",
-        style_prompt: str = "",
-        model: str = "mimo-v2.5-tts",
+        app_id: str,
+        access_token: str,
+        voice: str = DEFAULT_VOLCENGINE_TTS_VOICE,
+        model: str = "",
+        endpoint: str = VOLCENGINE_TTS_ENDPOINT,
+        sample_rate: int = TTS_SAMPLE_RATE,
     ) -> None:
-        self._api_key = api_key
-        self._api_base = MIMO_TTS_API_BASE
-        self._voice = voice
-        self._style_prompt = style_prompt
-        # Sent verbatim to MiMo /v1/chat/completions; falls back to the current
-        # public default when the caller hands us an empty/whitespace string so
-        # a misconfigured UI never results in a 400 from the provider.
-        self._model = (model or "").strip() or "mimo-v2.5-tts"
+        self._app_id = app_id.strip()
+        self._access_token = access_token.strip()
+        self._voice = _volcengine_voice_or_default(voice)
+        self._model = (model or "").strip()
+        self._endpoint = endpoint
+        self._sample_rate = sample_rate
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
 
     async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
-        """Stream PCM16LE chunks from MiMo TTS via SSE.
-
-        Yields raw PCM bytes (24kHz, 16-bit, mono) as they arrive.
-        """
+        """Stream raw PCM16LE chunks from Volcengine TTS."""
         if not text.strip():
+            return
+        if not self._app_id or not self._access_token:
+            logger.warning("tts.volcengine_missing_credentials")
             return
 
         try:
-            import httpx
+            import websockets
         except ImportError:
-            logger.warning("tts.no_httpx")
+            logger.warning("tts.no_websockets")
             return
 
-        messages: list[dict] = []
-        if self._style_prompt:
-            messages.append({"role": "user", "content": self._style_prompt})
-        messages.append({"role": "assistant", "content": text})
+        request_id = str(uuid.uuid4())
+        logger.info("tts.volcengine_connecting", request_id=request_id, voice=self._voice)
 
-        body = {
-            "model": self._model,
-            "messages": messages,
-            "audio": {
-                "format": "pcm16",
-                "voice": self._voice,
-            },
-            "stream": True,
-        }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "api-key": self._api_key,
-            "Content-Type": "application/json",
-        }
+        websocket = None
+        try:
+            websocket = await websockets.connect(
+                self._endpoint,
+                additional_headers=self._build_auth_headers(request_id),
+                max_size=10 * 1024 * 1024,
+                open_timeout=10,
+                close_timeout=5,
+            )
+            await _send_start_connection(websocket)
+            await _wait_for_event(websocket, EventType.CONNECTION_STARTED)
 
-        url = f"{self._api_base}/chat/completions"
-        max_retries = 2
+            session_id = str(uuid.uuid4())
+            await _send_start_session(
+                websocket,
+                session_id=session_id,
+                payload=self._build_session_payload(EventType.START_SESSION),
+            )
+            await _wait_for_event(websocket, EventType.SESSION_STARTED)
 
-        for attempt in range(1, max_retries + 1):
-            total_bytes = 0
-            timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+            send_task = asyncio.create_task(self._send_text(websocket, session_id, text))
+            audio_bytes = 0
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream("POST", url, json=body, headers=headers) as resp:
-                        resp.raise_for_status()
-                        async for line in resp.aiter_lines():
-                            if not line.startswith("data: "):
-                                continue
-                            payload = line[6:]
-                            if payload.strip() == "[DONE]":
-                                break
+                while True:
+                    msg = await _receive_message(websocket)
+                    if msg.msg_type == MsgType.AUDIO_ONLY_SERVER:
+                        if msg.payload:
+                            audio_bytes += len(msg.payload)
+                            yield msg.payload
+                        continue
+                    if msg.msg_type == MsgType.ERROR:
+                        raise RuntimeError(_format_volc_error(msg))
+                    if msg.msg_type == MsgType.FULL_SERVER_RESPONSE:
+                        if msg.event == EventType.SESSION_FINISHED:
+                            break
+                        if msg.event in {
+                            EventType.SESSION_FAILED,
+                            EventType.CONNECTION_FAILED,
+                        }:
+                            raise RuntimeError(_format_volc_error(msg))
+                await send_task
+            finally:
+                if not send_task.done():
+                    send_task.cancel()
+                    await asyncio.gather(send_task, return_exceptions=True)
 
-                            try:
-                                chunk = json.loads(payload)
-                            except json.JSONDecodeError:
-                                continue
+            logger.debug(
+                "tts.volcengine_stream_complete",
+                request_id=request_id,
+                chars=len(text),
+                pcm_bytes=audio_bytes,
+            )
+        except Exception:
+            logger.exception("tts.volcengine_stream_failed", request_id=request_id, voice=self._voice)
+            return
+        finally:
+            if websocket is not None:
+                try:
+                    await _send_finish_connection(websocket)
+                    await _wait_for_event(websocket, EventType.CONNECTION_FINISHED)
+                except Exception:
+                    pass
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
 
-                            pcm = _extract_stream_audio(chunk)
-                            if pcm:
-                                total_bytes += len(pcm)
-                                yield pcm
+    async def _send_text(self, websocket, session_id: str, text: str) -> None:
+        for chunk in _split_text_for_tts(text):
+            payload = self._build_session_payload(EventType.TASK_REQUEST, text=chunk)
+            await _send_task_request(websocket, session_id=session_id, payload=payload)
+            await asyncio.sleep(0.005)
+        await _send_finish_session(websocket, session_id=session_id)
 
-                logger.debug("tts.stream_complete", chars=len(text), pcm_bytes=total_bytes)
-                return
-            except Exception:
-                if attempt < max_retries:
-                    logger.warning("tts.stream_retry", attempt=attempt, chars=len(text))
-                    await asyncio.sleep(1.0)
-                else:
-                    logger.exception("tts.stream_failed")
+    def _build_auth_headers(self, request_id: str) -> dict[str, str]:
+        return {
+            "X-Api-App-Key": self._app_id,
+            "X-Api-Access-Key": self._access_token,
+            "X-Api-Resource-Id": _resource_id_for_voice(self._voice),
+            "X-Api-Connect-Id": request_id,
+        }
+
+    def _build_session_payload(self, event: EventType, text: str = "") -> bytes:
+        req_params: dict = {
+            "speaker": self._voice,
+            "audio_params": {
+                "format": "pcm",
+                "sample_rate": self._sample_rate,
+                "enable_timestamp": False,
+            },
+            "additions": json.dumps({"disable_markdown_filter": False}, ensure_ascii=False),
+        }
+        if text:
+            req_params["text"] = text
+        if self._model and self._model.startswith("seed-tts-"):
+            req_params["model"] = self._model
+
+        payload = {
+            "user": {"uid": self._app_id},
+            "namespace": "BidirectionalTTS",
+            "event": int(event),
+            "req_params": req_params,
+        }
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     async def stream_speak(self, text: str) -> None:
-        """Stream-synthesize text and play through sounddevice in real-time."""
+        """Stream-synthesize text and play through sounddevice in real time."""
         from lampgo.voice.audio import AudioPlayback
 
-        player = AudioPlayback(sample_rate=TTS_SAMPLE_RATE)
+        player = AudioPlayback(sample_rate=self._sample_rate)
         player.start()
-
         try:
             async for pcm_chunk in self.stream_pcm(text):
                 player.feed(pcm_chunk)
@@ -142,11 +358,10 @@ class MiMoTTS:
             player.stop()
 
     async def speak(self, text: str) -> None:
-        """Synthesize and play — uses streaming if available, file fallback otherwise."""
         await self.stream_speak(text)
 
     async def synthesize(self, text: str) -> Path | None:
-        """Non-streaming fallback: collect all PCM then save as raw file."""
+        """Collect a streaming synthesis into a temporary WAV file."""
         if not text.strip():
             return None
 
@@ -157,8 +372,8 @@ class MiMoTTS:
         if not chunks:
             return None
 
-        tmp = Path(tempfile.mktemp(suffix=".pcm"))
-        tmp.write_bytes(b"".join(chunks))
+        tmp = Path(tempfile.mktemp(suffix=".wav"))
+        tmp.write_bytes(_pcm_to_wav(b"".join(chunks), self._sample_rate))
         return tmp
 
 
@@ -182,10 +397,10 @@ class EdgeTTS:
         try:
             communicate = edge_tts.Communicate(text, self._voice)
             await communicate.save(str(tmp))
-            logger.debug("tts.synthesized", path=str(tmp), text=text[:30])
+            logger.debug("tts.edge_synthesized", path=str(tmp), text=text[:30])
             return tmp
         except Exception:
-            logger.exception("tts.synthesize_failed")
+            logger.exception("tts.edge_synthesize_failed")
             return None
 
     async def speak(self, text: str) -> None:
@@ -219,106 +434,228 @@ async def play_audio_file(path: Path) -> None:
     logger.warning("tts.no_player", msg="Install ffplay or mpv to hear TTS output")
 
 
-async def synthesize_for_web(
+async def iter_synthesize_for_web(
     text: str,
-    api_key: str = "",
+    app_id: str = "",
+    access_token: str = "",
     voice: str = "",
     provider: str = "",
     model: str = "",
-) -> tuple[str, str] | None:
-    """Generate TTS audio suitable for browser playback.
+) -> AsyncIterator[tuple[str, str, int]]:
+    """Yield TTS audio chunks suitable for browser playback.
 
-    ``provider`` comes from ``config.voice.tts_provider`` and takes precedence:
-      - "edge-tts" → always use EdgeTTS (no Key needed).
-      - "mimo"     → use MiMoTTS (requires ``api_key``).
-      - ""         → legacy auto-detect: MiMo if key is present, else Edge.
-
-    MiMoTTS is hard-wired to MiMo's OpenAI-compat endpoint — callers do not
-    (and must not) supply an ``api_base``; see :data:`MIMO_TTS_API_BASE`.
-
-    Returns ``(base64_audio, format)`` or ``None`` on failure.
+    Yields ``(base64_audio, format, sample_rate)``. Volcengine emits raw
+    ``pcm16`` chunks progressively; edge-tts emits one mp3 buffer.
     """
     if not text.strip():
-        return None
+        return
 
-    chosen = (provider or "").strip().lower()
-    if not chosen:
-        chosen = "mimo" if api_key else "edge-tts"
+    chosen = _choose_provider(provider, app_id, access_token)
 
-    if chosen == "mimo":
-        if not api_key:
-            logger.warning(
-                "tts.web_synthesize_missing_key",
-                msg="tts_provider=mimo requires api_key; falling back to edge-tts",
-            )
-            chosen = "edge-tts"
-        else:
-            tts = MiMoTTS(
-                api_key=api_key,
-                voice=voice or "mimo_default",
-                model=model or "mimo-v2.5-tts",
-            )
-            chunks: list[bytes] = []
-            async for pcm in tts.stream_pcm(text):
-                chunks.append(pcm)
-            if not chunks:
-                return None
-            wav_bytes = _pcm_to_wav(b"".join(chunks), TTS_SAMPLE_RATE)
-            return base64.b64encode(wav_bytes).decode(), "wav"
+    if chosen == "volcengine":
+        tts = VolcengineTTS(
+            app_id=app_id,
+            access_token=access_token,
+            voice=voice or DEFAULT_VOLCENGINE_TTS_VOICE,
+            model=model,
+        )
+        yielded = False
+        async for pcm in tts.stream_pcm(text):
+            if not pcm:
+                continue
+            yielded = True
+            yield base64.b64encode(pcm).decode("ascii"), "pcm16", tts.sample_rate
+        if yielded:
+            return
+
+        logger.warning("tts.web_volcengine_empty_falling_back_edge")
+        chosen = "edge-tts"
 
     if chosen == "edge-tts":
         try:
-            # Edge voice names look like "zh-CN-XiaoxiaoNeural". If `voice` is
-            # something else (e.g. a mimo voice id left over from a previous
-            # provider), fall back to the EdgeTTS default.
-            edge_voice = voice if voice and "-" in voice else ""
-            edge = EdgeTTS(voice=edge_voice) if edge_voice else EdgeTTS()
+            edge_voice = _edge_voice_or_default(voice)
+            edge = EdgeTTS(voice=edge_voice)
             path = await edge.synthesize(text)
             if path and path.exists():
                 mp3_bytes = path.read_bytes()
                 path.unlink(missing_ok=True)
-                return base64.b64encode(mp3_bytes).decode(), "mp3"
+                yield base64.b64encode(mp3_bytes).decode("ascii"), "mp3", 0
         except Exception:
-            logger.exception("tts.web_synthesize_failed")
-        return None
+            logger.exception("tts.web_edge_synthesize_failed")
 
-    logger.warning("tts.web_synthesize_unknown_provider", provider=chosen)
-    return None
+
+async def synthesize_for_web(
+    text: str,
+    app_id: str = "",
+    access_token: str = "",
+    voice: str = "",
+    provider: str = "",
+    model: str = "",
+) -> tuple[str, str] | None:
+    """Compatibility wrapper that collects web TTS into a single buffer.
+
+    New playback paths should use :func:`iter_synthesize_for_web` so Volcengine
+    audio can be played while it is still being synthesized.
+    """
+    chunks: list[bytes] = []
+    final_format = ""
+    final_rate = 0
+    async for audio_b64, fmt, sample_rate in iter_synthesize_for_web(
+        text,
+        app_id=app_id,
+        access_token=access_token,
+        voice=voice,
+        provider=provider,
+        model=model,
+    ):
+        chunks.append(base64.b64decode(audio_b64))
+        final_format = fmt
+        final_rate = sample_rate
+
+    if not chunks:
+        return None
+    if final_format == "pcm16":
+        return base64.b64encode(_pcm_to_wav(b"".join(chunks), final_rate or TTS_SAMPLE_RATE)).decode(), "wav"
+    return base64.b64encode(b"".join(chunks)).decode(), final_format or "mp3"
+
+
+def _choose_provider(provider: str, app_id: str, access_token: str) -> str:
+    chosen = (provider or "").strip().lower()
+    if chosen in {"", "auto"}:
+        return "volcengine" if app_id and access_token else "edge-tts"
+    if chosen in {"volc", "volcano", "huoshan", "volcengine-tts"}:
+        chosen = "volcengine"
+    if chosen == "mimo":
+        logger.warning("tts.provider_mimo_removed_using_volcengine")
+        chosen = "volcengine"
+    if chosen == "volcengine" and not (app_id and access_token):
+        logger.warning("tts.volcengine_missing_credentials_falling_back_edge")
+        return "edge-tts"
+    if chosen != "edge-tts" and chosen != "volcengine":
+        logger.warning("tts.unknown_provider_falling_back_edge", provider=chosen)
+        return "edge-tts"
+    return chosen
+
+
+def _edge_voice_or_default(voice: str) -> str:
+    voice = (voice or "").strip()
+    return voice if "-" in voice and voice.endswith("Neural") else "zh-CN-XiaoxiaoNeural"
+
+
+def _volcengine_voice_or_default(voice: str) -> str:
+    voice = (voice or "").strip()
+    if not voice or voice == "mimo_default" or (voice.endswith("Neural") and "-" in voice):
+        return DEFAULT_VOLCENGINE_TTS_VOICE
+    return voice
+
+
+def _resource_id_for_voice(voice: str) -> str:
+    voice = (voice or "").strip()
+    if voice.startswith("S_"):
+        return VOLCENGINE_SEED_ICL_2_RESOURCE_ID
+    if "_uranus_bigtts" in voice:
+        return VOLCENGINE_SEED_TTS_2_RESOURCE_ID
+    if "_moon_bigtts" in voice:
+        return VOLCENGINE_SEED_TTS_1_RESOURCE_ID
+    return VOLCENGINE_BIGTTS_RESOURCE_ID
+
+
+def _split_text_for_tts(text: str, max_chars: int = 30) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for ch in text:
+        current += ch
+        if ch in "。！？!?；;\n" or len(current) >= max_chars:
+            stripped = current.strip()
+            if stripped:
+                chunks.append(stripped)
+            current = ""
+    stripped = current.strip()
+    if stripped:
+        chunks.append(stripped)
+    return chunks
+
+
+async def _send_start_connection(websocket) -> None:
+    msg = VolcMessage(
+        msg_type=MsgType.FULL_CLIENT_REQUEST,
+        flag=MsgFlag.WITH_EVENT,
+        event=EventType.START_CONNECTION,
+        payload=b"{}",
+    )
+    await websocket.send(msg.marshal())
+
+
+async def _send_finish_connection(websocket) -> None:
+    msg = VolcMessage(
+        msg_type=MsgType.FULL_CLIENT_REQUEST,
+        flag=MsgFlag.WITH_EVENT,
+        event=EventType.FINISH_CONNECTION,
+        payload=b"{}",
+    )
+    await websocket.send(msg.marshal())
+
+
+async def _send_start_session(websocket, session_id: str, payload: bytes) -> None:
+    msg = VolcMessage(
+        msg_type=MsgType.FULL_CLIENT_REQUEST,
+        flag=MsgFlag.WITH_EVENT,
+        event=EventType.START_SESSION,
+        session_id=session_id,
+        payload=payload,
+    )
+    await websocket.send(msg.marshal())
+
+
+async def _send_finish_session(websocket, session_id: str) -> None:
+    msg = VolcMessage(
+        msg_type=MsgType.FULL_CLIENT_REQUEST,
+        flag=MsgFlag.WITH_EVENT,
+        event=EventType.FINISH_SESSION,
+        session_id=session_id,
+        payload=b"{}",
+    )
+    await websocket.send(msg.marshal())
+
+
+async def _send_task_request(websocket, session_id: str, payload: bytes) -> None:
+    msg = VolcMessage(
+        msg_type=MsgType.FULL_CLIENT_REQUEST,
+        flag=MsgFlag.WITH_EVENT,
+        event=EventType.TASK_REQUEST,
+        session_id=session_id,
+        payload=payload,
+    )
+    await websocket.send(msg.marshal())
+
+
+async def _receive_message(websocket) -> VolcMessage:
+    data = await websocket.recv()
+    if isinstance(data, str):
+        raise RuntimeError(f"unexpected Volcengine text message: {data[:200]}")
+    return VolcMessage.from_bytes(data)
+
+
+async def _wait_for_event(websocket, event: EventType) -> VolcMessage:
+    msg = await _receive_message(websocket)
+    if msg.msg_type == MsgType.ERROR:
+        raise RuntimeError(_format_volc_error(msg))
+    if msg.event != event:
+        raise RuntimeError(f"unexpected Volcengine event: got={msg.event!r} want={event!r}")
+    return msg
+
+
+def _format_volc_error(msg: VolcMessage) -> str:
+    payload = msg.payload.decode("utf-8", errors="ignore")
+    return f"Volcengine TTS error event={msg.event!r} code={msg.error_code} payload={payload[:300]}"
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     """Wrap raw PCM16LE mono data in a WAV header."""
-    import struct
-
-    data_len = len(pcm)
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        36 + data_len,
-        b"WAVE",
-        b"fmt ",
-        16,
-        1,
-        1,
-        sample_rate,
-        sample_rate * 2,
-        2,
-        16,
-        b"data",
-        data_len,
-    )
-    return header + pcm
-
-
-def _extract_stream_audio(chunk: dict) -> bytes | None:
-    """Extract PCM bytes from a streaming SSE chunk (delta.audio.data)."""
-    choices = chunk.get("choices", [])
-    if not choices:
-        return None
-    delta = choices[0].get("delta", {})
-    audio = delta.get("audio")
-    if isinstance(audio, dict):
-        b64 = audio.get("data", "")
-        if b64:
-            return base64.b64decode(b64)
-    return None
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return out.getvalue()

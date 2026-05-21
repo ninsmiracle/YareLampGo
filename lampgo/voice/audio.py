@@ -88,7 +88,7 @@ class AudioCapture:
 class AudioPlayback:
     """Real-time PCM playback via sounddevice output stream.
 
-    Accepts PCM16LE mono chunks (24kHz by default, matching MiMo TTS output)
+    Accepts PCM16LE mono chunks (24kHz by default, matching Volcengine TTS output)
     and plays them immediately through the system speaker.
     """
 

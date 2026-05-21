@@ -238,6 +238,10 @@ class LLMConfig(BaseModel):
             "运行时会从最旧消息开始裁剪。"
         ),
     )
+    enable_thinking: bool = Field(
+        default=False,
+        description="默认是否允许聊天请求开启模型思考过程输出。建议仅调试推理模型时开启。",
+    )
     # -------------------------------------------------------------------
     # Web search — MiMo-only, implemented as an **independent sub-service**.
     # -------------------------------------------------------------------
@@ -353,35 +357,77 @@ class DeviceEsp32Config(BaseModel):
 class VoiceConfig(BaseModel):
     """Voice / TTS / STT configuration."""
 
-    stt_provider: str = Field(default="mimo", description="STT provider: mimo")
-    stt_model: str = Field(default="mimo-v2.5", description="STT model: mimo-v2.5, mimo-v2-omni, etc.")
-    tts_provider: str = Field(default="mimo", description="TTS provider: mimo, edge-tts")
+    stt_provider: str = Field(default="volcengine", description="STT provider: volcengine")
+    stt_model: str = Field(default="bigmodel", description="Volcengine ASR model name")
+    tts_provider: str = Field(default="volcengine", description="TTS provider: volcengine, edge-tts")
     tts_model: str = Field(
-        default="mimo-v2.5-tts",
+        default="",
         description=(
-            "Model id for the TTS provider. Only used when tts_provider=mimo "
-            "(sent as the `model` field in the chat/completions request to "
-            "mimomimo). Ignored by edge-tts (which has no notion of model)."
+            "Optional Volcengine TTS model id (e.g. seed-tts-2.0-standard). "
+            "Ignored by edge-tts."
         ),
     )
-    tts_voice: str = Field(default="mimo_default", description="TTS voice identifier")
-    tts_style_prompt: str = Field(default="", description="MiMo TTS style instruction (e.g. '温柔甜美的女声')")
+    tts_voice: str = Field(default="zh_female_vv_uranus_bigtts", description="TTS voice identifier")
+    tts_style_prompt: str = Field(default="", description="Reserved TTS style instruction")
     chat_model: str = Field(default="mimo-v2-pro", description="LLM model for voice chat streaming responses")
     mic_device: str = Field(default="", description="Microphone device index or name (empty = system default)")
     wake_word: str = Field(default="", description="Wake word for hands-free activation (empty = disabled)")
     vad_enabled: bool = Field(default=False, description="Enable voice activity detection")
-    livekit_url: str = Field(default="", description="LiveKit server WebSocket URL (e.g. ws://192.168.31.116:7880)")
-    livekit_api_key: str = Field(default="", description="LiveKit API key for token signing")
-    livekit_api_secret: str = Field(default="", description="LiveKit API secret for token signing")
+    livekit_url: str = Field(default="ws://127.0.0.1:7880", description="LiveKit server WebSocket URL")
+    livekit_api_key: str = Field(default="devkey", description="LiveKit API key for token signing")
+    livekit_api_secret: str = Field(default="secret", description="LiveKit API secret for token signing")
     livekit_room: str = Field(default="lampgo", description="LiveKit room name for voice conversations")
     livekit_agent_name: str = Field(
         default="mimo-agent-lampgo-jarvis",
         description="Agent name dispatched in the LiveKit room (must match roles.yaml name_prefix + voice_agent).",
     )
     silence_timeout_s: int = Field(default=60, ge=10, le=300, description="Seconds of silence before ending a conversation")
-    volcengine_app_id: str = Field(default="", description="Volcengine app ID for LiveKit ASR/TTS")
-    volcengine_access_token: str = Field(default="", description="Volcengine access token for LiveKit ASR/TTS")
-    livekit_tts_voice: str = Field(default="BV700_streaming", description="Volcengine TTS voice for LiveKit conversations")
+    volcengine_app_id: str = Field(default="", description="Volcengine app ID for ASR/TTS")
+    volcengine_access_token: str = Field(default="", description="Volcengine access token for ASR/TTS")
+    livekit_tts_voice: str = Field(
+        default="zh_female_vv_uranus_bigtts",
+        description="Volcengine TTS voice for LiveKit conversations",
+    )
+
+    @field_validator("stt_provider", "tts_provider", mode="before")
+    @classmethod
+    def _normalize_legacy_voice_provider(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        s = v.strip().lower()
+        if s in {"mimo", "mimo-tts", "mimo-stt"}:
+            return "volcengine"
+        return s
+
+    @field_validator("stt_model", mode="before")
+    @classmethod
+    def _normalize_legacy_stt_model(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if s in {"mimo-v2.5", "mimo-v2-omni"}:
+            return "bigmodel"
+        return s
+
+    @field_validator("tts_model", mode="before")
+    @classmethod
+    def _normalize_legacy_tts_model(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if s in {"mimo-v2.5-tts", "mimo-v2-tts"}:
+            return ""
+        return s
+
+    @field_validator("tts_voice", "livekit_tts_voice", mode="before")
+    @classmethod
+    def _normalize_legacy_tts_voice(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if s in {"mimo_default", "BV700_streaming"}:
+            return "zh_female_vv_uranus_bigtts"
+        return s
 
 
 class WebConfig(BaseModel):
@@ -554,6 +600,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_PROVIDER": ("llm", "provider"),
         "LAMPGO_LLM_MODEL": ("llm", "model"),
         "LAMPGO_LLM_FAST_MODEL": ("llm", "fast_model"),
+        "LAMPGO_LLM_ENABLE_THINKING": ("llm", "enable_thinking"),
         "LAMPGO_LLM_TIMEOUT_S": ("llm", "timeout_s"),
         "LAMPGO_LLM_WEB_SEARCH_ENABLED": ("llm", "web_search_enabled"),
         "LAMPGO_LLM_WEB_SEARCH_API_KEY": ("llm", "web_search_api_key"),
@@ -566,12 +613,23 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_MAX_AGENT_TURNS": ("llm", "max_agent_turns"),
         "LAMPGO_LLM_MAX_AGENT_TOOL_CALLS": ("llm", "max_agent_tool_calls"),
         "LAMPGO_CAMERA_PORT": ("camera", "port"),
+        "LAMPGO_VOICE_STT_PROVIDER": ("voice", "stt_provider"),
         "LAMPGO_VOICE_STT_MODEL": ("voice", "stt_model"),
         "LAMPGO_VOICE_TTS_PROVIDER": ("voice", "tts_provider"),
+        "LAMPGO_VOICE_TTS_MODEL": ("voice", "tts_model"),
         "LAMPGO_VOICE_TTS_VOICE": ("voice", "tts_voice"),
         "LAMPGO_VOICE_TTS_STYLE_PROMPT": ("voice", "tts_style_prompt"),
         "LAMPGO_VOICE_CHAT_MODEL": ("voice", "chat_model"),
         "LAMPGO_VOICE_MIC_DEVICE": ("voice", "mic_device"),
+        "LAMPGO_VOICE_WAKE_WORD": ("voice", "wake_word"),
+        "LAMPGO_VOICE_LIVEKIT_URL": ("voice", "livekit_url"),
+        "LAMPGO_VOICE_LIVEKIT_API_KEY": ("voice", "livekit_api_key"),
+        "LAMPGO_VOICE_LIVEKIT_API_SECRET": ("voice", "livekit_api_secret"),
+        "LAMPGO_VOICE_LIVEKIT_ROOM": ("voice", "livekit_room"),
+        "LAMPGO_VOICE_SILENCE_TIMEOUT_S": ("voice", "silence_timeout_s"),
+        "LAMPGO_VOICE_VOLCENGINE_APP_ID": ("voice", "volcengine_app_id"),
+        "LAMPGO_VOICE_VOLCENGINE_ACCESS_TOKEN": ("voice", "volcengine_access_token"),
+        "LAMPGO_VOICE_LIVEKIT_TTS_VOICE": ("voice", "livekit_tts_voice"),
         "LAMPGO_RECORDINGS_DIR": (None, "recordings_dir"),
         "LAMPGO_SOCKET": (None, "socket_path"),
         "LAMPGO_WEB_HOST": ("web", "host"),
