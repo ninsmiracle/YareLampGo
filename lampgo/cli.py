@@ -202,7 +202,9 @@ def _ipc_or_die(request: dict) -> dict:
         return ipc_send(request)
     except (ConnectionRefusedError, FileNotFoundError, OSError):
         print(
-            "Error: lampgo daemon is not running.\n" "Start it with: lampgo run\n" "Or use --motor-port for standalone mode.",
+            "Error: lampgo daemon is not running.\n"
+            "Start it with: lampgo run\n"
+            "Or use --motor-port for standalone mode.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -406,7 +408,10 @@ def _cmd_ping(args: argparse.Namespace) -> None:
 
         if bus._is_error(error):
             all_ok = False
-            print(f"  ID={m.id:>2} ({name:>15}): ! STATUS ERROR " f"(model={model}, {bus.packet_handler.getRxPacketError(error)})")
+            print(
+                f"  ID={m.id:>2} ({name:>15}): ! STATUS ERROR "
+                f"(model={model}, {bus.packet_handler.getRxPacketError(error)})"
+            )
             continue
 
         print(f"  ID={m.id:>2} ({name:>15}): ✓ online  (model={model})")
@@ -704,7 +709,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
     dev_config = DeviceConfig(motor_port=port, lamp_id=lamp_id)
     hal = HardwareAbstraction(dev_config)
     try:
-        hal.connect(calibrate=False)
+        hal.connect(calibrate=False, configure=False)
         hal.calibrate()
     except Exception as e:
         print(
@@ -712,7 +717,8 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         print(
-            "Hint: ensure no other process is occupying the serial port (try `uv run lampgo clear`) and verify " "motor bus power/cable/ID wiring.",
+            "Hint: ensure no other process is occupying the serial port "
+            "(try `uv run lampgo clear`) and verify motor bus power/cable/ID wiring.",
             file=sys.stderr,
         )
         sys.exit(1)
