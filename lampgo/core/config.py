@@ -381,6 +381,10 @@ class VoiceConfig(BaseModel):
         default="mimo-agent-lampgo-jarvis",
         description="Agent name dispatched in the LiveKit room (must match roles.yaml name_prefix + voice_agent).",
     )
+    livekit_allow_interruptions: bool = Field(
+        default=True,
+        description="Allow users to barge in during LiveKit RTC conversations and interrupt current playback/LLM turn.",
+    )
     silence_timeout_s: int = Field(default=60, ge=10, le=300, description="Seconds of silence before ending a conversation")
     volcengine_app_id: str = Field(default="", description="Volcengine app ID for ASR/TTS")
     volcengine_access_token: str = Field(default="", description="Volcengine access token for ASR/TTS")
@@ -626,6 +630,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_VOICE_LIVEKIT_API_KEY": ("voice", "livekit_api_key"),
         "LAMPGO_VOICE_LIVEKIT_API_SECRET": ("voice", "livekit_api_secret"),
         "LAMPGO_VOICE_LIVEKIT_ROOM": ("voice", "livekit_room"),
+        "LAMPGO_VOICE_LIVEKIT_ALLOW_INTERRUPTIONS": ("voice", "livekit_allow_interruptions"),
         "LAMPGO_VOICE_SILENCE_TIMEOUT_S": ("voice", "silence_timeout_s"),
         "LAMPGO_VOICE_VOLCENGINE_APP_ID": ("voice", "volcengine_app_id"),
         "LAMPGO_VOICE_VOLCENGINE_ACCESS_TOKEN": ("voice", "volcengine_access_token"),

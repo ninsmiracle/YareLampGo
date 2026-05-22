@@ -644,6 +644,16 @@
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_room"></span>
                     </label>
 
+                    <label class="settings-field" data-cfg-field="voice.livekit_allow_interruptions">
+                      <span class="settings-field-label">LiveKit 打断</span>
+                      <label class="switch">
+                        <input type="checkbox" data-cfg-input="voice.livekit_allow_interruptions" checked>
+                        <span class="switch-slider"></span>
+                      </label>
+                      <span class="settings-field-hint">默认开启。开启后，用户在实时通话中插话可打断当前播报并切回监听；保存后会热重启语音通话链路。</span>
+                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_allow_interruptions"></span>
+                    </label>
+
                     <label class="settings-field" data-cfg-field="voice.silence_timeout_s">
                       <span class="settings-field-label">静默超时（秒）</span>
                       <input class="settings-input" type="number" min="10" max="300" step="1" placeholder="60" data-cfg-input="voice.silence_timeout_s">
@@ -1212,7 +1222,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=esp32-led-click-20260520"></script>
+  <script src="/app.js?v=livekit-interrupt-20260522"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js"></script>
 </body>
