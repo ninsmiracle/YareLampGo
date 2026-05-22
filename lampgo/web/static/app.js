@@ -57,6 +57,14 @@
   const recordNameForm = document.getElementById("record-name-form");
   const recordNameInput = document.getElementById("record-name-input");
   const recordDescriptionInput = document.getElementById("record-description-input");
+  const recordExpressionSelect = document.getElementById("record-expression-select");
+  const recordEditDialog = document.getElementById("record-edit-dialog");
+  const recordEditForm = document.getElementById("record-edit-form");
+  const recordEditDesc = document.getElementById("record-edit-desc");
+  const recordEditDescriptionInput = document.getElementById("record-edit-description-input");
+  const recordEditExpressionSelect = document.getElementById("record-edit-expression-select");
+  const recordEditError = document.getElementById("record-edit-error");
+  const btnRecordEditCancel = document.getElementById("btn-record-edit-cancel");
   const recordNameError = document.getElementById("record-name-error");
   const btnRecordDiscard = document.getElementById("btn-record-discard");
   const btnRecordRerecord = document.getElementById("btn-record-rerecord");
@@ -198,6 +206,32 @@
       names.push(name);
     });
     return names;
+  }
+
+  function populateExpressionSelect(selectEl, preferred) {
+    if (!selectEl) return;
+    const selected = String(preferred || selectEl.value || "smiley").trim();
+    const names = latestExpressions.length ? latestExpressions : Object.keys(EXPRESSION_LABELS_CN);
+    selectEl.innerHTML = "";
+    names.forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      const meta = expressionMeta(name);
+      const modeText = meta && meta.mode !== null && meta.mode !== undefined ? ` · m${meta.mode}` : "";
+      option.textContent = `${expressionLabel(name)}（${name}${modeText}）`;
+      selectEl.appendChild(option);
+    });
+    if (names.includes(selected)) {
+      selectEl.value = selected;
+    } else if (names.includes("smiley")) {
+      selectEl.value = "smiley";
+    } else if (names.length) {
+      selectEl.value = names[0];
+    }
+  }
+
+  function populateRecordingExpressionSelect(preferred) {
+    populateExpressionSelect(recordExpressionSelect, preferred);
   }
 
   function recordingLabel(name) {
@@ -3253,6 +3287,17 @@
       });
       if (isUserRecording) {
         card.classList.add("skill-card--recording-user");
+        const edit = document.createElement("button");
+        edit.className = "skill-card-action skill-card-action--edit";
+        edit.type = "button";
+        edit.title = "编辑推荐表情和动作说明";
+        edit.textContent = "✎";
+        edit.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          openEditRecordingDialog(recording);
+        });
+        card.appendChild(edit);
         const del = document.createElement("button");
         del.className = "skill-card-action skill-card-action--delete";
         del.type = "button";
@@ -3269,6 +3314,43 @@
     });
     if (!filtered.length) renderEmptyCell(recordingGrid, q ? `无匹配「${q}」的录制动作` : "暂无录制动作");
     updateCount(recordingCountEl, filtered.length, latestRecordings.length);
+  }
+
+  function openEditRecordingDialog(recording) {
+    if (!recordEditDialog || !recording || !recording.name) return;
+    recordEditDialog.dataset.recordingName = recording.name;
+    if (recordEditDesc) {
+      recordEditDesc.textContent = `编辑 ${recordingLabel(recording.name)}（${recording.name}）的推荐表情和动作说明；不会改动录制动作轨迹。`;
+    }
+    if (recordEditDescriptionInput) recordEditDescriptionInput.value = recording.description || "";
+    populateExpressionSelect(recordEditExpressionSelect, getRecordingExpression(recording));
+    if (recordEditError) recordEditError.textContent = "";
+    recordEditDialog.showModal();
+    if (recordEditDescriptionInput) recordEditDescriptionInput.focus();
+  }
+
+  function closeEditRecordingDialog() {
+    if (!recordEditDialog || !recordEditDialog.open) return;
+    recordEditDialog.dataset.recordingName = "";
+    recordEditDialog.close();
+  }
+
+  async function updateRecordingMetadata(name, description, expression) {
+    const resp = await fetch("/api/recordings/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, description, expression }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      throw new Error(data.error || resp.statusText);
+    }
+    if (data.result && Array.isArray(data.result.recordings)) {
+      renderRecordings(data.result.recordings);
+    } else {
+      await refreshSkillsAndRecordings();
+    }
+    return data;
   }
 
   async function deleteRecording(recording) {
@@ -3307,6 +3389,7 @@
 
   function renderExpressions(expressions) {
     if (Array.isArray(expressions)) latestExpressions = normalizeExpressionEntries(expressions);
+    populateRecordingExpressionSelect();
     expressionGrid.innerHTML = "";
     const q = expressionQuery.trim().toLowerCase();
     const filtered = q
@@ -3658,6 +3741,7 @@
     recordNameError.textContent = "";
     recordNameInput.value = "";
     if (recordDescriptionInput) recordDescriptionInput.value = "";
+    populateRecordingExpressionSelect("smiley");
     if (btnRecordSave) btnRecordSave.textContent = "保存";
     recordNameDialog.showModal();
     recordNameInput.focus();
@@ -3670,8 +3754,8 @@
     recordNameDialog.close();
   }
 
-  function saveMotionRecording(name, description, overwrite = false) {
-    send({ type: "recording_save", name, description, overwrite, request_id: nextId() });
+  function saveMotionRecording(name, description, expression, overwrite = false) {
+    send({ type: "recording_save", name, description, expression, overwrite, request_id: nextId() });
   }
 
   function discardMotionRecording() {
@@ -5826,9 +5910,51 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         if (recordDescriptionInput) recordDescriptionInput.focus();
         return;
       }
+      const expression = ((recordExpressionSelect && recordExpressionSelect.value) || "").trim();
+      if (!expression) {
+        recordNameError.textContent = "请选择推荐表情";
+        if (recordExpressionSelect) recordExpressionSelect.focus();
+        return;
+      }
       recordNameError.textContent = "";
-      saveMotionRecording(name, description, pendingOverwriteSave);
+      saveMotionRecording(name, description, expression, pendingOverwriteSave);
     });
+  }
+
+  if (recordEditForm) {
+    recordEditForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = (recordEditDialog && recordEditDialog.dataset.recordingName) || "";
+      const description = ((recordEditDescriptionInput && recordEditDescriptionInput.value) || "").trim();
+      const expression = ((recordEditExpressionSelect && recordEditExpressionSelect.value) || "").trim();
+      if (!name) {
+        if (recordEditError) recordEditError.textContent = "缺少动作名称";
+        return;
+      }
+      if (!description) {
+        if (recordEditError) recordEditError.textContent = "请输入动作说明，AI 会根据它判断什么时候播放这个动作";
+        if (recordEditDescriptionInput) recordEditDescriptionInput.focus();
+        return;
+      }
+      if (!expression) {
+        if (recordEditError) recordEditError.textContent = "请选择推荐表情";
+        if (recordEditExpressionSelect) recordEditExpressionSelect.focus();
+        return;
+      }
+      if (recordEditError) recordEditError.textContent = "";
+      updateRecordingMetadata(name, description, expression)
+        .then(() => {
+          closeEditRecordingDialog();
+          addSystemMessage(`录制动作已更新：${recordingLabel(name)}（${name}） · 表情 ${expressionLabel(expression)}`);
+        })
+        .catch((err) => {
+          if (recordEditError) recordEditError.textContent = `保存失败：${err && err.message ? err.message : err}`;
+        });
+    });
+  }
+
+  if (btnRecordEditCancel) {
+    btnRecordEditCancel.addEventListener("click", () => closeEditRecordingDialog());
   }
 
   if (btnRecordDiscard) {

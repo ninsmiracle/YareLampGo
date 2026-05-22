@@ -74,6 +74,11 @@ RECORDING_EXPRESSION_HINTS: dict[str, str] = {
 }
 
 
+def _normalize_expression(value: Any) -> str:
+    key = "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
+    return key if key in LED_EXPRESSION_KEYS else ""
+
+
 def normalize_recording_description(value: Any) -> str:
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     lines = [line.strip() for line in text.split("\n") if line.strip()]
@@ -85,21 +90,55 @@ def recording_description_path(csv_path: Path) -> Path:
     return csv_path.with_suffix(".txt")
 
 
-def read_recording_description(csv_path: Path) -> str:
+def parse_recording_metadata(text: str) -> dict[str, str]:
+    """Parse optional recording sidecar metadata, preserving old plain text files."""
+    description_parts: list[str] = []
+    expression = ""
+
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        key, sep, value = line.partition("=")
+        normalized_key = key.strip().lower()
+        if sep and normalized_key == "expression":
+            expression = _normalize_expression(value) or expression
+        elif sep and normalized_key in {"prompt", "description"}:
+            description_parts.append(value.strip())
+        else:
+            description_parts.append(line)
+
+    return {
+        "description": normalize_recording_description("\n".join(description_parts)),
+        "expression": expression,
+    }
+
+
+def read_recording_metadata(csv_path: Path) -> dict[str, str]:
     path = recording_description_path(csv_path)
     if not path.exists():
-        return ""
+        return {"description": "", "expression": ""}
     try:
-        return normalize_recording_description(path.read_text(encoding="utf-8"))
+        return parse_recording_metadata(path.read_text(encoding="utf-8"))
     except Exception:
-        return ""
+        return {"description": "", "expression": ""}
 
 
-def write_recording_description(csv_path: Path, description: str) -> None:
+def read_recording_description(csv_path: Path) -> str:
+    return read_recording_metadata(csv_path)["description"]
+
+
+def write_recording_description(csv_path: Path, description: str, expression: str = "") -> None:
     text = normalize_recording_description(description)
+    expression = _normalize_expression(expression)
     path = recording_description_path(csv_path)
+    lines = []
+    if expression:
+        lines.append(f"expression={expression}")
     if text:
-        path.write_text(text + "\n", encoding="utf-8")
+        lines.append(f"prompt={text}")
+    if lines:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     elif path.exists():
         path.unlink()
 
@@ -116,6 +155,11 @@ def _assign_catalog_expressions(entries: dict[str, dict[str, str]]) -> None:
     expression_keys = [key for key in LED_EXPRESSION_KEYS if key != "off"]
     used: set[str] = set()
     for name in sorted(entries):
+        fixed = _normalize_expression(entries[name].get("expression", ""))
+        if fixed:
+            entries[name]["expression"] = fixed
+            used.add(fixed)
+            continue
         preferred = RECORDING_EXPRESSION_HINTS.get(name)
         expression = preferred if preferred in LED_EXPRESSION_KEYS and preferred not in used else ""
         if not expression:
@@ -136,20 +180,24 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
         return []
     entries: dict[str, dict[str, str]] = {}
     for csv_path in recordings_dir.glob("*.csv"):
+        metadata = read_recording_metadata(csv_path)
         entries[csv_path.stem] = {
             "name": csv_path.stem,
             "source": "builtin",
             "path": str(csv_path),
-            "description": read_recording_description(csv_path),
+            "description": metadata["description"],
+            "expression": metadata["expression"],
         }
     user_dir = recordings_dir / "user"
     if user_dir.is_dir():
         for csv_path in user_dir.glob("*.csv"):
+            metadata = read_recording_metadata(csv_path)
             entries[csv_path.stem] = {
                 "name": csv_path.stem,
                 "source": "user",
                 "path": str(csv_path),
-                "description": read_recording_description(csv_path),
+                "description": metadata["description"],
+                "expression": metadata["expression"],
             }
     _assign_catalog_expressions(entries)
     return [entries[name] for name in sorted(entries)]

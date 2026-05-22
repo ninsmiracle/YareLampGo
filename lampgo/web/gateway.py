@@ -158,6 +158,7 @@ class WebGateway:
             Route("/api/skills/reload", self.api_skills_reload, methods=["POST"]),
             Route("/api/recordings", self.api_recordings),
             Route("/api/recordings/save", self.api_recordings_save, methods=["POST"]),
+            Route("/api/recordings/update", self.api_recordings_update, methods=["POST"]),
             Route("/api/recordings/delete", self.api_recordings_delete, methods=["POST"]),
             Route("/api/recordings/aliases", self.api_recording_aliases, methods=["GET", "POST"]),
             Route("/api/expressions", self.api_expressions),
@@ -452,6 +453,39 @@ class WebGateway:
             }
         )
 
+    async def api_recordings_update(self, request: Request) -> JSONResponse:
+        """POST /api/recordings/update — edit metadata for a user-created recording."""
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        description = str(body.get("description", "") or body.get("prompt", "")).strip()
+        expression = str(body.get("expression", "")).strip()
+        if not name or not re.match(r"^[\w\-]+$", name):
+            return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
+
+        recordings_dir = Path(self.server.config.recordings_dir)
+        user_dir = recordings_dir / "user"
+        csv_path = user_dir / f"{name}.csv"
+        if not csv_path.exists():
+            if (recordings_dir / f"{name}.csv").exists():
+                return JSONResponse({"ok": False, "error": "built-in recording cannot be edited"}, status_code=400)
+            return JSONResponse({"ok": False, "error": "user recording not found"}, status_code=404)
+
+        write_recording_description(csv_path, description, expression)
+        self.server._refresh_llm_skill_tools()
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "status": "updated",
+                    "name": name,
+                    "path": str(csv_path),
+                    "description": description or None,
+                    "expression": expression or None,
+                    "recordings": self._list_recordings(),
+                },
+            }
+        )
+
     async def api_recordings_save(self, request: Request) -> JSONResponse:
         """POST /api/recordings/save — write a CSV recording + optional keyword alias.
 
@@ -465,6 +499,7 @@ class WebGateway:
         csv_content = body.get("csv", "")
         alias = str(body.get("alias", "")).strip()
         description = str(body.get("description", "") or body.get("prompt", "")).strip()
+        expression = str(body.get("expression", "")).strip()
 
         if not name or not re.match(r"^[\w\-]+$", name):
             return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
@@ -476,7 +511,7 @@ class WebGateway:
         user_dir.mkdir(parents=True, exist_ok=True)
         csv_path = user_dir / f"{name}.csv"
         csv_path.write_text(csv_content, encoding="utf-8")
-        write_recording_description(csv_path, description)
+        write_recording_description(csv_path, description, expression)
 
         if alias:
             alias_path = recordings_dir / "aliases.json"
@@ -497,6 +532,7 @@ class WebGateway:
                     "path": str(csv_path),
                     "alias": alias or None,
                     "description": description or None,
+                    "expression": expression or None,
                     "recordings": self._list_recordings(),
                 },
             }
@@ -2994,6 +3030,7 @@ class WebGateway:
                 str(msg.get("name", "")),
                 overwrite=bool(msg.get("overwrite", False)),
                 description=str(msg.get("description", "") or msg.get("prompt", "")),
+                expression=str(msg.get("expression", "")),
             )
             result["request_id"] = request_id
             await ws.send_json(result)
