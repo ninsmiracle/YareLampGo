@@ -4565,6 +4565,7 @@
     }
   })();
   let browserCallStartPromise = null;
+  let browserCallPendingId = "";
   let browserCallLockTimer = null;
   let browserCallIdleTimer = null;
   let browserCallLastActivityAt = 0;
@@ -5145,6 +5146,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
 
   function enterBrowserLiveKitCall(reason = "manual") {
     if (reason === "wake") {
+      if (browserCallStartPromise || lkRoom || prevCallState === "joining" || prevCallState === "active") {
+        addCallSystemNote("通话正在接入中…");
+        return browserCallStartPromise || lkRoom;
+      }
       ensureLiveCallSessionVisible();
       addCallSystemNote("听到唤醒词，正在接入通话…");
     }
@@ -5167,7 +5172,8 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       if (btnCallStart) btnCallStart.disabled = true;
       setBrowserCallState("joining");
       const useEsp32 = selectedMicId === "esp32";
-      const callAttemptId = `${browserCallClientId}_${Date.now().toString(36)}`;
+      const callAttemptId = browserCallPendingId || `${browserCallClientId}_${Date.now().toString(36)}`;
+      browserCallPendingId = callAttemptId;
       const roomName = `lampgo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
       let room = null;
       try {
@@ -5185,7 +5191,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           }),
         });
         const body = await resp.json();
-        if (!resp.ok || !body.ok) throw new Error((body && body.error) || `HTTP ${resp.status}`);
+        if (!resp.ok || !body.ok) {
+          const error = (body && body.error) || `HTTP ${resp.status}`;
+          if (resp.status === 409 && error === "another call is already starting") {
+            addCallSystemNote("通话正在接入中，请稍候…");
+            return null;
+          }
+          throw new Error(error);
+        }
         const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
         const { token, serverUrl } = body.result;
         room = new Room({ adaptiveStream: false, dynacast: false });
@@ -5228,6 +5241,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         await room.connect(serverUrl, token);
         lkRoomName = roomName;
         lkClientCallId = callAttemptId;
+        browserCallPendingId = "";
         addCallSystemNote("LiveKit 房间已连接，正在发布麦克风…");
 
         if (useEsp32) {
@@ -5254,6 +5268,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         console.log("[call] LiveKit call started, mic:", useEsp32 ? "esp32" : "browser");
         return room;
       } catch (err) {
+        browserCallPendingId = "";
         console.error("[call] browser LiveKit start failed:", err);
         addCallSystemNote(`通话启动失败：${err.message || err}`);
         if (room) {
@@ -5375,6 +5390,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     lkAudioEls.forEach((el) => el.remove());
     lkAudioEls.clear();
     lkRoom = null;
+    browserCallPendingId = "";
     releaseBrowserCallLock();
   }
 
