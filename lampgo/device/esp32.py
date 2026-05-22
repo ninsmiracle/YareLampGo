@@ -202,8 +202,6 @@ class Esp32DeviceManager:
         logger.info("esp32.discovery_stopped")
 
     def _on_service_state_change(self, zeroconf, service_type, name, state_change) -> None:
-        from zeroconf import ServiceStateChange
-
         asyncio.create_task(
             self._async_handle_state_change(zeroconf, service_type, name, state_change)
         )
@@ -580,7 +578,10 @@ class Esp32DeviceManager:
         if 200 <= status < 300:
             logger.info("esp32.device_paired", host=dev.host, owner_id=self._owner_id)
             if isinstance(resp, dict):
-                self._merge_device_status(dev, {**resp, "paired": True, "paired_owner_id": self._owner_id, "pairing_supported": True})
+                self._merge_device_status(
+                    dev,
+                    {**resp, "paired": True, "paired_owner_id": self._owner_id, "pairing_supported": True},
+                )
             return True, resp, status
         logger.warning("esp32.device_pair_failed", host=dev.host, status=status, body=str(resp)[:200])
         return False, resp, status
@@ -646,11 +647,20 @@ class Esp32DeviceManager:
         )
         return data
 
-    async def _post_to_device(self, dev: Esp32Device, path: str, json_body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any], str]:
+    async def _post_to_device(
+        self,
+        dev: Esp32Device,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any], str]:
         if self._http is None:
             return 503, {"ok": False, "error": "no_http_client"}, "application/json"
         try:
             resp = await self._http.post(f"{dev.base_url}{path}", json=json_body or {})
+            if resp.status_code < 400:
+                dev.last_health_ok = True
+                dev.last_health_ok_at = time.monotonic()
+                self.mark_active_healthy()
             content_type = resp.headers.get("content-type", "application/json")
             try:
                 body = resp.json()
@@ -667,6 +677,10 @@ class Esp32DeviceManager:
         url = f"{dev.base_url}{path}"
         try:
             resp = await self._http.get(url)
+            if resp.status_code < 400:
+                dev.last_health_ok = True
+                dev.last_health_ok_at = time.monotonic()
+                self.mark_active_healthy()
             content_type = resp.headers.get("content-type", "")
             if "application/json" in content_type:
                 try:
