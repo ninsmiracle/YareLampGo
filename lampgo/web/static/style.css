@@ -2491,6 +2491,11 @@ button.device-chip.is-active {
   background: linear-gradient(180deg, #fbf9ff 0%, #ffffff 40%);
 }
 
+.skill-card--recording-user {
+  position: relative;
+  border-left: 3px solid #e5a15b;
+}
+
 .skill-card-action {
   position: absolute;
   top: 6px;
@@ -3474,6 +3479,10 @@ section.view[data-view="settings"] .view-header {
   outline: none;
   border-color: #de9388;
   box-shadow: 0 0 0 3px rgba(222, 147, 136, 0.15);
+}
+
+.settings-input.hidden {
+  display: none;
 }
 
 /* Visual cue for inputs that are currently non-applicable because another

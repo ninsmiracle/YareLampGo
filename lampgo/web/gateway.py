@@ -150,6 +150,7 @@ class WebGateway:
             Route("/api/skills/reload", self.api_skills_reload, methods=["POST"]),
             Route("/api/recordings", self.api_recordings),
             Route("/api/recordings/save", self.api_recordings_save, methods=["POST"]),
+            Route("/api/recordings/delete", self.api_recordings_delete, methods=["POST"]),
             Route("/api/recordings/aliases", self.api_recording_aliases, methods=["GET", "POST"]),
             Route("/api/expressions", self.api_expressions),
             Route("/api/camera/snap", self.api_camera_snap),
@@ -385,6 +386,58 @@ class WebGateway:
 
     async def api_recordings(self, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "result": {"recordings": self._list_recordings()}})
+
+    async def api_recordings_delete(self, request: Request) -> JSONResponse:
+        """POST /api/recordings/delete — delete a user-created CSV recording.
+
+        Only files in <recordings_dir>/user are removable from the Web UI.
+        Built-in recordings in the repo assets directory are intentionally
+        locked, because deleting them would mutate shipped content.
+        """
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name or not re.match(r"^[\w\-]+$", name):
+            return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
+
+        recordings_dir = Path(self.server.config.recordings_dir)
+        user_dir = recordings_dir / "user"
+        csv_path = user_dir / f"{name}.csv"
+        if not csv_path.exists():
+            if (recordings_dir / f"{name}.csv").exists():
+                return JSONResponse({"ok": False, "error": "built-in recording cannot be deleted"}, status_code=400)
+            return JSONResponse({"ok": False, "error": "user recording not found"}, status_code=404)
+
+        csv_path.unlink()
+
+        removed_aliases: list[str] = []
+        alias_path = recordings_dir / "aliases.json"
+        if alias_path.exists():
+            try:
+                aliases = json.loads(alias_path.read_text(encoding="utf-8"))
+            except Exception:
+                aliases = {}
+            if isinstance(aliases, dict):
+                kept = {}
+                for alias, target in aliases.items():
+                    if str(target).strip() == name:
+                        removed_aliases.append(str(alias))
+                    else:
+                        kept[str(alias)] = target
+                if removed_aliases:
+                    alias_path.write_text(json.dumps(kept, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "status": "deleted",
+                    "name": name,
+                    "path": str(csv_path),
+                    "removed_aliases": removed_aliases,
+                    "recordings": self._list_recordings(),
+                },
+            }
+        )
 
     async def api_recordings_save(self, request: Request) -> JSONResponse:
         """POST /api/recordings/save — write a CSV recording + optional keyword alias.
@@ -3118,7 +3171,7 @@ class WebGateway:
         except Exception:
             pass
 
-    def _list_recordings(self) -> list[str]:
+    def _list_recordings(self) -> list[dict[str, str]]:
         recordings_dir = Path(self.server.config.recordings_dir)
         if not recordings_dir.exists():
             return []
@@ -3129,7 +3182,7 @@ class WebGateway:
         if user_dir.is_dir():
             for p in user_dir.glob("*.csv"):
                 names[p.stem] = "user"
-        return sorted(names)
+        return [{"name": name, "source": source} for name, source in sorted(names.items())]
 
     def _list_expressions(self) -> list[str]:
         return [item["name"] for item in self._list_expression_catalog()]

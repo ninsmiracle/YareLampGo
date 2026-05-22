@@ -359,6 +359,7 @@ except Exception as e:
 
 try:
     from livekit.agents.types import APIConnectOptions
+    from livekit.agents import APIStatusError
     from livekit.plugins.volcengine import tts as _volc_tts
 
     _LAMPGO_VOLC_TTS_TIMEOUT = float(os.environ.get("LAMPGO_VOLCENGINE_TTS_TIMEOUT_S", "20"))
@@ -379,8 +380,70 @@ try:
         request_id = kwargs.get("request_id") or "?"
         return request_id, len(str(text))
 
+    def _lampgo_tts_uses_bidirectional_api(opts):
+        voice = str(getattr(opts, "voice", "") or "")
+        return (
+            voice.startswith("S_")
+            or voice.startswith("zh_")
+            or voice.startswith("saturn_")
+            or "_bigtts" in voice
+        )
+
+    async def _lampgo_synthesize_via_bidirectional_tts(*, opts, output_emitter, text, request_id):
+        from lampgo.voice.tts import VolcengineTTS
+
+        voice = str(getattr(opts, "voice", "") or "")
+        print(
+            "[lampgo] Volcengine TTS bidirectional start request_id=%s voice=%s text_len=%s (pid=%d)" %
+            (request_id, voice, len(str(text or "")), os.getpid()),
+            file=sys.stderr,
+            flush=True,
+        )
+        tts_client = VolcengineTTS(
+            app_id=getattr(opts, "app_id", ""),
+            access_token=getattr(opts, "access_token", ""),
+            voice=voice,
+            sample_rate=int(getattr(opts, "sample_rate", 24000) or 24000),
+        )
+        audio_bytes = 0
+        async for chunk in tts_client.stream_pcm(str(text or "")):
+            if chunk:
+                audio_bytes += len(chunk)
+                output_emitter.push(chunk)
+        if audio_bytes <= 0:
+            raise APIStatusError(
+                message="volcengine bidirectional TTS returned empty audio",
+                status_code=-1,
+                request_id=request_id,
+                body=None,
+                retryable=True,
+            )
+        print(
+            "[lampgo] Volcengine TTS bidirectional done request_id=%s bytes=%s (pid=%d)" %
+            (request_id, audio_bytes, os.getpid()),
+            file=sys.stderr,
+            flush=True,
+        )
+
     async def _lampgo_synthesize_via_ws(*, conn_options, **kwargs):
         request_id, text_len = _lampgo_tts_request_info(kwargs)
+        opts = kwargs.get("opts")
+        if opts is not None and _lampgo_tts_uses_bidirectional_api(opts):
+            try:
+                return await _lampgo_synthesize_via_bidirectional_tts(
+                    opts=opts,
+                    output_emitter=kwargs["output_emitter"],
+                    text=kwargs.get("text") or "",
+                    request_id=request_id,
+                )
+            except Exception as e:
+                print(
+                    "[lampgo] Volcengine TTS bidirectional failed request_id=%s error=%r (pid=%d)" %
+                    (request_id, e, os.getpid()),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
         print(
             "[lampgo] Volcengine TTS ws start request_id=%s text_len=%s (pid=%d)" %
             (request_id, text_len, os.getpid()),
@@ -440,7 +503,7 @@ try:
     _volc_tts._synthesize_via_ws = _lampgo_synthesize_via_ws
     _volc_tts._synthesize_via_http = _lampgo_synthesize_via_http
     print(
-        "[lampgo] patched Volcengine TTS timeout to %.1fs (pid=%d)" %
+        "[lampgo] patched Volcengine TTS timeout to %.1fs with bidirectional voice routing (pid=%d)" %
         (_LAMPGO_VOLC_TTS_TIMEOUT, os.getpid()),
         file=sys.stderr,
         flush=True,
