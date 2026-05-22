@@ -70,35 +70,19 @@ python3 {baseDir}/scripts/setup.py  # Re-run after user provides info
 - Set LED expression: call `lampgo_expression { mode: "smiley" }`
 - Move joints: call `lampgo_move { joints: { base_yaw: 30, base_pitch: -20 } }`
 - Query status: call `lampgo_status`
+- Query recorded actions: call `lampgo_recordings`
 - Take photo: call `lampgo_camera_snap`
 
-## Semantic Mapping (Emotion → Action + LED)
+## Semantic Mapping (Intent → Recorded Action + LED)
 
-Use these combos to express emotions. Format: `action + LED mode + brightness`.
-
-| Emotion | Action | LED | Brightness | Tool plan |
-|---------|--------|-----|------------|---------|
-| 打招呼/醒来 | wake_up | smiley (10) | 255 | `lampgo_expression(smiley)` → `lampgo_play(wake_up)` |
-| 开心/感谢 | happy_wiggle | smiley (10) | 255 | action=happy_wiggle, LED=smiley |
-| 思考 | deep_think | thinking (26) | 150 | action=deep_think, LED=thinking |
-| 工作照明 | working | white (4) | 180 | action=working, LED=white |
-| 同意/点头 | nod | check (14) | 200 | `lampgo_expression(check)` → `lampgo_play(nod)` |
-| 不同意/摇头 | headshake | cross (15) | 150 | `lampgo_expression(cross)` → `lampgo_play(headshake)` |
-| 跳舞 | dance | music (16) | 255 | action=dance, LED=music |
-| 难过 | sad | crying (11) | 80 | action=sad, LED=crying |
-| 震惊 | shock | surprised (19) | 255 | action=shock, LED=surprised |
-| 害羞 | shy | blush (17) | 100 | action=shy, LED=blush |
-| 困惑 | confused | question (21) | 150 | action=confused, LED=question |
-| 生气 | angry_jerk | angry (18) | 200 | action=angry_jerk, LED=angry |
-| 睡觉/晚安 | doze_off | sleep (25) | 50 | action=doze_off, LED=sleep |
-| 兴奋 | excited | smiley (10) | 255 | action=excited, LED=smiley |
-| 心碎 | heartbreak | heartbreak (28) | 100 | action=heartbreak, LED=heartbreak |
-| 好奇 | curious | thinking (26) | 200 | action=curious, LED=thinking |
+Recorded motion is the source of truth. Before choosing an action, use
+`lampgo_recordings` or `references/actions.md` and match the user's intent to the
+recording descriptions. Do not use old action names that are not in the current
+recording catalog.
 
 **Combo execution pattern:**
 - `lampgo_expression { mode: "smiley" }`
-- `lampgo_play { name: "happy_wiggle" }`
-- (Optional) `lampgo_play { name: "return_safe" }` if you model safety as a recording; otherwise call `lampgo_move` to a known safe pose.
+- `lampgo_play { name: "excited" }`
 
 ## Direct Joint Control
 
@@ -153,7 +137,7 @@ timestamp,base_yaw.pos,base_pitch.pos,elbow_pitch.pos,wrist_roll.pos,wrist_pitch
 
 **ALWAYS follow these rules when controlling the lamp:**
 
-1. **Always return to safe position**: after every action, move to safe pose (or call an explicit `return_safe` capability when exposed).
+1. **Use verified motions**: prefer recorded actions and current-state-relative moves; call `return_safe` only when the runtime exposes a verified safe-return capability.
 2. **No sudden large movements**: The motion runtime uses trapezoidal velocity profiles for smoothness. Trust it.
 3. **Respect joint limits**: Values are auto-clamped by the safety kernel. Don't intentionally exceed limits.
 4. **Emergency stop**: if the user says "stop" or "停", immediately invoke `lampgo_move` to cease motion via lampgo safety / or call estop if exposed as a tool in your environment.
@@ -192,11 +176,11 @@ Call `lampgo_camera_snap` to get a fresh snapshot (returned as a data URL).
 | Scene | Tool plan |
 |-------|----------------|
 | Person at desk | `lampgo_expression(smiley)` → `lampgo_play(wake_up)` |
-| Empty desk | `lampgo_expression(sleep)` → `lampgo_play(doze_off)` |
-| Messy desk | `lampgo_expression(question)` → `lampgo_play(confused)` |
-| Someone waving | `lampgo_expression(smiley)` → `lampgo_play(happy_wiggle)` |
+| Empty desk | `lampgo_expression(sleep)` → speak softly or use a listed rest action if present |
+| Messy desk | `lampgo_expression(question)` → `lampgo_play(thinking)` |
+| Someone waving | `lampgo_expression(smiley)` → `lampgo_play(wake_up)` |
 | Dark room | `lampgo_expression(white)` |
-| Food on desk | `lampgo_expression(thinking)` → `lampgo_play(curious)` |
+| Food on desk | `lampgo_expression(thinking)` → `lampgo_play(peep)` |
 
 ### Dependencies
 
@@ -234,7 +218,7 @@ Only generate Python scripts when the user explicitly asks for code artifacts.
 - `lampgo_expression { mode: "check" }`
 - `lampgo_play { name: "nod" }` × 3
 - `lampgo_expression { mode: "smiley" }`
-- `lampgo_play { name: "happy_wiggle" }`
+- `lampgo_play { name: "excited" }`
 
 **"Slowly scan left to right":**
 - `lampgo_expression { mode: "thinking" }`
@@ -243,13 +227,13 @@ Only generate Python scripts when the user explicitly asks for code artifacts.
 **"Dance to a beat (120 BPM)":**
 - `lampgo_expression { mode: "music" }`
 - Alternate `base_yaw` between -40 and 40 at 0.5s intervals × 4 cycles
-- Return to safe pose
+- Settle using a verified recording if one exists; do not guess a fixed safe pose.
 
 ### Constraints
 
 - Add delays ≥ 0.5s between sequential movements (the motion runtime handles interpolation)
 - Use bounded loops only
-- Always end with a return-to-safe-position step
+- End with a verified settle/rest recording when available; otherwise stop after the last verified movement.
 - See `references/api.md` for full IPC protocol (for Python scripts)
 
 ---
@@ -262,18 +246,16 @@ Find an object on the desk using the camera, center it in view, then physically 
 
 ### Step 1: Enter Search Posture (进入搜索姿态)
 
-Extend the arm and point the camera down at the workspace:
-
-```
-lampgo_move { joints: { base_yaw: 0, base_pitch: -40, elbow_pitch: 50, wrist_roll: 0, wrist_pitch: 70 } }
-```
+Use a verified recording such as `look_around` when it fits the task. If a
+custom search posture is needed, read `lampgo_status` first and make small,
+current-state-relative adjustments instead of relying on a fixed pose constant.
 
 ### Step 2: Panoramic Scan (全景扫描)
 
 Sweep `base_yaw` across angles: `-90`, `-45`, `0`, `45`, `90`.
 
 At each stop:
-- `lampgo_move { joints: { base_yaw: yaw, base_pitch: -40, elbow_pitch: 50, wrist_pitch: 70 } }`
+- Move only the yaw target unless the current camera angle has already been verified.
 - `lampgo_camera_snap`
 - Check if the target object is visible; stop scanning once found.
 
@@ -294,15 +276,16 @@ Iterate (move → snap → analyze) until the object is reasonably centered.
 
 With the object centered:
 1. Keep `base_yaw` fixed
-2. Decrease `elbow_pitch` (e.g. `50` → `30`) to push arm forward
-3. Make `base_pitch` more negative (e.g. `-40` → `-60`) to lower the structure
+2. Use small, visually verified `base_pitch` / `elbow_pitch` adjustments.
+3. Stop immediately if the object leaves view, appears too close, or the movement looks unsafe.
 4. `lampgo_camera_snap` — if the object appears very large/blurry, you've reached it
 5. Announce success to the user
 
 ### Step 5: Return to Safety
 
-Always return to safe position:
-- `lampgo_move { joints: { base_yaw: 0, base_pitch: 0, elbow_pitch: 0, wrist_roll: 0, wrist_pitch: 0 } }`
+Settle after the interaction:
+- Prefer a verified rest/settle recording if one exists in `lampgo_recordings`.
+- Otherwise stop after the last verified movement; do not guess a fixed all-zero pose.
 
 ### Safety Notes for Search & Touch
 
@@ -314,7 +297,7 @@ Always return to safe position:
 
 ## References
 
-- **Full action list**: See `references/actions.md` — 37 actions with recommended LED pairings
+- **Recorded action list**: See `references/actions.md` and prefer live `lampgo_recordings`
 - **Full LED list**: See `references/led-modes.md` — 30 expression modes
 - **Joint reference**: See `references/joints.md` — 5 joints with ranges, directions, templates
 - **IPC API reference**: See `references/api.md` — socket protocol for Python scripts

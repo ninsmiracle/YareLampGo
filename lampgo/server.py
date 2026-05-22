@@ -43,11 +43,11 @@ from lampgo.core.virtual_motion import VirtualMotionRuntime
 from lampgo.device import Esp32DeviceManager
 from lampgo.ipc import IPCServer
 from lampgo.perception.router import IntentRouter, IntentType
+from lampgo.recordings import build_recording_actions_prompt, write_recording_description
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.expression_skills import SetExpressionSkill
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
 from lampgo.skills.builtin.parametric_skills import (
-    DanceSkill,
     HeadShakeSkill,
     IdleSwaySkill,
     LookAtSkill,
@@ -106,6 +106,7 @@ class LampgoServer:
         self._openclaw_asks: dict[str, asyncio.Future[str]] = {}
         self._openclaw_asks_lock = asyncio.Lock()
         self._tts_tasks: set[asyncio.Task] = set()
+        self._cancelled_request_ids: set[str] = set()
         self._record_lock = asyncio.Lock()
         self._record_recorder: TeachRecorder | None = None
         self._record_task: asyncio.Task | None = None
@@ -143,7 +144,6 @@ class LampgoServer:
         self.registry.register(HeadShakeSkill())
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
-        self.registry.register(DanceSkill())
 
     # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
 
@@ -211,13 +211,23 @@ class LampgoServer:
             return await self._handle_invoke(data)
 
         if cmd == "text":
-            result = await self._handle_text(data)
-            if not data.get("call_mode"):
-                await self._maybe_tts(result, data.get("request_id", ""))
-            return result
+            request_id = str(data.get("request_id", ""))
+            self.clear_request_cancelled(request_id)
+            try:
+                result = await self._handle_text(data)
+                if not data.get("call_mode"):
+                    await self._maybe_tts(result, request_id)
+                return result
+            finally:
+                self.clear_request_cancelled(request_id)
 
         if cmd == "audio":
-            return await self._handle_audio(data)
+            request_id = str(data.get("request_id", ""))
+            self.clear_request_cancelled(request_id)
+            try:
+                return await self._handle_audio(data)
+            finally:
+                self.clear_request_cancelled(request_id)
 
         if cmd == "status":
             return self._handle_status()
@@ -226,8 +236,8 @@ class LampgoServer:
             return self._handle_skills()
 
         if cmd == "cancel":
-            await self.executor.cancel_current()
-            return {"ok": True, "result": {"status": "cancelled"}}
+            cancelled = await self.stop_all_interactions(request_id=str(data.get("request_id", "")))
+            return {"ok": True, "result": {"status": "cancelled", "cancelled": cancelled}}
 
         if cmd == "estop":
             self.safety.estop("IPC estop command")
@@ -262,6 +272,7 @@ class LampgoServer:
             return await self.save_recording_session(
                 str(data.get("name", "")),
                 overwrite=bool(data.get("overwrite", False)),
+                description=str(data.get("description", "") or data.get("prompt", "")),
             )
 
         if cmd == "recording_discard":
@@ -424,7 +435,13 @@ class LampgoServer:
                 },
             }
 
-    async def save_recording_session(self, name: str, *, overwrite: bool = False) -> dict[str, Any]:
+    async def save_recording_session(
+        self,
+        name: str,
+        *,
+        overwrite: bool = False,
+        description: str = "",
+    ) -> dict[str, Any]:
         """Persist buffered recording frames to <recordings_dir>/user/<name>.csv."""
         async with self._record_lock:
             rec = self._record_recorder
@@ -451,17 +468,20 @@ class LampgoServer:
                 }
 
             path = rec.save(name)
+            write_recording_description(Path(path), description)
             frames = rec.frame_count
             self._record_recorder = None
             self._record_started_at = 0.0
             self._record_fps = 30
             self._record_motion_was_running = False
+            self._refresh_llm_skill_tools()
             return {
                 "ok": True,
                 "result": {
                     "status": "saved",
                     "name": name,
                     "path": str(path),
+                    "description": description,
                     "frames": frames,
                     "record_playback_notes": {
                         "record": "samples HAL joint positions only (no style interpolation)",
@@ -545,6 +565,44 @@ class LampgoServer:
         if cancelled:
             logger.info("server.tts_cancelled", count=cancelled)
         return cancelled
+
+    def cancel_request(self, request_id: str) -> None:
+        request_id = str(request_id or "").strip()
+        if request_id:
+            self._cancelled_request_ids.add(request_id)
+            logger.info("server.request_cancelled", request_id=request_id)
+
+    def clear_request_cancelled(self, request_id: str) -> None:
+        request_id = str(request_id or "").strip()
+        if request_id:
+            self._cancelled_request_ids.discard(request_id)
+
+    def is_request_cancelled(self, request_id: str) -> bool:
+        request_id = str(request_id or "").strip()
+        return bool(request_id and request_id in self._cancelled_request_ids)
+
+    async def stop_all_interactions(self, *, request_id: str = "") -> dict[str, int]:
+        """Cancel active conversation work: LLM turn, TTS, and any running tool."""
+        active_task: asyncio.Task | None = getattr(self, "_llm_active_task", None)
+        active_request_id = str(getattr(self, "_llm_active_request_id", "") or "")
+        if request_id:
+            self.cancel_request(request_id)
+        if active_request_id:
+            self.cancel_request(active_request_id)
+        cancelled_llm = 0
+        if active_task is not None and not active_task.done():
+            active_task.cancel()
+            cancelled_llm = 1
+        cancelled_tts = self.cancel_pending_tts()
+        await self.executor.cancel_current()
+        logger.info(
+            "server.stop_all_interactions",
+            request_id=request_id,
+            active_request_id=active_request_id,
+            cancelled_llm=cancelled_llm,
+            cancelled_tts=cancelled_tts,
+        )
+        return {"llm": cancelled_llm, "tts": cancelled_tts}
 
     async def _handle_text(self, data: dict) -> dict:
         """Route free text through the IntentRouter, then invoke or reply."""
@@ -832,6 +890,16 @@ class LampgoServer:
         turn_index: int,
         tool_index: int,
     ) -> dict[str, Any]:
+        current_task = asyncio.current_task()
+        if self.is_request_cancelled(request_id) or (current_task is not None and current_task.cancelling()):
+            logger.info(
+                "server.agent_tool_skipped_cancelled_request",
+                request_id=request_id,
+                turn_index=turn_index,
+                tool_index=tool_index,
+                tool_name=tool_name,
+            )
+            raise asyncio.CancelledError
         await self.events.publish(
             ToolCallPlanned(
                 request_id=request_id,
@@ -881,6 +949,8 @@ class LampgoServer:
             status=result.status,
             invocation_id=result.invocation_id,
         )
+        if self.is_request_cancelled(request_id) or (current_task is not None and current_task.cancelling()):
+            raise asyncio.CancelledError
         return tool_payload
 
     async def _publish_inline_tool_event(
@@ -1526,6 +1596,7 @@ class LampgoServer:
                 camera_config=self.config.camera,
                 device_esp32_config=self.config.device_esp32,
                 esp32_manager=self.esp32,
+                recording_actions_prompt_provider=lambda: build_recording_actions_prompt(Path(self.config.recordings_dir)),
             )
             self.router.set_llm_client(client)
             logger.info(
@@ -1717,6 +1788,7 @@ class LampgoServer:
                 camera_config=self.config.camera,
                 device_esp32_config=self.config.device_esp32,
                 esp32_manager=self.esp32,
+                recording_actions_prompt_provider=lambda: build_recording_actions_prompt(Path(self.config.recordings_dir)),
             )
             self.router.set_llm_client(client)
             logger.info(
@@ -1749,6 +1821,7 @@ class LampgoServer:
                 camera_config=self.config.camera,
                 device_esp32_config=self.config.device_esp32,
                 esp32_manager=self.esp32,
+                recording_actions_prompt_provider=lambda: build_recording_actions_prompt(Path(self.config.recordings_dir)),
             )
             self.router.set_llm_client(client)
             logger.info(

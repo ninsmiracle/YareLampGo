@@ -428,10 +428,12 @@ class VoiceConfig(BaseModel):
     def _normalize_legacy_tts_voice(cls, v: Any) -> Any:
         if not isinstance(v, str):
             return v
+        from lampgo.voice.tts import _volcengine_voice_or_default
+
         s = v.strip()
-        if s in {"mimo_default", "BV700_streaming"}:
+        if s == "BV700_streaming":
             return "zh_female_vv_uranus_bigtts"
-        return s
+        return _volcengine_voice_or_default(s)
 
 
 class WebConfig(BaseModel):

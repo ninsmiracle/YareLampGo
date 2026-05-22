@@ -27,6 +27,15 @@ VOLCENGINE_SEED_TTS_1_RESOURCE_ID = "seed-tts-1.0"
 VOLCENGINE_SEED_ICL_2_RESOURCE_ID = "seed-icl-2.0"
 VOLCENGINE_BIGTTS_RESOURCE_ID = "volc.service_type.10029"
 
+VOLCENGINE_TTS_VOICE_ALIASES: dict[str, str] = {
+    # Keep older saved settings working with the currently granted Seed-TTS 2
+    # voice family. The mars/moon variants either consume a different quota
+    # pool or fail with the current app credentials.
+    "zh_male_lubanqihao_mars_bigtts": "zh_male_lubanqihao_uranus_bigtts",
+    "zh_male_dongmanhaimian_mars_bigtts": "zh_male_liangsangmengzai_uranus_bigtts",
+    "zh_male_wennuanahu_moon_bigtts": "zh_male_wennuanahu_uranus_bigtts",
+}
+
 
 class MsgType(IntEnum):
     FULL_CLIENT_REQUEST = 0b0001
@@ -290,6 +299,14 @@ class VolcengineTTS:
                 chars=len(text),
                 pcm_bytes=audio_bytes,
             )
+        except RuntimeError as exc:
+            logger.error(
+                "tts.volcengine_stream_failed",
+                request_id=request_id,
+                voice=self._voice,
+                error=str(exc),
+            )
+            return
         except Exception:
             logger.exception("tts.volcengine_stream_failed", request_id=request_id, voice=self._voice)
             return
@@ -546,14 +563,14 @@ def _volcengine_voice_or_default(voice: str) -> str:
     voice = (voice or "").strip()
     if not voice or voice == "mimo_default" or (voice.endswith("Neural") and "-" in voice):
         return DEFAULT_VOLCENGINE_TTS_VOICE
-    return voice
+    return VOLCENGINE_TTS_VOICE_ALIASES.get(voice, voice)
 
 
 def _resource_id_for_voice(voice: str) -> str:
     voice = (voice or "").strip()
     if voice.startswith("S_"):
         return VOLCENGINE_SEED_ICL_2_RESOURCE_ID
-    if "_uranus_bigtts" in voice:
+    if voice.startswith("saturn_") or "_uranus_bigtts" in voice:
         return VOLCENGINE_SEED_TTS_2_RESOURCE_ID
     if "_moon_bigtts" in voice:
         return VOLCENGINE_SEED_TTS_1_RESOURCE_ID

@@ -3211,6 +3211,12 @@ button.device-chip.is-active {
   background: #fff;
 }
 
+.record-dialog-textarea {
+  min-height: 92px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
 .record-dialog-input:focus {
   border-color: #e6b4a8;
   box-shadow: 0 0 0 3px rgba(231, 179, 167, 0.18);

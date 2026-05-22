@@ -84,9 +84,9 @@ def load_recording(path: Path) -> tuple[list[dict[str, float]], int]:
 
 class PlayRecordingSkill(Skill):
     skill_id = "play_recording"
-    description = "Play a pre-recorded CSV action file."
+    description = "Play a pre-recorded CSV action file. Choose the exact recording name from the dynamic recorded action library in the system prompt."
     parameters = {
-        "name": ParameterSpec(name="name", type="str", description="Recording name (without .csv)"),
+        "name": ParameterSpec(name="name", type="str", description="Exact recording name from the dynamic recorded action library (without .csv)"),
         "fps": ParameterSpec(name="fps", type="int", required=False, description="Override playback fps"),
         "expression": ParameterSpec(
             name="expression",

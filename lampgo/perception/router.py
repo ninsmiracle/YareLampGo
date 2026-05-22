@@ -92,7 +92,7 @@ GOODBYE_PHRASES = {
 SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "点头": ("nod", None),
     "摇头": ("headshake", None),
-    "跳舞": ("dance", None),
+    "跳舞": ("play_recording", {"name": "dance1"}),
     "打招呼": ("nod", None),
     "停": ("estop", None),
     "停止": ("estop", None),
@@ -101,7 +101,7 @@ SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "回家": ("return_safe", None),
     "home": ("return_safe", None),
     "nod": ("nod", None),
-    "dance": ("dance", None),
+    "dance": ("play_recording", {"name": "dance1"}),
     "shake": ("headshake", None),
     "idle": ("idle_sway", None),
     "sway": ("idle_sway", None),

@@ -138,12 +138,17 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
         prev_task: asyncio.Task | None = getattr(server, "_llm_active_task", None)
         prev_rid: str = getattr(server, "_llm_active_request_id", "")
         if prev_task is not None and not prev_task.done():
-            logger.info("llm_compat.preempting", chat_id=chat_id, user_text=user_text[:40])
+            logger.info(
+                "llm_compat.preempting",
+                chat_id=chat_id,
+                previous_request_id=prev_rid,
+                user_text=user_text[:40],
+            )
+            if prev_rid:
+                server.cancel_request(prev_rid)
+            server.cancel_pending_tts()
+            await server.executor.cancel_current()
             prev_task.cancel()
-            try:
-                await asyncio.wait_for(prev_task, timeout=3.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                pass
             if prev_rid:
                 await _broadcast_result(server, {
                     "ok": True,
