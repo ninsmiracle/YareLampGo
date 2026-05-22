@@ -56,6 +56,7 @@
   const recordNameDialog = document.getElementById("record-name-dialog");
   const recordNameForm = document.getElementById("record-name-form");
   const recordNameInput = document.getElementById("record-name-input");
+  const recordDescriptionInput = document.getElementById("record-description-input");
   const recordNameError = document.getElementById("record-name-error");
   const btnRecordDiscard = document.getElementById("btn-record-discard");
   const btnRecordRerecord = document.getElementById("btn-record-rerecord");
@@ -172,7 +173,6 @@
     headshake: { title: "摇头", description: "左右摇头，表达不同意。" },
     look_at: { title: "注视", description: "朝指定方向看过去。" },
     idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
-    dance: { title: "跳舞", description: "简单的节奏舞蹈动作。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
     presence_react: { title: "人来反应", description: "检测到人时转向并展示问候表情。" },
@@ -3046,12 +3046,13 @@
 
   function normalizeRecordingEntry(entry) {
     if (typeof entry === "string") {
-      return { name: entry.trim(), source: "builtin" };
+      return { name: entry.trim(), source: "builtin", description: "" };
     }
-    if (!entry || typeof entry !== "object") return { name: "", source: "builtin" };
+    if (!entry || typeof entry !== "object") return { name: "", source: "builtin", description: "" };
     const name = String(entry.name || "").trim();
     const source = String(entry.source || "builtin").trim() || "builtin";
-    return { name, source };
+    const description = String(entry.description || "").trim();
+    return { name, source, description };
   }
 
   function renderSkills(skills) {
@@ -3261,11 +3262,13 @@
           const expr = getRecordingExpression(name) || "";
           const labelCn = recordingLabel(name);
           const exprCn = expressionLabel(expr);
+          const description = recording.description || "";
           return (
             name.toLowerCase().includes(q) ||
             expr.toLowerCase().includes(q) ||
-            labelCn.includes(q) ||
-            exprCn.includes(q)
+            labelCn.toLowerCase().includes(q) ||
+            exprCn.toLowerCase().includes(q) ||
+            description.toLowerCase().includes(q)
           );
         })
       : latestRecordings;
@@ -3275,10 +3278,15 @@
       const labelCn = recordingLabel(name);
       const exprCn = expressionLabel(expression);
       const isUserRecording = recording.source === "user";
+      const description = recording.description || "";
       const card = makeSkillCard({
         title: labelCn,
-        meta: `${isUserRecording ? "我的录制" : "内置动作"} · ${exprCn}`,
-        tooltip: `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn}`,
+        meta: description
+          ? `${isUserRecording ? "我的录制" : "内置动作"} · ${description}`
+          : `${isUserRecording ? "我的录制" : "内置动作"} · ${exprCn}`,
+        tooltip: description
+          ? `播放录制动作：${labelCn}（${name}） · ${description}`
+          : `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn}`,
         onClick: () => invokeRecording(name),
       });
       if (isUserRecording) {
@@ -3691,6 +3699,7 @@
     pendingOverwriteSave = false;
     recordNameError.textContent = "";
     recordNameInput.value = "";
+    if (recordDescriptionInput) recordDescriptionInput.value = "";
     if (btnRecordSave) btnRecordSave.textContent = "保存";
     recordNameDialog.showModal();
     recordNameInput.focus();
@@ -3703,8 +3712,8 @@
     recordNameDialog.close();
   }
 
-  function saveMotionRecording(name, overwrite = false) {
-    send({ type: "recording_save", name, overwrite, request_id: nextId() });
+  function saveMotionRecording(name, description, overwrite = false) {
+    send({ type: "recording_save", name, description, overwrite, request_id: nextId() });
   }
 
   function discardMotionRecording() {
@@ -5853,8 +5862,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         recordNameError.textContent = "名称仅支持字母、数字、下划线、短横线";
         return;
       }
+      const description = ((recordDescriptionInput && recordDescriptionInput.value) || "").trim();
+      if (!description) {
+        recordNameError.textContent = "请输入动作说明，AI 会根据它判断什么时候播放这个动作";
+        if (recordDescriptionInput) recordDescriptionInput.focus();
+        return;
+      }
       recordNameError.textContent = "";
-      saveMotionRecording(name, pendingOverwriteSave);
+      saveMotionRecording(name, description, pendingOverwriteSave);
     });
   }
 
@@ -7816,17 +7831,18 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   }
 
   // Voices offered per TTS provider. Volcengine supports many more voices; we
-  // surface the default BigTTS voice plus keep custom stored values.
+  // surface voices that have been verified with the default Seed-TTS 2 grant,
+  // plus keep custom stored values.
   const TTS_VOICE_CUSTOM_VALUE = "__custom__";
   const TTS_VOICE_OPTIONS = {
     volcengine: [
-      { value: "zh_male_lubanqihao_mars_bigtts", label: "搞怪（鲁班七号）：zh_male_lubanqihao_mars_bigtts" },
-      { value: "zh_male_dongmanhaimian_mars_bigtts", label: "海绵（亮嗓萌仔）：zh_male_dongmanhaimian_mars_bigtts" },
-      { value: "zh_female_jitangnv_uranus_bigtts", label: "鸡汤女 2.0：zh_female_jitangnv_uranus_bigtts" },
+      { value: "zh_male_lubanqihao_uranus_bigtts", label: "搞怪（鲁班七号）：zh_male_lubanqihao_uranus_bigtts" },
+      { value: "zh_male_liangsangmengzai_uranus_bigtts", label: "海绵（亮嗓萌仔）：zh_male_liangsangmengzai_uranus_bigtts" },
+      { value: "zh_female_jitangnv_uranus_bigtts", label: "电台：zh_female_jitangnv_uranus_bigtts" },
       { value: "zh_female_vv_uranus_bigtts", label: "vivi：zh_female_vv_uranus_bigtts（默认）" },
       { value: "zh_male_taocheng_uranus_bigtts", label: "小天：zh_male_taocheng_uranus_bigtts" },
       { value: "saturn_zh_female_qingyingduoduo_cs_tob", label: "朵朵：saturn_zh_female_qingyingduoduo_cs_tob" },
-      { value: "zh_male_wennuanahu_moon_bigtts", label: "阿虎：zh_male_wennuanahu_moon_bigtts" },
+      { value: "zh_male_wennuanahu_uranus_bigtts", label: "阿虎：zh_male_wennuanahu_uranus_bigtts" },
       { value: TTS_VOICE_CUSTOM_VALUE, label: "自定义…" },
     ],
     "edge-tts": [
@@ -7911,11 +7927,8 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       el.textContent = opt.label;
       voiceSel.appendChild(el);
     });
-    const canUseCustom = options.some((o) => o.value === TTS_VOICE_CUSTOM_VALUE);
     const isKnown = options.some((o) => o.value === keep);
-    if (keep && !isKnown && canUseCustom) {
-      if (customInput) customInput.value = keep;
-    } else if (keep && !isKnown) {
+    if (keep && !isKnown) {
       const el = document.createElement("option");
       el.value = keep;
       el.textContent = `${keep}（自定义，保留原值）`;
@@ -7923,9 +7936,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     } else if (!keep && customInput) {
       customInput.value = "";
     }
-    voiceSel.value = keep && !isKnown && canUseCustom
-      ? TTS_VOICE_CUSTOM_VALUE
-      : (keep || (options[0] && options[0].value) || "");
+    voiceSel.value = keep || (options[0] && options[0].value) || "";
     syncTtsVoiceCustomInput();
   }
 

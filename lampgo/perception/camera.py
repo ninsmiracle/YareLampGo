@@ -36,7 +36,7 @@ class CameraCapture:
     WIDTH = 640
     HEIGHT = 480
     JPEG_QUALITY = 60
-    ESP32_HTTP_TIMEOUT_S = 3.0
+    ESP32_HTTP_TIMEOUT_S = 8.0
 
     def __init__(
         self,
@@ -109,6 +109,22 @@ class CameraCapture:
                 return None
             payload = base64.b64encode(resp.content).decode("ascii")
             return f"data:image/jpeg;base64,{payload}"
+        except httpx.TimeoutException as exc:
+            logger.warning(
+                "camera.esp32_capture_timeout",
+                url=base_url,
+                timeout_s=self.ESP32_HTTP_TIMEOUT_S,
+                error_type=type(exc).__name__,
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.warning(
+                "camera.esp32_capture_request_failed",
+                url=base_url,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return None
         except Exception:
             logger.exception("camera.esp32_capture_exception", url=base_url)
             return None

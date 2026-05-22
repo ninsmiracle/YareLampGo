@@ -28,6 +28,12 @@ from lampgo.core.events import AgentFinished, ChatMessage, IntentResolved, Inten
 from lampgo.core.led import led_expression_catalog
 from lampgo.device.audio_stream import redact_ws_owner_token
 from lampgo.perception.camera import CameraCapture
+from lampgo.recordings import (
+    build_recording_actions_prompt,
+    list_recording_catalog,
+    recording_description_path,
+    write_recording_description,
+)
 from lampgo.web.ws_bridge import WsBridge
 
 if TYPE_CHECKING:
@@ -408,6 +414,9 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "user recording not found"}, status_code=404)
 
         csv_path.unlink()
+        txt_path = recording_description_path(csv_path)
+        if txt_path.exists():
+            txt_path.unlink()
 
         removed_aliases: list[str] = []
         alias_path = recordings_dir / "aliases.json"
@@ -425,6 +434,8 @@ class WebGateway:
                         kept[str(alias)] = target
                 if removed_aliases:
                     alias_path.write_text(json.dumps(kept, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        self.server._refresh_llm_skill_tools()
 
         return JSONResponse(
             {
@@ -451,6 +462,7 @@ class WebGateway:
         name = str(body.get("name", "")).strip()
         csv_content = body.get("csv", "")
         alias = str(body.get("alias", "")).strip()
+        description = str(body.get("description", "") or body.get("prompt", "")).strip()
 
         if not name or not re.match(r"^[\w\-]+$", name):
             return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
@@ -462,6 +474,7 @@ class WebGateway:
         user_dir.mkdir(parents=True, exist_ok=True)
         csv_path = user_dir / f"{name}.csv"
         csv_path.write_text(csv_content, encoding="utf-8")
+        write_recording_description(csv_path, description)
 
         if alias:
             alias_path = recordings_dir / "aliases.json"
@@ -472,7 +485,20 @@ class WebGateway:
             existing[alias] = name
             alias_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-        return JSONResponse({"ok": True, "result": {"name": name, "path": str(csv_path), "alias": alias or None}})
+        self.server._refresh_llm_skill_tools()
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "name": name,
+                    "path": str(csv_path),
+                    "alias": alias or None,
+                    "description": description or None,
+                    "recordings": self._list_recordings(),
+                },
+            }
+        )
 
     async def api_recording_aliases(self, request: Request) -> JSONResponse:
         import json
@@ -1258,6 +1284,10 @@ class WebGateway:
             # Coerce to the current field's type for pydantic friendliness.
             current = getattr(obj, tail, None)
             coerced = _coerce_value(current, value)
+            if head == "voice" and tail in {"tts_voice", "livekit_tts_voice"}:
+                from lampgo.voice.tts import _volcengine_voice_or_default
+
+                coerced = _volcengine_voice_or_default(str(coerced or ""))
             setattr(obj, tail, coerced)
 
     async def api_config_device(self, request: Request) -> JSONResponse:
@@ -2545,7 +2575,13 @@ class WebGateway:
         except Exception as exc:
             load_error = load_error or str(exc)
 
-        full_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
+        recording_actions_prompt = build_recording_actions_prompt(Path(self.server.config.recordings_dir))
+        full_prompt = _build_agent_system_prompt(
+            joint_state,
+            persona=persona,
+            memory=memory,
+            recording_actions_prompt=recording_actions_prompt,
+        )
 
         return JSONResponse(
             {
@@ -2554,6 +2590,7 @@ class WebGateway:
                     "persona_block": rendered_persona,
                     "memory_block": rendered_memory,
                     "joint_state": joint_state or {},
+                    "recording_actions_block": recording_actions_prompt,
                     "full_prompt": full_prompt,
                     "template_preview": AGENT_SYSTEM_PROMPT_TEMPLATE[:240] + "…",
                     "load_error": load_error,
@@ -2659,8 +2696,8 @@ class WebGateway:
             pass
 
     async def api_cancel(self, request: Request) -> JSONResponse:
-        await self.server.executor.cancel_current()
-        return JSONResponse({"ok": True, "result": {"status": "cancelled"}})
+        cancelled = await self._stop_all_ws_work(request_id=str(uuid.uuid4().hex[:12]))
+        return JSONResponse({"ok": True, "result": {"status": "cancelled", "cancelled": cancelled}})
 
     async def api_estop(self, request: Request) -> JSONResponse:
         result = await self.server.handle_request({"cmd": "estop"})
@@ -2684,9 +2721,16 @@ class WebGateway:
                 # urgent commands like `estop` cannot be processed until completion.
                 run_async = msg_type in ("text", "audio", "recording_save") or (msg_type == "invoke" and bool(msg.get("wait", True)))
                 if run_async:
+                    if msg_type in ("text", "audio"):
+                        prev_task = self._active_request_tasks.get(ws)
+                        if prev_task is not None and not prev_task.done():
+                            prev_task.cancel()
+                            self.server.cancel_pending_tts()
+                            await self.server.executor.cancel_current()
+                            logger.info("web.preempt_active_request", msg_type=msg_type)
                     task = asyncio.create_task(self._handle_ws_message(ws, msg))
                     self._active_request_tasks[ws] = task
-                    task.add_done_callback(lambda _t: self._active_request_tasks.pop(ws, None))
+                    task.add_done_callback(lambda done, client=ws: self._clear_active_request_task(client, done))
                 else:
                     await self._handle_ws_message(ws, msg)
         except WebSocketDisconnect:
@@ -2703,6 +2747,27 @@ class WebGateway:
             if relay_task and not relay_task.done():
                 relay_task.cancel()
             await self.bridge.remove_client(ws)
+
+    def _clear_active_request_task(self, ws: WebSocket, task: asyncio.Task) -> None:
+        if self._active_request_tasks.get(ws) is task:
+            self._active_request_tasks.pop(ws, None)
+
+    async def _stop_all_ws_work(self, *, request_id: str = "", ws: WebSocket | None = None) -> dict[str, int]:
+        cancelled_ws = 0
+        tasks = []
+        if ws is not None:
+            task = self._active_request_tasks.get(ws)
+            if task is not None:
+                tasks.append(task)
+        else:
+            tasks.extend(self._active_request_tasks.values())
+        for task in set(tasks):
+            if task is not None and not task.done():
+                task.cancel()
+                cancelled_ws += 1
+        cancelled = await self.server.stop_all_interactions(request_id=request_id)
+        cancelled["ws"] = cancelled_ws
+        return cancelled
 
     async def _handle_ws_message(self, ws: WebSocket, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type", "")
@@ -2855,6 +2920,7 @@ class WebGateway:
             result = await self.server.save_recording_session(
                 str(msg.get("name", "")),
                 overwrite=bool(msg.get("overwrite", False)),
+                description=str(msg.get("description", "") or msg.get("prompt", "")),
             )
             result["request_id"] = request_id
             await ws.send_json(result)
@@ -2908,17 +2974,11 @@ class WebGateway:
             await ws.send_json({"ok": True, "result": {"openclaw_task": task}, "request_id": request_id})
 
         elif msg_type == "cancel":
-            await self.server.executor.cancel_current()
-            await ws.send_json({"ok": True, "result": {"status": "cancelled"}, "request_id": request_id})
+            cancelled = await self._stop_all_ws_work(request_id=request_id)
+            await ws.send_json({"ok": True, "result": {"status": "cancelled", "cancelled": cancelled}, "request_id": request_id})
 
         elif msg_type == "stop_loop":
-            task = self._active_request_tasks.get(ws)
-            cancelled = 0
-            if task and not task.done():
-                task.cancel()
-                cancelled = 1
-            self.server.cancel_pending_tts()
-            await self.server.executor.cancel_current()
+            cancelled = await self._stop_all_ws_work(request_id=request_id)
             logger.info("web.stop_loop", request_id=request_id, cancelled=cancelled)
 
         elif msg_type == "stop_tts":
@@ -3173,16 +3233,7 @@ class WebGateway:
 
     def _list_recordings(self) -> list[dict[str, str]]:
         recordings_dir = Path(self.server.config.recordings_dir)
-        if not recordings_dir.exists():
-            return []
-        # Built-in recordings in root; user-created in user/ subdir.
-        # User recordings shadow built-ins of the same name.
-        names: dict[str, str] = {p.stem: "builtin" for p in recordings_dir.glob("*.csv")}
-        user_dir = recordings_dir / "user"
-        if user_dir.is_dir():
-            for p in user_dir.glob("*.csv"):
-                names[p.stem] = "user"
-        return [{"name": name, "source": source} for name, source in sorted(names.items())]
+        return list_recording_catalog(recordings_dir)
 
     def _list_expressions(self) -> list[str]:
         return [item["name"] for item in self._list_expression_catalog()]

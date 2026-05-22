@@ -1,47 +1,46 @@
-# Available Actions (37 pre-recorded CSV animations)
+# Recorded Action Library
 
-| Action | Recommended LED | Brightness | Description |
-|--------|----------------|------------|-------------|
-| angry_jerk | angry (18) | 200 | 愤怒抖动 |
-| awkward_pause | question (21) | 150 | 尴尬停顿 |
-| celebrate | star (22) | 255 | 庆祝 |
-| confused | question (21) | 150 | 困惑 |
-| curious | thinking (26) | 200 | 好奇探索 |
-| dance | music (16) | 255 | 跳舞 |
-| deep_think | thinking (26) | 150 | 深度思考 |
-| dislike | cross (15) | 150 | 不喜欢 |
-| dizzy_spin | rainbow (9) | 200 | 眩晕旋转 |
-| doze_off | sleep (25) | 50 | 打瞌睡 |
-| dramatic_faint | helpless (29) | 100 | 戏剧性晕倒 |
-| excited | smiley (10) | 255 | 兴奋 |
-| flirty_wink | heart (27) | 200 | 调皮眨眼 |
-| groove_bounce | music (16) | 255 | 律动弹跳 |
-| happy_wiggle | smiley (10) | 255 | 开心摇摆 |
-| headshake | cross (15) | 150 | 摇头 |
-| heartbreak | heartbreak (28) | 100 | 心碎 |
-| idle | white (4) | 100 | 待机呼吸 |
-| lookout | up (23) | 200 | 警戒张望 |
-| mischief_peek | blush (17) | 150 | 恶作剧偷看 |
-| movebackward | down (24) | 150 | 向后移动 |
-| moveforward | up (23) | 150 | 向前移动 |
-| nod | check (14) | 200 | 点头 |
-| nod_small | check (14) | 150 | 小幅点头 |
-| peep | blush (17) | 100 | 偷看 |
-| push | exclaim (20) | 200 | 推动 |
-| sad | crying (11) | 80 | 难过 |
-| sayhitoboss | smiley (10) | 255 | 向老板打招呼 |
-| scanning | up (23) | 200 | 扫描环顾 |
-| shock | surprised (19) | 255 | 震惊 |
-| shy | blush (17) | 100 | 害羞 |
-| sneeze | exclaim (20) | 200 | 打喷嚏 |
-| startle_recover | surprised (19) | 200 | 受惊恢复 |
-| stretch_yawn | sleep (25) | 100 | 伸懒腰打哈欠 |
-| tippy_taps | music (16) | 200 | 小碎步 |
-| wake_up | smiley (10) | 255 | 醒来 |
-| working | white (4) | 180 | 工作照明 |
+These actions are learned from the current recording files in `assets/recordings/`.
+Each action is a CSV trajectory plus an optional sibling `.txt` description that
+explains when the AI should use it.
 
-## Invocation
+Do not infer joint poses from this file. Use `lampgo_recordings` for the live
+catalog when available, then call:
 
 ```bash
-lampgo invoke play_recording name=<action_name>
+lampgo invoke play_recording name=<exact_recording_name>
 ```
+
+## Current Recordings
+
+| Recording | Description |
+|-----------|-------------|
+| Stretch | 舒展身体、打开姿态，适合用户说伸展、放松、活动一下，或长时间待机后想表现精神起来。 |
+| bowing_head | 低头鞠躬或礼貌致意，适合道谢、认错、打招呼、表示尊敬，或用谦逊姿态回应用户。 |
+| dance1 | 轻快跳舞和扭动，适合用户要求跳舞、活跃气氛、庆祝、开心互动，或想看台灯动起来。 |
+| dance2 | 另一段更活泼的跳舞动作，适合连续表演、派对感、用户想再跳一次或想看不同舞步。 |
+| deep_thinking | 深度思考和认真琢磨的动作，适合用户提出复杂问题、需要分析、犹豫、推理或装作在用力思考。 |
+| excited | 兴奋、开心、被夸奖或发现有趣东西时的动作，适合表达惊喜、期待、雀跃和正向情绪。 |
+| headshake1 | 摇头表示不同意、拒绝、没找到、不是这样或轻微否定，适合需要可爱地说不的场景。 |
+| lie_flat | 趴平、摆烂或累倒的动作，适合调侃、撒娇、表示没电了、被难倒了、累了或想躺平。 |
+| look_ahead | 向前看、专注注视前方，适合准备观察、看向用户、等待指令或把注意力放到面前目标。 |
+| look_around | 环顾四周、左右观察环境，适合搜索、好奇、巡视房间、确认周围情况或表现正在找东西。 |
+| nod | 点头表示同意、确认、听懂了、答应用户或鼓励，适合肯定回应和温和互动。 |
+| peep | 偷瞄、探头探脑、偷偷观察的动作，适合害羞、好奇、偷偷看用户、卖萌或轻微调皮。 |
+| raise_head | 抬头、振作或向上看的动作，适合被叫醒、重新打起精神、看高处或表现注意力提升。 |
+| shy | 害羞、被夸后不好意思或撒娇的动作，适合用户夸奖、调侃、亲昵称呼或需要可爱回应。 |
+| sneeze | 打喷嚏或突然小抖一下的动作，适合模拟喷嚏、被吓一跳、轻微故障感或搞笑反应。 |
+| stand | 站立、挺直身体、准备开始工作的动作，适合进入认真状态、接受任务或展示精神饱满。 |
+| suqat_down | 蹲下、压低身体或缩起来的动作，适合躲避、低姿态观察、害怕、撒娇或准备重新起身。 |
+| thinking | 普通思考动作，适合短暂考虑、想一想、回答前停顿，或表现正在理解用户意图。 |
+| turn_back | 回头或转身看的动作，适合用户说后面、回头看看、注意背后，或需要转移注意方向。 |
+| upset | 沮丧、委屈、失落或不开心的动作，适合失败、没听清、被批评、道歉或表达低落情绪。 |
+| wake_up | 苏醒、醒来、从待机中恢复的动作，适合被唤醒、重新开始对话或从安静状态进入互动。 |
+| wave | 表演脊柱伸展状态，做出波浪运动。 |
+
+## Selection Rules
+
+- Prefer an exact semantic match from the description.
+- Use the exact recording name; names are case-sensitive.
+- If multiple recordings fit, choose the one with the more specific description.
+- If no recording fits, use another available tool instead of inventing a name.

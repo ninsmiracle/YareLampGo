@@ -20,7 +20,7 @@ logger = structlog.get_logger(__name__)
 PRIORITY_SKILLS = {"estop", "return_safe"}
 
 _MOTION_SKILLS = {
-    "nod", "headshake", "look_at", "idle_sway", "dance",
+    "nod", "headshake", "look_at", "idle_sway",
     "move_to", "return_safe", "estop",
     "presence_react", "face_follow",
     "play_recording", "teleop_mouse", "teleop_gamepad",

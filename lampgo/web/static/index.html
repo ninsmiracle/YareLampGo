@@ -1090,7 +1090,7 @@
   <dialog id="record-name-dialog" class="record-dialog">
     <form id="record-name-form" method="dialog" class="record-dialog-card">
       <div class="record-dialog-title">保存录制动作</div>
-      <div class="record-dialog-desc">请输入动作名称，或放弃并重新录制。</div>
+      <div class="record-dialog-desc">请输入动作名称和动作说明，动作说明会作为 AI 选择这个动作时参考的提示。</div>
       <input
         id="record-name-input"
         class="record-dialog-input"
@@ -1099,6 +1099,12 @@
         placeholder="例如：my_wave_action"
         autocomplete="off"
       >
+      <textarea
+        id="record-description-input"
+        class="record-dialog-input record-dialog-textarea"
+        maxlength="500"
+        placeholder="例如：开心打招呼、看见用户靠近时挥动灯头，适合回应问候或活跃气氛。"
+      ></textarea>
       <div id="record-name-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
         <button id="btn-record-discard" class="ghost-button" type="button">放弃</button>

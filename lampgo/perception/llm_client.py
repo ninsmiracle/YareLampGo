@@ -78,17 +78,7 @@ Physical invariants (NON-NEGOTIABLE — override anything in the persona / memor
 - wrist_pitch (-45~100): lamp head tilt = camera angle. +camera looks down, -camera looks up.
 - wrist_roll (-75~75): lamp head roll. Rarely needed, keep near current value.
 
-Reference poses (use these as starting points, base_yaw is independent):
-- Idle/safe: base_pitch=-45, elbow_pitch=83, wrist_pitch=3 (relaxed, arm folded)
-- Stand tall: base_pitch=0, elbow_pitch=-85, wrist_pitch=30 (upright, arm fully extended up, camera looks slightly down)
-- Look at desk: base_pitch=-10, elbow_pitch=25, wrist_pitch=90 (arm forward, camera aimed at desk surface)
-- Lean forward: base_pitch=65, elbow_pitch=-70, wrist_pitch=50 (body tips far forward, arm extends back)
-- Lean backward: base_pitch=-98, elbow_pitch=-11, wrist_pitch=100 (body tips far back, camera aims down)
-
 IMPORTANT: base_pitch and elbow_pitch work together as a kinematic chain.
-- To stand tall: base_pitch near 0 AND elbow_pitch very negative (-85). elbow_pitch=-60 is NOT enough, the arm stays visibly bent.
-- To lean forward: base_pitch large positive AND elbow_pitch negative (extends the arm backward to counterbalance).
-- To lean backward: base_pitch large negative. elbow_pitch stays near 0 (not much extension needed).
 - wrist_pitch always compensates to control where the camera/light points.
 
 Rules:
@@ -118,6 +108,7 @@ Finish_response anti-repetition rules (VERY IMPORTANT):
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
 
+{recording_actions_block}
 Narration (say tool):
 - Use the say tool to speak ALL user-facing audible content: simple answers, observations, factual results, apologies, and action narrations. Call say alongside other tools in the same turn when useful — the speech plays while the action executes, making you feel alive.
 - Speak in first person (我). Be lively, cute, and expressive — like a curious little lamp with personality. Each narration should contain two parts: (1) your understanding of the previous result or the user's request, and (2) what you're about to do next.
@@ -416,6 +407,7 @@ def _build_agent_system_prompt(
     *,
     persona: Any = None,
     memory: Any = None,
+    recording_actions_prompt: str = "",
 ) -> str:
     if joint_state:
         parts = [f"{k}={v:.1f}" for k, v in joint_state.items()]
@@ -439,6 +431,7 @@ def _build_agent_system_prompt(
         persona_block=persona_block,
         memory_block=memory_block,
         joint_state_block=joint_block,
+        recording_actions_block=recording_actions_prompt,
     )
 
 
@@ -453,6 +446,8 @@ class LLMClient:
         *,
         device_esp32_config: DeviceEsp32Config | None = None,
         esp32_manager: "Esp32DeviceManager | None" = None,
+        recording_actions_prompt: str = "",
+        recording_actions_prompt_provider: Callable[[], str] | None = None,
     ) -> None:
         self._config = config
         self._skill_specs = skill_specs
@@ -462,6 +457,8 @@ class LLMClient:
             esp32_manager=esp32_manager,
         )
         self._agent_tools = _build_agent_tools(skill_specs, config, has_camera=self._camera.enabled)
+        self._recording_actions_prompt = recording_actions_prompt
+        self._recording_actions_prompt_provider = recording_actions_prompt_provider
         self._api_base = config.api_base or "https://api.openai.com/v1"
         self._is_mimo_model = config.fast_model.strip().lower() in MIMO_WEB_SEARCH_MODELS
         self._max_turns = config.max_agent_turns
@@ -509,7 +506,18 @@ class LLMClient:
             persona, memory = load_bundles(self._config)
         except Exception:
             logger.exception("llm_client.load_bundles_failed")
-        system_prompt = _build_agent_system_prompt(joint_state, persona=persona, memory=memory)
+        recording_actions_prompt = self._recording_actions_prompt
+        if self._recording_actions_prompt_provider is not None:
+            try:
+                recording_actions_prompt = self._recording_actions_prompt_provider()
+            except Exception:
+                logger.exception("llm_client.recording_actions_prompt_failed")
+        system_prompt = _build_agent_system_prompt(
+            joint_state,
+            persona=persona,
+            memory=memory,
+            recording_actions_prompt=recording_actions_prompt,
+        )
         if call_mode:
             system_prompt += (
                 "\n\nVoice call mode:\n"
@@ -725,6 +733,9 @@ class LLMClient:
                 await asyncio.sleep(1.5)
 
             for tool_index, call in enumerate(tool_calls, start=1):
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise asyncio.CancelledError
                 tool_count += 1
                 if tool_count > self._max_tool_calls:
                     if pending_tts:
@@ -883,6 +894,18 @@ class LLMClient:
                     invocation_id=tool_result.get("invocation_id"),
                 )
                 tool_records.append(record)
+                if record.status == "cancelled":
+                    if pending_tts:
+                        await asyncio.gather(*pending_tts, return_exceptions=True)
+                    return AgentLoopResult(
+                        intent_type="agent",
+                        response="",
+                        detail="用户打断，旧轮次已停止",
+                        stop_reason="user_cancelled",
+                        tool_calls=tool_records,
+                        spoken_texts=spoken_texts[:],
+                        suppress_final_tts=True,
+                    )
                 messages.append(
                     {
                         "role": "tool",
