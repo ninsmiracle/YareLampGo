@@ -2516,10 +2516,19 @@ button.device-chip.is-active {
   transition: opacity 0.12s ease, background 0.12s ease;
 }
 
+.skill-card-action--edit {
+  right: 32px;
+}
+
 .skill-card-action:hover {
   opacity: 1;
   background: rgba(229, 115, 115, 0.12);
   color: #c14d4d;
+}
+
+.skill-card-action--edit:hover {
+  background: rgba(110, 143, 191, 0.14);
+  color: #3b638f;
 }
 
 .skill-card-action--delete:hover {
@@ -3209,6 +3218,22 @@ button.device-chip.is-active {
   padding: 10px 12px;
   outline: none;
   background: #fff;
+}
+
+.record-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.record-dialog-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+
+.record-dialog-select {
+  width: 100%;
 }
 
 .record-dialog-textarea {
