@@ -1,4 +1,4 @@
-# LED Expression Keys (33 modes)
+# LED Expression Keys (34 modes)
 
 Use the exact `Name` column in OpenClaw tool calls.
 
@@ -37,6 +37,9 @@ Use the exact `Name` column in OpenClaw tool calls.
 | 30 | cool | 耍酷 | Cool face |
 | 31 | focused | 专注 | Focused face |
 | 32 | wink | 眨眼 | One-eye wink |
+| 33 | myu7gt | YU7 GT | Left panel white YU7, right panel red GT |
+
+Aliases: `myu7`, `mgt`, `yu7gt`, and `yu7` resolve to `myu7gt`.
 
 ## Invocation
 
@@ -44,4 +47,5 @@ Use the exact `Name` column in OpenClaw tool calls.
 lampgo invoke set_expression mode=smiley
 lampgo invoke set_expression mode=focused
 lampgo invoke set_expression mode=wink
+lampgo invoke set_expression mode=myu7gt
 ```

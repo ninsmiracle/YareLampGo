@@ -23,7 +23,7 @@ metadata:
 
 # lampgo — Intelligent Desk Lamp Robot
 
-Control a 5-DOF desk lamp robot: 37 pre-recorded actions + 33 LED expressions + smooth joint control + teach recording + camera vision + visual servoing.
+Control a 5-DOF desk lamp robot: 37 pre-recorded actions + 34 LED expressions + smooth joint control + teach recording + camera vision + visual servoing.
 
 Use the OpenClaw plugin tools (preferred, keeps all interactions inside OpenClaw):
 
@@ -78,7 +78,7 @@ python3 {baseDir}/scripts/setup.py  # Re-run after user provides info
 Use the exact LED mode keys from `references/led-modes.md` when calling
 `lampgo_expression`.
 
-- Use keys like `smiley`, `heart`, `focused`, `wink`, `sleep`.
+- Use keys like `smiley`, `heart`, `focused`, `wink`, `sleep`, `myu7gt`.
 - When pairing an expression with a recording, set the expression first, then call `lampgo_play`.
 
 ## Semantic Mapping (Intent → Recorded Action + LED)
@@ -306,7 +306,7 @@ Settle after the interaction:
 ## References
 
 - **Recorded action list**: See `references/actions.md` and prefer live `lampgo_recordings`
-- **Full LED list**: See `references/led-modes.md` — 33 expression modes
+- **Full LED list**: See `references/led-modes.md` — 34 expression modes
 - **Joint reference**: See `references/joints.md` — 5 joints with ranges, directions, templates
 - **IPC API reference**: See `references/api.md` — socket protocol for Python scripts
 

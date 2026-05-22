@@ -119,6 +119,10 @@ SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "专注": ("set_expression", {"expression": "focused"}),
     "眨眼": ("set_expression", {"expression": "wink"}),
     "彩虹": ("set_expression", {"expression": "rainbow"}),
+    "yu7": ("set_expression", {"expression": "myu7gt"}),
+    "yu7gt": ("set_expression", {"expression": "myu7gt"}),
+    "myu7": ("set_expression", {"expression": "myu7gt"}),
+    "mgt": ("set_expression", {"expression": "myu7gt"}),
 }
 
 
