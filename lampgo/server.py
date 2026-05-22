@@ -339,7 +339,9 @@ class LampgoServer:
         skill_id = data.get("skill_id", "")
         params = data.get("params", {})
 
-        if self._record_recorder is not None:
+        # Teach recording owns the motion stack, but LED expressions are safe
+        # to change while a recording is active or waiting to be saved.
+        if self._record_recorder is not None and skill_id != "set_expression":
             return {
                 "ok": False,
                 "error": "recording session active; save/discard recording first",

@@ -48,22 +48,22 @@ LED_EXPRESSION_KEYS = (
     "wink",
 )
 RECORDING_EXPRESSION_HINTS: dict[str, str] = {
-    "Stretch": "smiley",
-    "bowing_head": "smiley",
+    "Stretch": "star",
+    "bowing_head": "down",
     "dance1": "music",
-    "dance2": "music",
+    "dance2": "rainbowchase",
     "deep_thinking": "focused",
-    "excited": "smiley",
+    "excited": "heart",
     "headshake1": "cross",
     "lie_flat": "sleep",
-    "look_ahead": "focused",
+    "look_ahead": "cool",
     "look_around": "question",
     "nod": "check",
-    "peep": "question",
-    "raise_head": "surprised",
+    "peep": "wink",
+    "raise_head": "up",
     "shy": "blush",
     "sneeze": "exclaim",
-    "stand": "focused",
+    "stand": "white",
     "suqat_down": "helpless",
     "thinking": "thinking",
     "turn_back": "right",
@@ -103,6 +103,33 @@ def write_recording_description(csv_path: Path, description: str) -> None:
         path.unlink()
 
 
+def _stable_name_index(name: str) -> int:
+    return sum((idx + 1) * ord(ch) for idx, ch in enumerate(name))
+
+
+def _assign_catalog_expressions(entries: dict[str, dict[str, str]]) -> None:
+    """Assign a stable, preferably unique LED expression to every recording."""
+    if not entries:
+        return
+
+    expression_keys = [key for key in LED_EXPRESSION_KEYS if key != "off"]
+    used: set[str] = set()
+    for name in sorted(entries):
+        preferred = RECORDING_EXPRESSION_HINTS.get(name)
+        expression = preferred if preferred in LED_EXPRESSION_KEYS and preferred not in used else ""
+        if not expression:
+            start = _stable_name_index(name) % len(expression_keys)
+            for offset in range(len(expression_keys)):
+                candidate = expression_keys[(start + offset) % len(expression_keys)]
+                if candidate not in used:
+                    expression = candidate
+                    break
+            if not expression:
+                expression = expression_keys[start]
+        entries[name]["expression"] = expression
+        used.add(expression)
+
+
 def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
     if not recordings_dir.exists():
         return []
@@ -123,6 +150,7 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
                 "path": str(csv_path),
                 "description": read_recording_description(csv_path),
             }
+    _assign_catalog_expressions(entries)
     return [entries[name] for name in sorted(entries)]
 
 
@@ -132,8 +160,10 @@ def build_recording_actions_prompt(recordings_dir: Path) -> str:
         "LED expression keys:",
         f"- Use these exact mode names in tool calls: {', '.join(LED_EXPRESSION_KEYS)}.",
         "Recorded action library (dynamic; loaded from CSV/TXT files):",
-        "- Use `play_recording` with the exact `name` when the user's request, camera scene, emotion, or conversation context matches an action description.",
-        "- If a listed recording includes an `expression=...` hint, prefer that expression before or alongside the action unless the user explicitly asked for a different mood.",
+        "- Use `play_recording` with the exact `name` when the user's request, camera scene, emotion, "
+        "or conversation context matches an action description.",
+        "- If a listed recording includes an `expression=...` hint, prefer that expression before or "
+        "alongside the action unless the user explicitly asked for a different mood.",
         "- Do not invent recording names. If no listed action fits, use another tool or speak instead.",
     ]
     if not catalog:
@@ -143,7 +173,7 @@ def build_recording_actions_prompt(recordings_dir: Path) -> str:
         name = item["name"]
         source = "我的录制" if item.get("source") == "user" else "内置动作"
         desc = item.get("description") or "暂无动作说明；仅在用户明确点名该动作名时使用。"
-        expression = RECORDING_EXPRESSION_HINTS.get(name)
+        expression = item.get("expression")
         if expression:
             lines.append(f"- name={name} | source={source} | expression={expression} | prompt={desc}")
         else:

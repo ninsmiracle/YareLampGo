@@ -155,6 +155,7 @@
   });
 
   const expressionMetaByName = new Map();
+  const recordingExpressionByName = new Map();
 
   function expressionMeta(name) {
     return expressionMetaByName.get(String(name || ""));
@@ -211,22 +212,22 @@
   }
 
   const RECORDING_EXPRESSIONS = Object.freeze({
-    Stretch: "smiley",
-    bowing_head: "smiley",
+    Stretch: "star",
+    bowing_head: "down",
     dance1: "music",
-    dance2: "music",
+    dance2: "rainbowchase",
     deep_thinking: "focused",
-    excited: "smiley",
+    excited: "heart",
     headshake1: "cross",
     lie_flat: "sleep",
-    look_ahead: "focused",
+    look_ahead: "cool",
     look_around: "question",
     nod: "check",
-    peep: "question",
-    raise_head: "surprised",
+    peep: "wink",
+    raise_head: "up",
     shy: "blush",
     sneeze: "exclaim",
-    stand: "focused",
+    stand: "white",
     suqat_down: "helpless",
     thinking: "thinking",
     turn_back: "right",
@@ -2998,13 +2999,15 @@
 
   function normalizeRecordingEntry(entry) {
     if (typeof entry === "string") {
-      return { name: entry.trim(), source: "builtin", description: "" };
+      const name = entry.trim();
+      return { name, source: "builtin", description: "", expression: RECORDING_EXPRESSIONS[name] || "smiley" };
     }
-    if (!entry || typeof entry !== "object") return { name: "", source: "builtin", description: "" };
+    if (!entry || typeof entry !== "object") return { name: "", source: "builtin", description: "", expression: "" };
     const name = String(entry.name || "").trim();
     const source = String(entry.source || "builtin").trim() || "builtin";
     const description = String(entry.description || "").trim();
-    return { name, source, description };
+    const expression = String(entry.expression || RECORDING_EXPRESSIONS[name] || "smiley").trim();
+    return { name, source, description, expression };
   }
 
   function renderSkills(skills) {
@@ -3205,13 +3208,17 @@
   function renderRecordings(recordings) {
     if (Array.isArray(recordings)) {
       latestRecordings = recordings.map(normalizeRecordingEntry).filter((r) => r.name);
+      recordingExpressionByName.clear();
+      latestRecordings.forEach((recording) => {
+        recordingExpressionByName.set(recording.name, recording.expression || "smiley");
+      });
     }
     recordingGrid.innerHTML = "";
     const q = recordingQuery.trim().toLowerCase();
     const filtered = q
       ? latestRecordings.filter((recording) => {
           const name = recording.name;
-          const expr = getRecordingExpression(name) || "";
+          const expr = getRecordingExpression(recording) || "";
           const labelCn = recordingLabel(name);
           const exprCn = expressionLabel(expr);
           const description = recording.description || "";
@@ -3226,18 +3233,20 @@
       : latestRecordings;
     filtered.forEach((recording) => {
       const name = recording.name;
-      const expression = getRecordingExpression(name);
+      const expression = getRecordingExpression(recording);
       const labelCn = recordingLabel(name);
       const exprCn = expressionLabel(expression);
       const isUserRecording = recording.source === "user";
+      const sourceLabel = isUserRecording ? "我的录制" : "内置动作";
+      const expressionMeta = `表情 ${exprCn}`;
       const description = recording.description || "";
       const card = makeSkillCard({
         title: labelCn,
         meta: description
-          ? `${isUserRecording ? "我的录制" : "内置动作"} · ${description}`
-          : `${isUserRecording ? "我的录制" : "内置动作"} · ${exprCn}`,
+          ? `${sourceLabel} · ${expressionMeta} · ${description}`
+          : `${sourceLabel} · ${expressionMeta}`,
         tooltip: description
-          ? `播放录制动作：${labelCn}（${name}） · ${description}`
+          ? `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn} · ${description}`
           : `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn}`,
         onClick: () => invokeRecording(name),
       });
@@ -5926,8 +5935,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     return `r${reqCounter}_${Date.now().toString(36)}`;
   }
 
-  function getRecordingExpression(name) {
-    return RECORDING_EXPRESSIONS[name] || "smiley";
+  function getRecordingExpression(recordingOrName) {
+    if (recordingOrName && typeof recordingOrName === "object") {
+      const expression = String(recordingOrName.expression || "").trim();
+      if (expression) return expression;
+      return getRecordingExpression(recordingOrName.name);
+    }
+    const name = String(recordingOrName || "");
+    return recordingExpressionByName.get(name) || RECORDING_EXPRESSIONS[name] || "smiley";
   }
 
   function formatTime(date) {

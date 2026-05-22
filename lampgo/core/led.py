@@ -240,6 +240,9 @@ class LEDController:
                     ok = True
             self._remote_last_ok = ok
             if ok:
+                mark_healthy = getattr(manager, "mark_active_healthy", None)
+                if callable(mark_healthy):
+                    mark_healthy()
                 logger.info("led.remote_sent", payload=payload, base_url=base_url)
             else:
                 logger.warning(
@@ -248,8 +251,25 @@ class LEDController:
                     base_url=base_url,
                     status=resp.status_code,
                     body=resp.text[:200],
-                )
+            )
             return ok
+        except httpx.ReadTimeout as exc:
+            # The ESP32 often applies the UART/NeoPixel command before it gets
+            # around to sending the HTTP response.  Treat a read-timeout as an
+            # optimistic success so the UI/tool call does not report a false
+            # failure when the lamp face visibly changed.
+            self._remote_last_ok = True
+            mark_healthy = getattr(manager, "mark_active_healthy", None)
+            if callable(mark_healthy):
+                mark_healthy()
+            logger.warning(
+                "led.remote_ack_timeout_assumed_sent",
+                payload=payload,
+                base_url=base_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return True
         except Exception as exc:
             logger.warning(
                 "led.remote_send_failed",
