@@ -600,7 +600,8 @@
                       <span class="settings-field-label">火山 TTS 音色</span>
                       <select class="settings-input" data-cfg-input="voice.tts_voice" data-cfg-tts-voice>
                       </select>
-                      <span class="settings-field-hint">默认 <code>zh_female_vv_uranus_bigtts</code>；选择 Edge TTS 时这里会切换为 Edge 声音列表。</span>
+                      <input class="settings-input hidden" type="text" placeholder="输入火山音色 ID" title="按 Esc 返回音色列表" data-cfg-tts-voice-custom autocomplete="off">
+                      <span class="settings-field-hint">默认 <code>zh_female_vv_uranus_bigtts</code>；选择“自定义”后填写火山音色 ID，选择 Edge TTS 时这里会切换为 Edge 声音列表。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
                     </label>
                     <label class="settings-field" data-cfg-field="voice.tts_model">

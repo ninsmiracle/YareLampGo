@@ -112,13 +112,18 @@
   });
 
   const RECORDING_LABELS_CN = Object.freeze({
+    Stretch: "伸展",
     angry_jerk: "生气抽动",
     awkward_pause: "尴尬停顿",
+    bowing_head: "低头鞠躬",
     celebrate: "庆祝",
     confused: "困惑",
     curious: "好奇",
     dance: "跳舞",
+    dance1: "舞蹈一",
+    dance2: "舞蹈二",
     deep_think: "深思",
+    deep_thinking: "深度思考",
     dislike: "拒绝",
     dizzy_spin: "晕眩打转",
     doze_off: "打瞌睡",
@@ -128,8 +133,12 @@
     groove_bounce: "律动摇摆",
     happy_wiggle: "开心扭动",
     headshake: "摇头",
+    headshake1: "摇头",
     heartbreak: "心碎",
     idle: "待机",
+    lie_flat: "趴平",
+    look_ahead: "向前看",
+    look_around: "环顾四周",
     lookout: "眺望",
     mischief_peek: "调皮偷看",
     movebackward: "后退",
@@ -138,16 +147,23 @@
     nod_small: "轻点头",
     peep: "偷瞄",
     push: "推挤",
+    raise_head: "抬头",
     sad: "难过",
     sayhitoboss: "向老板问好",
     scanning: "扫描",
     shock: "震惊",
     shy: "害羞",
     sneeze: "打喷嚏",
+    stand: "站立",
     startle_recover: "受惊复原",
     stretch_yawn: "伸懒腰",
+    suqat_down: "蹲下",
+    thinking: "思考",
     tippy_taps: "踮脚轻踏",
+    turn_back: "回头",
+    upset: "沮丧",
     wake_up: "苏醒",
+    wave: "挥手",
     working: "工作中",
   });
 
@@ -155,7 +171,7 @@
     nod: { title: "点头", description: "上下点头，表达同意。" },
     headshake: { title: "摇头", description: "左右摇头，表达不同意。" },
     look_at: { title: "注视", description: "朝指定方向看过去。" },
-    idle_sway: { title: "待机摆动", description: "轻微摆动，呈现呼吸般的灵动感。" },
+    idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
     dance: { title: "跳舞", description: "简单的节奏舞蹈动作。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
@@ -3014,6 +3030,7 @@
   let userSkillQuery = "";
   let recordingQuery = "";
   let expressionQuery = "";
+  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway"]);
 
   function renderEmptyCell(grid, text) {
     const empty = document.createElement("div");
@@ -3027,6 +3044,16 @@
     el.textContent = shown === total ? String(total) : `${shown}/${total}`;
   }
 
+  function normalizeRecordingEntry(entry) {
+    if (typeof entry === "string") {
+      return { name: entry.trim(), source: "builtin" };
+    }
+    if (!entry || typeof entry !== "object") return { name: "", source: "builtin" };
+    const name = String(entry.name || "").trim();
+    const source = String(entry.source || "builtin").trim() || "builtin";
+    return { name, source };
+  }
+
   function renderSkills(skills) {
     if (Array.isArray(skills)) {
       // Split by provenance so the UI can show factory (locked) vs user
@@ -3036,7 +3063,9 @@
       const visible = skills.filter(
         (s) => !["estop", "play_recording"].includes(s.skill_id),
       );
-      latestSkills = visible.filter((s) => (s.source || "factory") === "factory");
+      latestSkills = visible.filter(
+        (s) => (s.source || "factory") === "factory" && FACTORY_SKILL_VISIBLE_IDS.has(s.skill_id),
+      );
       latestUserSkills = visible.filter((s) => s.source === "user");
     }
     renderFactorySkills();
@@ -3209,14 +3238,26 @@
       // Non-fatal: grid will catch up on the next websocket status tick.
       console.warn("refreshSkillsAndRecordings failed", err);
     }
+    try {
+      const resp = await fetch("/api/recordings", { cache: "no-store" });
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.ok && data.result && Array.isArray(data.result.recordings)) {
+        renderRecordings(data.result.recordings);
+      }
+    } catch (err) {
+      console.warn("refreshRecordings failed", err);
+    }
   }
 
   function renderRecordings(recordings) {
-    if (Array.isArray(recordings)) latestRecordings = recordings.slice();
+    if (Array.isArray(recordings)) {
+      latestRecordings = recordings.map(normalizeRecordingEntry).filter((r) => r.name);
+    }
     recordingGrid.innerHTML = "";
     const q = recordingQuery.trim().toLowerCase();
     const filtered = q
-      ? latestRecordings.filter((name) => {
+      ? latestRecordings.filter((recording) => {
+          const name = recording.name;
           const expr = getRecordingExpression(name) || "";
           const labelCn = recordingLabel(name);
           const exprCn = expressionLabel(expr);
@@ -3228,20 +3269,70 @@
           );
         })
       : latestRecordings;
-    filtered.forEach((name) => {
+    filtered.forEach((recording) => {
+      const name = recording.name;
       const expression = getRecordingExpression(name);
       const labelCn = recordingLabel(name);
       const exprCn = expressionLabel(expression);
+      const isUserRecording = recording.source === "user";
       const card = makeSkillCard({
         title: labelCn,
-        meta: `表情 · ${exprCn}`,
+        meta: `${isUserRecording ? "我的录制" : "内置动作"} · ${exprCn}`,
         tooltip: `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn}`,
         onClick: () => invokeRecording(name),
       });
+      if (isUserRecording) {
+        card.classList.add("skill-card--recording-user");
+        const del = document.createElement("button");
+        del.className = "skill-card-action skill-card-action--delete";
+        del.type = "button";
+        del.title = "删除这个录制动作";
+        del.textContent = "✕";
+        del.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          void deleteRecording(recording);
+        });
+        card.appendChild(del);
+      }
       recordingGrid.appendChild(card);
     });
     if (!filtered.length) renderEmptyCell(recordingGrid, q ? `无匹配「${q}」的录制动作` : "暂无录制动作");
     updateCount(recordingCountEl, filtered.length, latestRecordings.length);
+  }
+
+  async function deleteRecording(recording) {
+    const name = recording && recording.name ? recording.name : "";
+    if (!name) return;
+    const title = recordingLabel(name);
+    if (!window.confirm(`确认删除录制动作"${title}"（${name}）？此操作不可恢复。`)) {
+      return;
+    }
+    try {
+      const resp = await fetch("/api/recordings/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        window.alert(`删除失败：${data.error || resp.statusText}`);
+        return;
+      }
+      if (data.result && Array.isArray(data.result.recordings)) {
+        renderRecordings(data.result.recordings);
+      } else {
+        await refreshSkillsAndRecordings();
+      }
+      const removedAliases = data.result && Array.isArray(data.result.removed_aliases)
+        ? data.result.removed_aliases
+        : [];
+      addSystemMessage(removedAliases.length
+        ? `录制动作已删除：${title}（同时移除 ${removedAliases.length} 个别名）`
+        : `录制动作已删除：${title}`);
+    } catch (err) {
+      window.alert(`删除失败：${err && err.message ? err.message : err}`);
+    }
   }
 
   function renderExpressions(expressions) {
@@ -7529,6 +7620,21 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       // the first loadCfgAll() response.
       syncTtsModelEnabled();
     }
+    const ttsVoiceSel = document.querySelector("[data-cfg-tts-voice]");
+    if (ttsVoiceSel && !ttsVoiceSel._ttsVoiceBound) {
+      ttsVoiceSel._ttsVoiceBound = true;
+      ttsVoiceSel.addEventListener("change", syncTtsVoiceCustomInput);
+    }
+    const ttsVoiceCustomInput = document.querySelector("[data-cfg-tts-voice-custom]");
+    if (ttsVoiceCustomInput && !ttsVoiceCustomInput._ttsVoiceCustomBound) {
+      ttsVoiceCustomInput._ttsVoiceCustomBound = true;
+      ttsVoiceCustomInput.addEventListener("blur", restoreTtsVoiceSelectIfCustomEmpty);
+      ttsVoiceCustomInput.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Escape") return;
+        ev.preventDefault();
+        restoreTtsVoiceSelectFromCustom();
+      });
+    }
     const btnDismiss = document.getElementById("btn-cfg-restart-dismiss");
     if (btnDismiss && !btnDismiss._bound) {
       btnDismiss._bound = true;
@@ -7711,11 +7817,17 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
 
   // Voices offered per TTS provider. Volcengine supports many more voices; we
   // surface the default BigTTS voice plus keep custom stored values.
+  const TTS_VOICE_CUSTOM_VALUE = "__custom__";
   const TTS_VOICE_OPTIONS = {
     volcengine: [
-      { value: "zh_female_vv_uranus_bigtts", label: "zh_female_vv_uranus_bigtts（默认）" },
-      { value: "zh_female_cancan_mars_bigtts", label: "zh_female_cancan_mars_bigtts" },
-      { value: "zh_male_M392_conversation_wvae_bigtts", label: "zh_male_M392_conversation_wvae_bigtts" },
+      { value: "zh_male_lubanqihao_mars_bigtts", label: "搞怪（鲁班七号）：zh_male_lubanqihao_mars_bigtts" },
+      { value: "zh_male_dongmanhaimian_mars_bigtts", label: "海绵（亮嗓萌仔）：zh_male_dongmanhaimian_mars_bigtts" },
+      { value: "zh_female_jitangnv_uranus_bigtts", label: "鸡汤女 2.0：zh_female_jitangnv_uranus_bigtts" },
+      { value: "zh_female_vv_uranus_bigtts", label: "vivi：zh_female_vv_uranus_bigtts（默认）" },
+      { value: "zh_male_taocheng_uranus_bigtts", label: "小天：zh_male_taocheng_uranus_bigtts" },
+      { value: "saturn_zh_female_qingyingduoduo_cs_tob", label: "朵朵：saturn_zh_female_qingyingduoduo_cs_tob" },
+      { value: "zh_male_wennuanahu_moon_bigtts", label: "阿虎：zh_male_wennuanahu_moon_bigtts" },
+      { value: TTS_VOICE_CUSTOM_VALUE, label: "自定义…" },
     ],
     "edge-tts": [
       { value: "zh-CN-XiaoxiaoNeural", label: "zh-CN-XiaoxiaoNeural（晓晓 · 中文女声）" },
@@ -7753,9 +7865,40 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     if (fieldWrap) fieldWrap.classList.toggle("is-disabled", !isVolcengine);
   }
 
+  function syncTtsVoiceCustomInput() {
+    const voiceSel = document.querySelector("[data-cfg-tts-voice]");
+    const customInput = document.querySelector("[data-cfg-tts-voice-custom]");
+    if (!voiceSel || !customInput) return;
+    const isCustom = voiceSel.value === TTS_VOICE_CUSTOM_VALUE;
+    voiceSel.classList.toggle("hidden", isCustom);
+    customInput.classList.toggle("hidden", !isCustom);
+    customInput.disabled = voiceSel.disabled || !isCustom;
+    if (isCustom) customInput.focus();
+  }
+
+  function restoreTtsVoiceSelectIfCustomEmpty() {
+    const voiceSel = document.querySelector("[data-cfg-tts-voice]");
+    const customInput = document.querySelector("[data-cfg-tts-voice-custom]");
+    if (!voiceSel || !customInput) return;
+    if (voiceSel.value !== TTS_VOICE_CUSTOM_VALUE || customInput.value.trim()) return;
+    const fallback = Array.from(voiceSel.options).find((opt) => opt.value !== TTS_VOICE_CUSTOM_VALUE);
+    voiceSel.value = fallback ? fallback.value : "";
+    syncTtsVoiceCustomInput();
+  }
+
+  function restoreTtsVoiceSelectFromCustom() {
+    const voiceSel = document.querySelector("[data-cfg-tts-voice]");
+    const customInput = document.querySelector("[data-cfg-tts-voice-custom]");
+    if (!voiceSel || !customInput || voiceSel.value !== TTS_VOICE_CUSTOM_VALUE) return;
+    customInput.value = "";
+    restoreTtsVoiceSelectIfCustomEmpty();
+    voiceSel.focus();
+  }
+
   function repopulateTtsVoiceSelect(desiredValue) {
     const providerSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
     const voiceSel = document.querySelector("[data-cfg-tts-voice]");
+    const customInput = document.querySelector("[data-cfg-tts-voice-custom]");
     if (!voiceSel) return;
     let provider = (providerSel && providerSel.value) || "volcengine";
     if (provider === "mimo") provider = "volcengine";
@@ -7768,13 +7911,22 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       el.textContent = opt.label;
       voiceSel.appendChild(el);
     });
-    if (keep && options.every((o) => o.value !== keep)) {
+    const canUseCustom = options.some((o) => o.value === TTS_VOICE_CUSTOM_VALUE);
+    const isKnown = options.some((o) => o.value === keep);
+    if (keep && !isKnown && canUseCustom) {
+      if (customInput) customInput.value = keep;
+    } else if (keep && !isKnown) {
       const el = document.createElement("option");
       el.value = keep;
       el.textContent = `${keep}（自定义，保留原值）`;
       voiceSel.appendChild(el);
+    } else if (!keep && customInput) {
+      customInput.value = "";
     }
-    voiceSel.value = keep || (options[0] && options[0].value) || "";
+    voiceSel.value = keep && !isKnown && canUseCustom
+      ? TTS_VOICE_CUSTOM_VALUE
+      : (keep || (options[0] && options[0].value) || "");
+    syncTtsVoiceCustomInput();
   }
 
   function coerceCfgInputValue(inputEl, rawValue) {
@@ -7793,6 +7945,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       const v = inputEl.value.trim();
       if (v === "") return null;
       return Number(v);
+    }
+    if (inputEl.matches("[data-cfg-tts-voice]") && inputEl.value === TTS_VOICE_CUSTOM_VALUE) {
+      const customInput = document.querySelector("[data-cfg-tts-voice-custom]");
+      return customInput ? customInput.value.trim() : "";
     }
     // textarea or text input
     if (inputEl.tagName === "TEXTAREA") return inputEl.value;
@@ -7831,6 +7987,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         hint.classList.add("hidden");
       }
     }
+    if (dotted === "voice.tts_voice") syncTtsVoiceCustomInput();
   }
 
   async function loadCfgAll() {
@@ -7982,6 +8139,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           Object.entries(refreshed).forEach(([dotted, cell]) => {
             applyCfgFieldValue(dotted, cell);
           });
+          if (section === "voice" && refreshed["voice.tts_voice"]) {
+            repopulateTtsVoiceSelect(refreshed["voice.tts_voice"].value || "");
+          }
         }
         if (needs_restart && needs_restart.length) needsRestart.push(...needs_restart);
         const motorReload = hotReload && hotReload["device.motor_port"];
