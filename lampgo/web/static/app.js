@@ -113,6 +113,7 @@
     cool: "耍酷",
     focused: "专注",
     wink: "眨眼",
+    myu7gt: "YU7 GT",
   });
 
   const RECORDING_LABELS_CN = Object.freeze({

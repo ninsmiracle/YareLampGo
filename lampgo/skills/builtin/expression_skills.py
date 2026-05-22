@@ -11,7 +11,7 @@ from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
 class SetExpressionSkill(Skill):
     skill_id = "set_expression"
-    description = "Set an LED expression (e.g. smiley, heart, angry)."
+    description = "Set an LED expression (e.g. smiley, heart, angry, myu7gt)."
     parameters = {
         "expression": ParameterSpec(
             name="expression",

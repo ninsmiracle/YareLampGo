@@ -1,7 +1,7 @@
 """LEDController — LED expression protocol.
 
 Protocol (from the ESP32 NeoPixel firmware):
-  - "m<N>\n"  — set mode N (0-32)
+  - "m<N>\n"  — set mode N (0-33)
   - "b<N>\n"  — set brightness N (1-255)
 
 The controller can talk directly to a local USB serial LED controller, or
@@ -53,10 +53,18 @@ LED_EXPRESSION_CATALOG: tuple[dict[str, Any], ...] = (
     {"mode": 30, "name": "cool", "label": "耍酷", "animated": False},
     {"mode": 31, "name": "focused", "label": "专注", "animated": True},
     {"mode": 32, "name": "wink", "label": "眨眼", "animated": True},
+    {"mode": 33, "name": "myu7gt", "label": "YU7 GT", "animated": False},
 )
 
 LED_EXPRESSIONS: dict[str, int] = {str(item["name"]): int(item["mode"]) for item in LED_EXPRESSION_CATALOG}
 LED_MODE_NAMES: dict[int, str] = {int(item["mode"]): str(item["name"]) for item in LED_EXPRESSION_CATALOG}
+LED_MAX_MODE = max(LED_MODE_NAMES)
+LED_EXPRESSION_ALIASES: dict[str, str] = {
+    "myu7": "myu7gt",
+    "mgt": "myu7gt",
+    "yu7gt": "myu7gt",
+    "yu7": "myu7gt",
+}
 
 
 def _normalize_mode_key(value: str) -> str:
@@ -67,6 +75,8 @@ LED_NAME_INDEX: dict[str, str] = {}
 for _item in LED_EXPRESSION_CATALOG:
     _name = str(_item["name"])
     LED_NAME_INDEX[_normalize_mode_key(_name)] = _name
+for _alias, _canonical in LED_EXPRESSION_ALIASES.items():
+    LED_NAME_INDEX[_normalize_mode_key(_alias)] = _canonical
 
 
 def canonical_expression_name(value: int | str) -> str | None:
@@ -172,7 +182,7 @@ class LEDController:
                 return False
             mode = resolved
 
-        if not 0 <= mode <= 32:
+        if not 0 <= mode <= LED_MAX_MODE:
             logger.warning("led.invalid_mode", mode=mode)
             return False
 
