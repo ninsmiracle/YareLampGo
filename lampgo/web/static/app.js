@@ -2081,7 +2081,7 @@
     const espHost = (esp && esp.host) || "";
     const items = [
       { id: "", label: "系统默认麦克风", meta: "跟随浏览器/操作系统设置", group: "browser" },
-      ...(espVisible ? [{ id: "esp32", label: "ESP32 无线麦克风", meta: espOnline ? `${espHost} · 在线` : "离线", group: "esp32" }] : []),
+      ...(espVisible ? [{ id: "esp32", label: esp32PeripheralLabel("mic", esp), meta: espOnline ? `${espHost} · 在线` : "离线", group: "esp32" }] : []),
       ...micDevicesCache.map((d, i) => ({
         id: d.deviceId,
         label: d.label || `麦克风 ${d.deviceId.slice(0, 8) || i + 1}`,
@@ -2124,6 +2124,16 @@
       .trim();
   }
 
+  function esp32DeviceDisplayId(esp) {
+    const rawId = String((esp && esp.device_id) || "").trim();
+    if (!rawId) return "lampgo";
+    return rawId.toLowerCase().startsWith("lampgo-") ? rawId : `lampgo-${rawId}`;
+  }
+
+  function esp32PeripheralLabel(kind, esp) {
+    return `${esp32DeviceDisplayId(esp)} ${kind === "mic" ? "麦克风" : "摄像头"}`;
+  }
+
   function serverMicForBrowserChoice(id) {
     if (!id) return "";
     if (id === "esp32") return "esp32";
@@ -2157,7 +2167,7 @@
     window.dispatchEvent(new CustomEvent("lampgo:mic-selected", { detail: { deviceId: preferredMicId } }));
     syncServerMicFromTopbar(preferredMicId);
     if (id === "esp32") {
-      if (chipMic) chipMic.title = "麦克风：ESP32 无线麦克风";
+      if (chipMic) chipMic.title = `麦克风：${esp32PeripheralLabel("mic", cameraCache.esp32)}`;
     } else {
       const selected = micDevicesCache.find((d) => d.deviceId === id);
       if (chipMic) chipMic.title = selected && selected.label ? `麦克风：${selected.label}` : "系统默认麦克风";
@@ -2213,9 +2223,9 @@
     if (espVisible && esp32.enabled !== false) {
       const status = esp32.online ? "在线" : "离线";
       const host = esp32.host || "自动发现";
-      items.push({ id: "esp32", label: "ESP32 无线摄像头", meta: `${host} · ${status}`, group: "esp32" });
+      items.push({ id: "esp32", label: esp32PeripheralLabel("camera", esp32), meta: `${host} · ${status}`, group: "esp32" });
     } else if (!esp32 || (!esp32.hidden && !esp32.needs_firmware_update)) {
-      items.push({ id: "esp32", label: "ESP32 无线摄像头", meta: "未启用 · 点击启用", group: "esp32" });
+      items.push({ id: "esp32", label: esp32PeripheralLabel("camera", esp32), meta: "未启用 · 点击启用", group: "esp32" });
     }
     cameras.forEach((c) => {
       items.push({
@@ -2244,7 +2254,7 @@
     cameraCache.active = port || "";
     send({ type: "set_camera", port: port || "", request_id: `cam_set_${Date.now()}` });
     if (chipCamera) {
-      if (port === "esp32") chipCamera.title = "ESP32 无线摄像头";
+      if (port === "esp32") chipCamera.title = esp32PeripheralLabel("camera", cameraCache.esp32);
       else chipCamera.title = port ? `摄像头 port = ${port}` : "摄像头已关闭";
     }
     closeCameraPopover();
@@ -2373,7 +2383,7 @@
         if (chipMic && msg.result.active !== undefined) {
           const active = String(msg.result.active || "");
           const matched = detectedDevices.mics.find((m) => String(m.index) === active);
-          if (active === "esp32") chipMic.title = "麦克风：ESP32 无线麦克风（通话已同步）";
+          if (active === "esp32") chipMic.title = `麦克风：${esp32PeripheralLabel("mic", cameraCache.esp32)}（通话已同步）`;
           else if (matched && matched.name) chipMic.title = `麦克风：${matched.name}（通话已同步）`;
           else if (!active) chipMic.title = "系统默认麦克风（通话已同步）";
         }
@@ -5938,7 +5948,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         micSelect.innerHTML = '<option value="">默认麦克风</option>';
         const espOpt = document.createElement("option");
         espOpt.value = "esp32";
-        espOpt.textContent = "ESP32 无线麦克风";
+        espOpt.textContent = esp32PeripheralLabel("mic", cameraCache.esp32);
         micSelect.appendChild(espOpt);
         mics.forEach((d) => {
           const opt = document.createElement("option");
@@ -7634,8 +7644,8 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const espStatus = esp && esp.online ? "在线" : "离线";
     const espHost = (esp && esp.host) || "";
     const espLabel = espHost
-      ? `ESP32 无线摄像头 (${espHost} · ${espStatus})`
-      : `ESP32 无线摄像头 (${espStatus})`;
+      ? `${esp32PeripheralLabel("camera", esp)} (${espHost} · ${espStatus})`
+      : `${esp32PeripheralLabel("camera", esp)} (${espStatus})`;
     addOpt("esp32", espLabel);
     const seen = new Set(["", "esp32"]);
     detectedDevices.cameras.forEach((cam) => {
@@ -7666,8 +7676,8 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const espStatus = esp && esp.online ? "在线" : "离线";
     const espHost = (esp && esp.host) || "";
     const espLabel = espHost
-      ? `ESP32 无线麦克风 (${espHost} · ${espStatus})`
-      : `ESP32 无线麦克风 (${espStatus})`;
+      ? `${esp32PeripheralLabel("mic", esp)} (${espHost} · ${espStatus})`
+      : `${esp32PeripheralLabel("mic", esp)} (${espStatus})`;
     addOpt("esp32", espLabel);
     const seen = new Set(["", "esp32"]);
     detectedDevices.mics.forEach((m) => {

@@ -161,6 +161,12 @@ try:
     from livekit.agents.types import NOT_GIVEN as _LAMPGO_NOT_GIVEN
 
     _orig_agent_session_init = _LampgoAgentSession.__init__
+    _LAMPGO_ALLOW_INTERRUPTIONS = os.environ.get("LAMPGO_LIVEKIT_ALLOW_INTERRUPTIONS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
     def _lampgo_agent_session_init(self, *args, **kwargs):
         # Enable RTC barge-in by default: when the user speaks over the
@@ -168,7 +174,7 @@ try:
         # listening again. Keep a small word threshold so speaker echo or a
         # single noise burst does not instantly cancel playback.
         if "turn_handling" not in kwargs or kwargs.get("turn_handling") is _LAMPGO_NOT_GIVEN:
-            kwargs.setdefault("allow_interruptions", True)
+            kwargs.setdefault("allow_interruptions", _LAMPGO_ALLOW_INTERRUPTIONS)
             kwargs.setdefault("min_interruption_words", 3)
             kwargs["aec_warmup_duration"] = max(float(kwargs.get("aec_warmup_duration", 3.0) or 0.0), 8.0)
         return _orig_agent_session_init(self, *args, **kwargs)
@@ -555,6 +561,7 @@ class AgentSDKManager:
         env["PYTHONPATH"] = (
             f"{self._patch_dir}{os.pathsep}{existing_pp}" if existing_pp else str(self._patch_dir)
         )
+        env["LAMPGO_LIVEKIT_ALLOW_INTERRUPTIONS"] = "1" if self._voice.livekit_allow_interruptions else "0"
 
         self._ready_event.clear()
         try:
