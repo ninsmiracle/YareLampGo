@@ -38,7 +38,7 @@ uv run lampgo move elbow_pitch=-40 wrist_pitch=20 --velocity 90
 
 ```bash
 uv run lampgo invoke set_expression expression=heart
-uv run lampgo invoke set_expression expression=happy
+uv run lampgo invoke set_expression expression=smiley
 uv run lampgo invoke set_expression expression=thinking
 ```
 

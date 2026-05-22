@@ -11,8 +11,66 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-
 MAX_RECORDING_DESCRIPTION_CHARS = 500
+LED_EXPRESSION_KEYS = (
+    "off",
+    "red",
+    "green",
+    "blue",
+    "white",
+    "theater",
+    "theaterred",
+    "theatergreen",
+    "theaterblue",
+    "rainbow",
+    "rainbowchase",
+    "left",
+    "right",
+    "up",
+    "down",
+    "check",
+    "cross",
+    "exclaim",
+    "question",
+    "star",
+    "music",
+    "smiley",
+    "sad",
+    "heart",
+    "surprised",
+    "blush",
+    "angry",
+    "thinking",
+    "sleep",
+    "helpless",
+    "cool",
+    "focused",
+    "wink",
+)
+RECORDING_EXPRESSION_HINTS: dict[str, str] = {
+    "Stretch": "smiley",
+    "bowing_head": "smiley",
+    "dance1": "music",
+    "dance2": "music",
+    "deep_thinking": "focused",
+    "excited": "smiley",
+    "headshake1": "cross",
+    "lie_flat": "sleep",
+    "look_ahead": "focused",
+    "look_around": "question",
+    "nod": "check",
+    "peep": "question",
+    "raise_head": "surprised",
+    "shy": "blush",
+    "sneeze": "exclaim",
+    "stand": "focused",
+    "suqat_down": "helpless",
+    "thinking": "thinking",
+    "turn_back": "right",
+    "upset": "sad",
+    "wake_up": "surprised",
+    "wave": "smiley",
+}
 
 
 def normalize_recording_description(value: Any) -> str:
@@ -70,16 +128,24 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
 
 def build_recording_actions_prompt(recordings_dir: Path) -> str:
     catalog = list_recording_catalog(recordings_dir)
-    if not catalog:
-        return ""
     lines = [
+        "LED expression keys:",
+        f"- Use these exact mode names in tool calls: {', '.join(LED_EXPRESSION_KEYS)}.",
         "Recorded action library (dynamic; loaded from CSV/TXT files):",
         "- Use `play_recording` with the exact `name` when the user's request, camera scene, emotion, or conversation context matches an action description.",
+        "- If a listed recording includes an `expression=...` hint, prefer that expression before or alongside the action unless the user explicitly asked for a different mood.",
         "- Do not invent recording names. If no listed action fits, use another tool or speak instead.",
     ]
+    if not catalog:
+        lines.append("- No recordings are currently available.")
+        return "\n".join(lines) + "\n\n"
     for item in catalog:
         name = item["name"]
         source = "我的录制" if item.get("source") == "user" else "内置动作"
         desc = item.get("description") or "暂无动作说明；仅在用户明确点名该动作名时使用。"
-        lines.append(f"- name={name} | source={source} | prompt={desc}")
+        expression = RECORDING_EXPRESSION_HINTS.get(name)
+        if expression:
+            lines.append(f"- name={name} | source={source} | expression={expression} | prompt={desc}")
+        else:
+            lines.append(f"- name={name} | source={source} | prompt={desc}")
     return "\n".join(lines) + "\n\n"

@@ -1,40 +1,47 @@
-# LED Expression Modes (30 modes)
+# LED Expression Keys (33 modes)
 
-| Mode # | Name | Aliases | Description |
-|--------|------|---------|-------------|
-| 0 | off | 关闭 | All LEDs off |
-| 1 | red | 红色 | Solid red |
-| 2 | green | 绿色 | Solid green |
-| 3 | blue | 蓝色 | Solid blue |
-| 4 | white | 白色, 照明 | Solid white (desk light) |
-| 5 | theater | 剧场 | Theater chase effect |
-| 6 | theaterred | redtheater, 红色剧场 | Red theater chase effect |
-| 7 | theatergreen | greentheater, 绿色剧场 | Green theater chase effect |
-| 8 | theaterblue | bluetheater, 蓝色剧场 | Blue theater chase effect |
-| 9 | rainbow | 彩虹 | Rainbow cycle |
-| 10 | smiley | smile, happy, 笑脸, 开心 | Smiley face |
-| 11 | crying | 哭脸, 难过 | Crying face |
-| 12 | left | 左箭头 | Left arrow |
-| 13 | right | 右箭头 | Right arrow |
-| 14 | check | 对勾, 同意 | Checkmark |
-| 15 | cross | 叉号, 不同意 | Cross/X mark |
-| 16 | music | 音乐 | Music note |
-| 17 | blush | 害羞, 脸红 | Blushing face |
-| 18 | angry | 生气, 愤怒 | Angry face |
-| 19 | surprised | 惊讶, 震惊 | Surprised face |
-| 20 | exclaim | 感叹号 | Exclamation mark |
-| 21 | question | 问号, 困惑 | Question mark |
-| 22 | star | 星星, 优秀 | Star |
-| 23 | up | 上箭头 | Up arrow |
-| 24 | down | 下箭头 | Down arrow |
-| 25 | sleep | 睡觉, 休眠 | Sleep/Zzz |
-| 26 | thinking | 思考 | Thinking dots |
-| 27 | heart | love, 爱心, 心动 | Heart |
-| 28 | heartbreak | broken, 心碎 | Broken heart |
-| 29 | helpless | 无奈 | Helpless/sweat |
+Use the exact `Name` column in OpenClaw tool calls.
+
+| Mode # | Name | 中文含义 | Description |
+|--------|------|----------|-------------|
+| 0 | off | 熄灭 | All LEDs off |
+| 1 | red | 红色逐圈 | Red ring fill |
+| 2 | green | 绿色逐圈 | Green ring fill |
+| 3 | blue | 蓝色逐圈 | Blue ring fill |
+| 4 | white | 白色逐圈 | White ring fill / desk light |
+| 5 | theater | 剧场追逐 | Theater chase (white) |
+| 6 | theaterred | 红色剧场 | Theater chase (red) |
+| 7 | theatergreen | 绿色剧场 | Theater chase (green) |
+| 8 | theaterblue | 蓝色剧场 | Theater chase (blue) |
+| 9 | rainbow | 彩虹渐变 | Rainbow gradient |
+| 10 | rainbowchase | 彩虹追逐 | Rainbow theater chase |
+| 11 | left | 左箭头 | Left arrow |
+| 12 | right | 右箭头 | Right arrow |
+| 13 | up | 上箭头 | Up arrow |
+| 14 | down | 下箭头 | Down arrow |
+| 15 | check | 对号 | Check mark |
+| 16 | cross | 叉号 | Cross / X mark |
+| 17 | exclaim | 感叹号 | Exclamation mark |
+| 18 | question | 问号 | Question mark |
+| 19 | star | 星星 | Star |
+| 20 | music | 音符跳动 | Jumping music note |
+| 21 | smiley | 开心 | Happy face |
+| 22 | sad | 伤心 | Sad face |
+| 23 | heart | 心动 | Pulsing heart |
+| 24 | surprised | 惊讶 | Surprised face |
+| 25 | blush | 害羞 | Blushing face |
+| 26 | angry | 生气 | Angry face |
+| 27 | thinking | 思考 | Thinking animation |
+| 28 | sleep | 睡觉 | Sleep / Zzz animation |
+| 29 | helpless | 无奈 | Helpless / sweat animation |
+| 30 | cool | 耍酷 | Cool face |
+| 31 | focused | 专注 | Focused face |
+| 32 | wink | 眨眼 | One-eye wink |
 
 ## Invocation
 
 ```bash
 lampgo invoke set_expression mode=smiley
+lampgo invoke set_expression mode=focused
+lampgo invoke set_expression mode=wink
 ```
