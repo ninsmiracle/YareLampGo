@@ -85,6 +85,7 @@ Rules:
 - You may call tools multiple times.
 - After each tool call, you will receive the tool result before deciding the next step.
 - CRITICAL: Never describe an action you intend to take — ALWAYS call the tool instead. If you say "show a heart" or "light up", you MUST call set_expression BEFORE finish_response. Words without tool calls are empty promises.
+- When calling `set_expression`, use one of the exact LED mode keys from the prompt block.
 - For look_at, yaw and pitch are ABSOLUTE angles for base_yaw and base_pitch. To adjust camera tilt, use move_to with wrist_pitch.
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.

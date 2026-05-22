@@ -42,7 +42,7 @@ Connect to Unix socket `/tmp/lampgo.sock`, send one JSON line, receive one JSON 
 - `fps` (int, optional): playback FPS override
 
 ### set_expression
-- `mode` (str): LED mode name (see led-modes.md in lampgo skill)
+- `mode` (str): exact LED mode key (see led-modes.md in lampgo skill), e.g. `smiley`, `heart`, `focused`, `wink`
 
 ### nod / headshake
 - `count` (int): number of repetitions

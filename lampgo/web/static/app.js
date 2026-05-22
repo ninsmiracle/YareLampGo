@@ -81,91 +81,63 @@
 
   const EXPRESSION_LABELS_CN = Object.freeze({
     off: "熄灭",
-    red: "红色",
-    green: "绿色",
-    blue: "蓝色",
-    white: "白色",
-    theater: "剧场灯效",
+    red: "红色逐圈",
+    green: "绿色逐圈",
+    blue: "蓝色逐圈",
+    white: "白色逐圈",
+    theater: "剧场追逐",
     theaterred: "红色剧场",
     theatergreen: "绿色剧场",
     theaterblue: "蓝色剧场",
-    rainbow: "彩虹",
-    smiley: "笑脸",
-    crying: "哭脸",
-    left: "向左",
-    right: "向右",
-    check: "对勾",
+    rainbow: "彩虹渐变",
+    rainbowchase: "彩虹追逐",
+    smiley: "开心",
+    sad: "伤心",
+    left: "左箭头",
+    right: "右箭头",
+    check: "对号",
     cross: "叉号",
-    music: "音符",
-    blush: "脸红",
+    music: "音符跳动",
+    blush: "害羞",
     angry: "生气",
     surprised: "惊讶",
     exclaim: "感叹号",
     question: "问号",
     star: "星星",
-    up: "向上",
-    down: "向下",
-    sleep: "睡眠",
+    up: "上箭头",
+    down: "下箭头",
+    sleep: "睡觉",
     thinking: "思考",
-    heart: "爱心",
-    heartbreak: "心碎",
+    heart: "心动",
     helpless: "无奈",
+    cool: "耍酷",
+    focused: "专注",
+    wink: "眨眼",
   });
 
   const RECORDING_LABELS_CN = Object.freeze({
     Stretch: "伸展",
-    angry_jerk: "生气抽动",
-    awkward_pause: "尴尬停顿",
     bowing_head: "低头鞠躬",
-    celebrate: "庆祝",
-    confused: "困惑",
-    curious: "好奇",
-    dance: "跳舞",
     dance1: "舞蹈一",
     dance2: "舞蹈二",
-    deep_think: "深思",
     deep_thinking: "深度思考",
-    dislike: "拒绝",
-    dizzy_spin: "晕眩打转",
-    doze_off: "打瞌睡",
-    dramatic_faint: "夸张倒下",
     excited: "兴奋",
-    flirty_wink: "俏皮眨眼",
-    groove_bounce: "律动摇摆",
-    happy_wiggle: "开心扭动",
-    headshake: "摇头",
     headshake1: "摇头",
-    heartbreak: "心碎",
-    idle: "待机",
     lie_flat: "趴平",
     look_ahead: "向前看",
     look_around: "环顾四周",
-    lookout: "眺望",
-    mischief_peek: "调皮偷看",
-    movebackward: "后退",
-    moveforward: "前进",
     nod: "点头",
-    nod_small: "轻点头",
     peep: "偷瞄",
-    push: "推挤",
     raise_head: "抬头",
-    sad: "难过",
-    sayhitoboss: "向老板问好",
-    scanning: "扫描",
-    shock: "震惊",
     shy: "害羞",
     sneeze: "打喷嚏",
     stand: "站立",
-    startle_recover: "受惊复原",
-    stretch_yawn: "伸懒腰",
     suqat_down: "蹲下",
     thinking: "思考",
-    tippy_taps: "踮脚轻踏",
     turn_back: "回头",
     upset: "沮丧",
     wake_up: "苏醒",
     wave: "挥手",
-    working: "工作中",
   });
 
   const SKILL_LABELS_CN = Object.freeze({
@@ -204,7 +176,6 @@
             name,
             mode: null,
             label: EXPRESSION_LABELS_CN[name] || name,
-            aliases: [],
             animated: false,
           });
         }
@@ -216,14 +187,10 @@
       if (!name) return;
       const modeRaw = Number(entry.mode);
       const mode = Number.isFinite(modeRaw) ? modeRaw : null;
-      const aliases = Array.isArray(entry.aliases)
-        ? entry.aliases.map((alias) => String(alias || "").trim()).filter(Boolean)
-        : [];
       expressionMetaByName.set(name, {
         name,
         mode,
         label: String(entry.label || EXPRESSION_LABELS_CN[name] || name),
-        aliases,
         animated: !!entry.animated,
       });
       names.push(name);
@@ -244,43 +211,28 @@
   }
 
   const RECORDING_EXPRESSIONS = Object.freeze({
-    angry_jerk: "angry",
-    awkward_pause: "helpless",
-    celebrate: "star",
-    confused: "question",
-    curious: "question",
-    dance: "music",
-    deep_think: "thinking",
-    dislike: "cross",
-    dizzy_spin: "rainbow",
-    doze_off: "sleep",
-    dramatic_faint: "helpless",
-    excited: "star",
-    flirty_wink: "heart",
-    groove_bounce: "music",
-    happy_wiggle: "smiley",
-    headshake: "cross",
-    heartbreak: "heartbreak",
-    idle: "white",
-    lookout: "right",
-    mischief_peek: "blush",
-    movebackward: "down",
-    moveforward: "up",
+    Stretch: "smiley",
+    bowing_head: "smiley",
+    dance1: "music",
+    dance2: "music",
+    deep_thinking: "focused",
+    excited: "smiley",
+    headshake1: "cross",
+    lie_flat: "sleep",
+    look_ahead: "focused",
+    look_around: "question",
     nod: "check",
-    nod_small: "check",
-    peep: "left",
-    push: "exclaim",
-    sad: "crying",
-    sayhitoboss: "smiley",
-    scanning: "question",
-    shock: "surprised",
+    peep: "question",
+    raise_head: "surprised",
     shy: "blush",
     sneeze: "exclaim",
-    startle_recover: "surprised",
-    stretch_yawn: "sleep",
-    tippy_taps: "music",
+    stand: "focused",
+    suqat_down: "helpless",
+    thinking: "thinking",
+    turn_back: "right",
+    upset: "sad",
     wake_up: "surprised",
-    working: "thinking",
+    wave: "smiley",
   });
 
   const PLAYBACK_MODE_KEY = "lampgo.playbackMode";
@@ -3351,11 +3303,9 @@
       ? latestExpressions.filter((name) => {
           const meta = expressionMeta(name);
           const labelCn = expressionLabel(name);
-          const aliases = meta && Array.isArray(meta.aliases) ? meta.aliases.join(" ") : "";
           return (
             name.toLowerCase().includes(q) ||
-            labelCn.includes(q) ||
-            aliases.toLowerCase().includes(q)
+            labelCn.includes(q)
           );
         })
       : latestExpressions;
@@ -3365,12 +3315,10 @@
       const metaParts = ["LED 表情"];
       if (meta && meta.mode !== null && meta.mode !== undefined) metaParts.push(`m${meta.mode}`);
       if (meta) metaParts.push(meta.animated ? "动态" : "静态");
-      const aliases = meta && Array.isArray(meta.aliases) ? meta.aliases : [];
-      const aliasText = aliases.length ? `\n别名：${aliases.join("、")}` : "";
       const card = makeSkillCard({
         title: labelCn,
         meta: metaParts.join(" · "),
-        tooltip: `切换灯光表情：${labelCn}（${name}）${aliasText}`,
+        tooltip: `切换灯光表情：${labelCn}（${name}）`,
         onClick: () => invokeExpression(name),
       });
       expressionGrid.appendChild(card);

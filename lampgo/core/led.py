@@ -1,7 +1,7 @@
 """LEDController — LED expression protocol.
 
-Protocol (from legacy lelamp_led.py / ESP32 NeoPixel firmware):
-  - "m<N>\n"  — set mode N (0-29)
+Protocol (from the ESP32 NeoPixel firmware):
+  - "m<N>\n"  — set mode N (0-32)
   - "b<N>\n"  — set brightness N (1-255)
 
 The controller can talk directly to a local USB serial LED controller, or
@@ -20,36 +20,39 @@ from lampgo.core.config import LEDConfig
 logger = structlog.get_logger(__name__)
 
 LED_EXPRESSION_CATALOG: tuple[dict[str, Any], ...] = (
-    {"mode": 0, "name": "off", "label": "熄灭", "aliases": ("black", "关闭"), "animated": False},
-    {"mode": 1, "name": "red", "label": "红色", "aliases": ("红色",), "animated": True},
-    {"mode": 2, "name": "green", "label": "绿色", "aliases": ("绿色",), "animated": True},
-    {"mode": 3, "name": "blue", "label": "蓝色", "aliases": ("蓝色",), "animated": True},
-    {"mode": 4, "name": "white", "label": "白色", "aliases": ("照明", "白色"), "animated": True},
-    {"mode": 5, "name": "theater", "label": "剧场灯效", "aliases": ("剧场",), "animated": True},
-    {"mode": 6, "name": "theaterred", "label": "红色剧场", "aliases": ("redtheater", "红色剧场"), "animated": True},
-    {"mode": 7, "name": "theatergreen", "label": "绿色剧场", "aliases": ("greentheater", "绿色剧场"), "animated": True},
-    {"mode": 8, "name": "theaterblue", "label": "蓝色剧场", "aliases": ("bluetheater", "蓝色剧场"), "animated": True},
-    {"mode": 9, "name": "rainbow", "label": "彩虹", "aliases": ("彩虹",), "animated": True},
-    {"mode": 10, "name": "smiley", "label": "笑脸", "aliases": ("smile", "happy", "开心", "笑脸"), "animated": False},
-    {"mode": 11, "name": "crying", "label": "哭脸", "aliases": ("cry", "sad", "难过", "哭脸"), "animated": False},
-    {"mode": 12, "name": "left", "label": "向左", "aliases": ("左箭头", "左"), "animated": False},
-    {"mode": 13, "name": "right", "label": "向右", "aliases": ("右箭头", "右"), "animated": False},
-    {"mode": 14, "name": "check", "label": "对勾", "aliases": ("yes", "ok", "对勾", "同意"), "animated": False},
-    {"mode": 15, "name": "cross", "label": "叉号", "aliases": ("no", "x", "叉号", "不同意"), "animated": False},
-    {"mode": 16, "name": "music", "label": "音符", "aliases": ("note", "音乐", "音符"), "animated": True},
-    {"mode": 17, "name": "blush", "label": "脸红", "aliases": ("害羞", "脸红"), "animated": False},
-    {"mode": 18, "name": "angry", "label": "生气", "aliases": ("anger", "生气", "愤怒"), "animated": False},
-    {"mode": 19, "name": "surprised", "label": "惊讶", "aliases": ("surprise", "惊讶", "震惊"), "animated": True},
-    {"mode": 20, "name": "exclaim", "label": "感叹号", "aliases": ("exclamation", "感叹号"), "animated": False},
-    {"mode": 21, "name": "question", "label": "问号", "aliases": ("问号", "困惑"), "animated": False},
-    {"mode": 22, "name": "star", "label": "星星", "aliases": ("星星", "优秀"), "animated": False},
-    {"mode": 23, "name": "up", "label": "向上", "aliases": ("上箭头", "上"), "animated": False},
-    {"mode": 24, "name": "down", "label": "向下", "aliases": ("下箭头", "下"), "animated": False},
-    {"mode": 25, "name": "sleep", "label": "睡眠", "aliases": ("睡觉", "休眠"), "animated": False},
-    {"mode": 26, "name": "thinking", "label": "思考", "aliases": ("think", "思考"), "animated": True},
-    {"mode": 27, "name": "heart", "label": "爱心", "aliases": ("love", "心动", "爱心"), "animated": True},
-    {"mode": 28, "name": "heartbreak", "label": "心碎", "aliases": ("broken", "心碎"), "animated": True},
-    {"mode": 29, "name": "helpless", "label": "无奈", "aliases": ("无奈",), "animated": False},
+    {"mode": 0, "name": "off", "label": "熄灭", "animated": False},
+    {"mode": 1, "name": "red", "label": "红色逐圈", "animated": True},
+    {"mode": 2, "name": "green", "label": "绿色逐圈", "animated": True},
+    {"mode": 3, "name": "blue", "label": "蓝色逐圈", "animated": True},
+    {"mode": 4, "name": "white", "label": "白色逐圈", "animated": True},
+    {"mode": 5, "name": "theater", "label": "剧场追逐", "animated": True},
+    {"mode": 6, "name": "theaterred", "label": "红色剧场", "animated": True},
+    {"mode": 7, "name": "theatergreen", "label": "绿色剧场", "animated": True},
+    {"mode": 8, "name": "theaterblue", "label": "蓝色剧场", "animated": True},
+    {"mode": 9, "name": "rainbow", "label": "彩虹渐变", "animated": True},
+    {"mode": 10, "name": "rainbowchase", "label": "彩虹追逐", "animated": True},
+    {"mode": 11, "name": "left", "label": "左箭头", "animated": False},
+    {"mode": 12, "name": "right", "label": "右箭头", "animated": False},
+    {"mode": 13, "name": "up", "label": "上箭头", "animated": False},
+    {"mode": 14, "name": "down", "label": "下箭头", "animated": False},
+    {"mode": 15, "name": "check", "label": "对号", "animated": False},
+    {"mode": 16, "name": "cross", "label": "叉号", "animated": False},
+    {"mode": 17, "name": "exclaim", "label": "感叹号", "animated": False},
+    {"mode": 18, "name": "question", "label": "问号", "animated": False},
+    {"mode": 19, "name": "star", "label": "星星", "animated": False},
+    {"mode": 20, "name": "music", "label": "音符跳动", "animated": True},
+    {"mode": 21, "name": "smiley", "label": "开心", "animated": False},
+    {"mode": 22, "name": "sad", "label": "伤心", "animated": False},
+    {"mode": 23, "name": "heart", "label": "心动", "animated": True},
+    {"mode": 24, "name": "surprised", "label": "惊讶", "animated": True},
+    {"mode": 25, "name": "blush", "label": "害羞", "animated": False},
+    {"mode": 26, "name": "angry", "label": "生气", "animated": False},
+    {"mode": 27, "name": "thinking", "label": "思考", "animated": True},
+    {"mode": 28, "name": "sleep", "label": "睡觉", "animated": True},
+    {"mode": 29, "name": "helpless", "label": "无奈", "animated": True},
+    {"mode": 30, "name": "cool", "label": "耍酷", "animated": False},
+    {"mode": 31, "name": "focused", "label": "专注", "animated": True},
+    {"mode": 32, "name": "wink", "label": "眨眼", "animated": True},
 )
 
 LED_EXPRESSIONS: dict[str, int] = {str(item["name"]): int(item["mode"]) for item in LED_EXPRESSION_CATALOG}
@@ -60,16 +63,14 @@ def _normalize_mode_key(value: str) -> str:
     return "".join(ch for ch in value.strip().lower() if ch.isalnum())
 
 
-LED_ALIASES: dict[str, str] = {}
+LED_NAME_INDEX: dict[str, str] = {}
 for _item in LED_EXPRESSION_CATALOG:
     _name = str(_item["name"])
-    LED_ALIASES[_normalize_mode_key(_name)] = _name
-    for _alias in _item.get("aliases", ()):
-        LED_ALIASES[_normalize_mode_key(str(_alias))] = _name
+    LED_NAME_INDEX[_normalize_mode_key(_name)] = _name
 
 
 def canonical_expression_name(value: int | str) -> str | None:
-    """Resolve a mode number/name/alias to the canonical expression name."""
+    """Resolve a mode number or exact expression name to the expression name."""
     if isinstance(value, int):
         return LED_MODE_NAMES.get(value)
 
@@ -87,14 +88,14 @@ def canonical_expression_name(value: int | str) -> str | None:
             mode = int(candidate)
             if mode in LED_MODE_NAMES:
                 return LED_MODE_NAMES[mode]
-        resolved = LED_ALIASES.get(candidate)
+        resolved = LED_NAME_INDEX.get(candidate)
         if resolved:
             return resolved
     return None
 
 
 def resolve_expression_mode(value: int | str) -> int | None:
-    """Resolve a mode number/name/alias to the LED controller mode number."""
+    """Resolve a mode number or exact expression name to the LED mode number."""
     if isinstance(value, int):
         return value if value in LED_MODE_NAMES else None
     canonical = canonical_expression_name(value)
@@ -108,7 +109,6 @@ def led_expression_catalog() -> list[dict[str, Any]]:
             "mode": int(item["mode"]),
             "name": str(item["name"]),
             "label": str(item.get("label") or item["name"]),
-            "aliases": [str(alias) for alias in item.get("aliases", ())],
             "animated": bool(item.get("animated", False)),
         }
         for item in LED_EXPRESSION_CATALOG
@@ -172,7 +172,7 @@ class LEDController:
                 return False
             mode = resolved
 
-        if not 0 <= mode <= 29:
+        if not 0 <= mode <= 32:
             logger.warning("led.invalid_mode", mode=mode)
             return False
 

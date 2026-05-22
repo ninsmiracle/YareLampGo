@@ -128,7 +128,7 @@ lampgo 本地 LLM 会话 ──escalation──> OpenClaw Plugin
 ```markdown
 # lampgo device (updated: 2026-03-31T14:30:00)
 - status: idle
-- led: happy
+- led: smiley
 - camera: connected
 - mic: active
 - user_presence: true
@@ -287,9 +287,9 @@ lampgo 侧对应新增：
 ```python
 OPENCLAW_STATUS_ANIMATIONS = {
     "planning": "idle_sway",           # 思考中 → 缓慢摇摆
-    "executing": "set_expression:working",  # 执行中 → 工作表情
+    "executing": "set_expression:focused",  # 执行中 → 专注表情
     "awaiting_user": "nod",            # 等用户回复 → 缓慢点头
-    "completed": "set_expression:happy", # 完成 → 开心
+    "completed": "set_expression:smiley", # 完成 → 开心
     "failed": "set_expression:sad",      # 失败 → 难过
 }
 ```
@@ -386,7 +386,7 @@ sequenceDiagram
     LG-->>OC: 图像 + "遮挡率15%，角度偏高"
 
     OC->>LG: lampgo_move(elbow_pitch=-45, wrist_pitch=45)
-    OC->>LG: lampgo_expression(mode=spotlight)
+    OC->>LG: lampgo_expression(mode=white)
     OC->>LG: lampgo_camera_snap()
     LG-->>OC: 图像 + "遮挡率3%，光照均匀，角度良好"
 
@@ -516,4 +516,3 @@ Phase 3（1 周）做到"开箱视频场景跑通"：
 - Plugin 完整 8 tools + hooks
 - 物理反馈动画
 - 动态技能沉淀流程
-

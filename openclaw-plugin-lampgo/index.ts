@@ -114,7 +114,7 @@ const plugin: OpenClawPluginModule = {
       label: "Set lampgo LED expression",
       description: "Set lampgo LED expression.",
       parameters: Type.Object({
-        mode: Type.String({ description: "LED expression mode key, e.g. happy/heart/working." }),
+        mode: Type.String({ description: "LED expression mode key, e.g. smiley/heart/focused/wink." }),
         wait: Type.Optional(Type.Boolean({ description: "Wait for completion (default true)." })),
       }),
       async execute(_toolCallId, params) {
