@@ -5,6 +5,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from lampgo.core.events import EventBus
+from lampgo.core.types import SkillResult
+from lampgo.skills.base import Skill
+from lampgo.skills.executor import SkillExecutor
+from lampgo.skills.registry import SkillRegistry
+
 
 def test_return_safe_disables_anticipation():
     from lampgo.core.types import MotionStatus
@@ -32,5 +38,57 @@ def test_return_safe_disables_anticipation():
         assert result.status == "ok"
         assert motion.target.anticipation is False
         assert motion.target.joints["elbow_pitch"] == -25.3
+
+    asyncio.run(run())
+
+
+def test_executor_preempts_running_skill():
+    class SlowSkill(Skill):
+        skill_id = "slow_test"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = False
+            self._done = asyncio.Event()
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            self.started.set()
+            await self._done.wait()
+            return SkillResult(status="ok")
+
+        async def cancel(self) -> None:
+            self.cancelled = True
+            self._done.set()
+
+    class FastSkill(Skill):
+        skill_id = "fast_test"
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            return SkillResult(status="ok", data={"ran": True})
+
+    async def run() -> None:
+        slow = SlowSkill()
+        registry = SkillRegistry()
+        registry.register(slow)
+        registry.register(FastSkill())
+        executor = SkillExecutor(registry, EventBus())
+        ctx = SimpleNamespace(
+            motion=SimpleNamespace(is_running=True),
+            led=SimpleNamespace(is_connected=True),
+        )
+
+        first = asyncio.create_task(executor.invoke("slow_test", ctx))
+        await slow.started.wait()
+
+        second = await executor.invoke("fast_test", ctx)
+        first_result = await first
+
+        assert slow.cancelled is True
+        assert first_result.status == "cancelled"
+        assert second.status == "ok"
+        assert second.result == {"ran": True}
+        assert executor.is_busy is False
 
     asyncio.run(run())
