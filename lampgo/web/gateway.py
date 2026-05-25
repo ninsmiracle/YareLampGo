@@ -3158,6 +3158,8 @@ class WebGateway:
         elif msg_type == "stop_loop":
             cancelled = await self._stop_all_ws_work(request_id=request_id)
             logger.info("web.stop_loop", request_id=request_id, cancelled=cancelled)
+            if request_id:
+                await self._send_cancel_response(ws, request_id)
 
         elif msg_type == "stop_tts":
             cancelled = self.server.cancel_pending_tts()

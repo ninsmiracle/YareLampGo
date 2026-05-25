@@ -56,10 +56,18 @@ LEADING_FILLER_RE = re.compile(
     r"^(?:(?:嗯+|呃+|额+|啊+|哦+|喔+|诶+|欸+|uh+|um+|erm+|mmm+|那个|就是)[,.;:!?、]*)+",
     re.IGNORECASE,
 )
-CREATIVE_MARKERS = ("创作", "设计", "编排", "自定义", "原创", "即兴", "生成", "写一个", "做一个新的", "新动作", "新舞")
-SCREEN_MARKERS = ("浏览器", "网页", "网站", "截图", "屏幕", "窗口", "打开", "保存文件", "下载", "登录", "表格", "邮箱")
-PHYSICAL_MARKERS = ("台灯", "lampgo", "机械臂", "灯光", "打光", "表情", "动作", "点头", "摇头", "跳舞", "看桌面", "摄像头", "麦克风")
-EXTERNAL_KNOWLEDGE_MARKERS = ("搜索", "查一下", "查找", "对比", "总结", "写代码", "代码", "工作流", "自动化", "cron", "日程")
+CREATIVE_MARKERS = (
+    "创作", "设计", "编排", "自定义", "原创", "即兴", "生成", "写一个", "做一个新的", "新动作", "新舞",
+)
+SCREEN_MARKERS = (
+    "浏览器", "网页", "网站", "截图", "屏幕", "窗口", "打开", "保存文件", "下载", "登录", "表格", "邮箱",
+)
+PHYSICAL_MARKERS = (
+    "台灯", "lampgo", "机械臂", "灯光", "打光", "表情", "动作", "点头", "摇头", "跳舞", "看桌面", "摄像头", "麦克风",
+)
+EXTERNAL_KNOWLEDGE_MARKERS = (
+    "搜索", "查一下", "查找", "对比", "总结", "写代码", "代码", "工作流", "自动化", "cron", "日程",
+)
 ESCALATION_THRESHOLD = 5
 GREETING_PHRASES = {
     "你好",
@@ -92,6 +100,11 @@ GOODBYE_PHRASES = {
 SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "点头": ("nod", None),
     "摇头": ("headshake", None),
+    "音乐律动": ("dance_to_music", None),
+    "跟音乐跳舞": ("dance_to_music", None),
+    "跟着电脑音乐跳舞": ("dance_to_music", None),
+    "跟着音乐跳舞": ("dance_to_music", None),
+    "随音乐跳舞": ("dance_to_music", None),
     "跳舞": ("play_recording", {"name": "dance1"}),
     "打招呼": ("nod", None),
     "停": ("estop", None),
@@ -196,7 +209,13 @@ class IntentRouter:
 
         if normalized in SKILL_KEYWORDS:
             skill_id, params = SKILL_KEYWORDS[normalized]
-            logger.info("router.keyword_skill_hit", text=text, normalized=normalized, keyword=normalized, skill_id=skill_id)
+            logger.info(
+                "router.keyword_skill_hit",
+                text=text,
+                normalized=normalized,
+                keyword=normalized,
+                skill_id=skill_id,
+            )
             return RoutedIntent(
                 intent_type=IntentType.SKILL,
                 skill_id=skill_id,
