@@ -49,6 +49,7 @@ from lampgo.recordings import build_recording_actions_prompt, write_recording_de
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.expression_skills import SetExpressionSkill
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
+from lampgo.skills.builtin.music_skills import DanceToMusicSkill
 from lampgo.skills.builtin.parametric_skills import (
     HeadShakeSkill,
     IdleSwaySkill,
@@ -152,6 +153,7 @@ class LampgoServer:
         self.registry.register(HeadShakeSkill())
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
+        self.registry.register(DanceToMusicSkill())
 
     # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
 

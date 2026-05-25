@@ -537,6 +537,7 @@ def _cmd_skills(args: argparse.Namespace) -> None:
 
     from lampgo.skills.builtin.expression_skills import SetExpressionSkill
     from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
+    from lampgo.skills.builtin.music_skills import DanceToMusicSkill
     from lampgo.skills.builtin.parametric_skills import HeadShakeSkill, IdleSwaySkill, LookAtSkill, NodSkill
     from lampgo.skills.builtin.playback_skills import PlayRecordingSkill
     from lampgo.skills.registry import SkillRegistry
@@ -551,6 +552,7 @@ def _cmd_skills(args: argparse.Namespace) -> None:
         HeadShakeSkill,
         LookAtSkill,
         IdleSwaySkill,
+        DanceToMusicSkill,
     ]:
         registry.register(skill_cls())
     registry.register(PlayRecordingSkill(Path("assets/recordings")))
