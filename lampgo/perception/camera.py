@@ -102,7 +102,7 @@ class CameraCapture:
             logger.warning("camera.esp32_httpx_missing")
             return None
         try:
-            with httpx.Client(timeout=self.ESP32_HTTP_TIMEOUT_S) as client:
+            with httpx.Client(timeout=self.ESP32_HTTP_TIMEOUT_S, trust_env=False) as client:
                 resp = client.get(f"{base_url}/capture")
             if resp.status_code != 200:
                 logger.warning("camera.esp32_http_error", status=resp.status_code)
