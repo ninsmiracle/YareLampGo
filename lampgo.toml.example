@@ -18,6 +18,13 @@ use_degrees = true             # true = 角度模式, false = 归一化 -100~100
 [motion]
 tick_rate_hz = 50.0            # 控制循环频率 (Hz)
 default_max_velocity = 120.0   # 默认最大速度 (度/秒)；仅作为弹簧频率的速度预算上限
+idle_sway_enabled = true       # 空闲后是否自动触发出厂技能 idle_sway
+idle_sway_idle_after_s = 600.0 # 空闲多久后开始触发（默认 10 分钟）
+idle_sway_interval_s = 30.0    # 空闲后触发间隔基准
+idle_sway_interval_jitter_s = 8.0 # 间隔随机浮动范围（±秒）
+idle_sway_duration_s = 8.0     # 每次 idle_sway 持续时长
+idle_sway_amplitude = 6.0      # 每次 idle_sway 摆动幅度（度）
+idle_sway_period_s = 4.5       # 摆动周期（秒）
 # 注：motion 不存在 default_max_acceleration —— 动力学是弹簧-阻尼，加速度是隐式的。
 #     真正的硬加速度上限在下面的 [safety].max_acceleration。
 

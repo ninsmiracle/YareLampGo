@@ -102,15 +102,54 @@ class MotionConfig(BaseModel):
         "0.7 = slight underdamp (micro-elasticity); 1.0 = critical (no overshoot).",
     )
 
-    # --- Idle breathing ---
+    # --- Idle breathing (deprecated) ---
+    # Kept for backwards compatibility with older local config files/tests.
+    # Runtime no longer applies continuous micro-motion from the control loop;
+    # idle presence is now driven by the idle_sway factory skill scheduler.
     breathing_enabled: bool = Field(
-        default=True,
-        description="Enable slow sinusoidal micro-motion when arm is idle.",
+        default=False,
+        description="Deprecated. Continuous idle micro-motion is disabled; use idle_sway_* settings instead.",
     )
     breathing_amplitude: float = Field(
         default=3.0,
         ge=0,
-        description="Peak breathing oscillation amplitude in degrees (before per-joint scaling).",
+        description="Deprecated. Legacy breathing amplitude retained only for old config compatibility.",
+    )
+
+    # --- Idle random sway scheduler ---
+    idle_sway_enabled: bool = Field(
+        default=True,
+        description="Enable occasional idle_sway factory-skill triggers after the lamp has been idle.",
+    )
+    idle_sway_idle_after_s: float = Field(
+        default=600.0,
+        ge=0,
+        description="How long the lamp must be idle before automatic idle_sway can trigger.",
+    )
+    idle_sway_interval_s: float = Field(
+        default=30.0,
+        gt=0,
+        description="Base interval between automatic idle_sway triggers once the lamp is idle.",
+    )
+    idle_sway_interval_jitter_s: float = Field(
+        default=8.0,
+        ge=0,
+        description="Random +/- jitter applied to idle_sway_interval_s.",
+    )
+    idle_sway_duration_s: float = Field(
+        default=8.0,
+        gt=0,
+        description="Duration passed to each automatic idle_sway skill invocation.",
+    )
+    idle_sway_amplitude: float = Field(
+        default=6.0,
+        ge=0,
+        description="Amplitude in degrees passed to each automatic idle_sway skill invocation.",
+    )
+    idle_sway_period_s: float = Field(
+        default=4.5,
+        gt=0,
+        description="Period in seconds passed to each automatic idle_sway skill invocation.",
     )
 
     # --- Overlapping Action (secondary joint coupling) ---

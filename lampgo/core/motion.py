@@ -11,7 +11,7 @@ Command flow:
 
     MOVE_TO      → joint_targets[specified joints] = goal positions
     STREAM_FRAMES → joint_targets[frame joints] = current frame position
-    idle          → joint_targets[all joints]   = BreathingGenerator output
+    idle          → springs hold their last settled positions
 
     joint_targets → SecondOrderDynamics per joint (spring bank)
                   → Overlapping Action (secondary joint coupling)
@@ -43,7 +43,6 @@ from enum import Enum, auto
 
 import structlog
 
-from lampgo.core.breathing import BreathingGenerator
 from lampgo.core.config import MotionConfig
 from lampgo.core.hal import HardwareAbstraction
 from lampgo.core.safety import SafetyKernel
@@ -230,12 +229,6 @@ class MotionRuntime:
         _spring_f = self._config.spring_playback_f
         _spring_z = self._config.spring_playback_z
 
-        # --- Breathing generator ---
-        _breathing = BreathingGenerator(
-            amplitude=self._config.breathing_amplitude
-        )
-        _breathing.set_rest(dict(self._current_state.positions))
-
         # --- Overlapping Action state ---
         _overlap_prev: dict[str, float] = dict(self._current_state.positions)
         # Circular buffers: key = "primary→secondary", value = list of deltas
@@ -304,9 +297,6 @@ class MotionRuntime:
                         _active_done.set()
                         _active_done = None
                     self._status = MotionStatus(is_done=True)
-                    _breathing.set_rest(
-                        {j: s.position for j, s in _springs.items()}
-                    )
 
                 elif cmd.type == _CommandType.STOP_SMOOTH:
                     self._current_target = None
@@ -317,9 +307,6 @@ class MotionRuntime:
                     _anticipation_final_target = None
                     _anticipation_ticks_remaining = 0
                     # Springs decelerate naturally — no hard stop
-                    _breathing.set_rest(
-                        {j: s.position for j, s in _springs.items()}
-                    )
 
                 elif cmd.type == _CommandType.MOVE_TO:
                     validated = self._safety.validate_target(
@@ -563,9 +550,6 @@ class MotionRuntime:
                 if hw_at_target or timed_out:
                     _stream_settling = False
                     self._status = MotionStatus(progress=1.0, is_done=True)
-                    _breathing.set_rest(
-                        {j: s.position for j, s in _springs.items()}
-                    )
                     if _active_done:
                         _active_done.set()
                         _active_done = None
@@ -573,11 +557,6 @@ class MotionRuntime:
             elif self._current_target is not None:
                 # Goal-based: spring tracks the fixed target position
                 joint_targets.update(self._current_target.joints)
-
-            else:
-                # Idle: breathing generator provides slow oscillating targets
-                if self._config.breathing_enabled:
-                    joint_targets.update(_breathing.sample(dt))
 
             # --- Apply spring filter to all joints ---
             next_frame: dict[str, float] = {}
@@ -706,9 +685,6 @@ class MotionRuntime:
                     self._current_target = None
                     self._status = MotionStatus(
                         progress=1.0, is_done=True, stalled=_was_stalled
-                    )
-                    _breathing.set_rest(
-                        {j: s.position for j, s in _springs.items()}
                     )
                     logger.info("motion.move_done")
                     if _active_done:
