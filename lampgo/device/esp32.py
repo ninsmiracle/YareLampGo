@@ -165,7 +165,7 @@ class Esp32DeviceManager:
                 [MDNS_SERVICE_TYPE],
                 handlers=[self._on_service_state_change],
             )
-            self._http = httpx.AsyncClient(timeout=self._config.http_timeout_s)
+            self._http = httpx.AsyncClient(timeout=self._config.http_timeout_s, trust_env=False)
             self._health_task = asyncio.create_task(self._health_loop())
             self._started = True
             logger.info("esp32.discovery_started", service=MDNS_SERVICE_TYPE)
@@ -200,6 +200,19 @@ class Esp32DeviceManager:
             self._http = None
         self._started = False
         logger.info("esp32.discovery_stopped")
+
+    async def restart_discovery(self, *, clear_devices: bool = False, reason: str = "") -> None:
+        if not self._config.enabled:
+            return
+        if clear_devices:
+            async with self._lock:
+                self._devices.clear()
+            self._preferred_health_ok = False
+            self._preferred_health_ok_at = 0.0
+            self._preferred_fallback_snapshot = None
+        await self.shutdown()
+        await self.start()
+        logger.info("esp32.discovery_restarted", clear_devices=clear_devices, reason=reason)
 
     def _on_service_state_change(self, zeroconf, service_type, name, state_change) -> None:
         asyncio.create_task(

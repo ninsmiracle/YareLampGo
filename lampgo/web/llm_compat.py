@@ -25,6 +25,8 @@ import structlog
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
+from lampgo.voice.echo_filter import likely_recent_tts_echo, remember_tts_text
+
 if TYPE_CHECKING:
     from lampgo.server import LampgoServer
 
@@ -92,6 +94,12 @@ def _make_flush_chunk(chat_id: str, *, model: str = "lampgo") -> str:
     return _make_chunk(chat_id, _TTS_FLUSH_MARKER, model=model)
 
 
+async def _empty_completion_stream(chat_id: str):
+    yield _make_chunk(chat_id, "", model="lampgo", role="assistant")
+    yield _make_chunk(chat_id, finish_reason="stop", model="lampgo")
+    yield "data: [DONE]\n\n"
+
+
 async def handle_chat_completions(request: Request) -> StreamingResponse:
     """POST /v1/chat/completions — OpenAI-compatible streaming endpoint."""
     server: LampgoServer = request.app.state.lampgo_server
@@ -129,6 +137,31 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
         user_text=user_text[:80],
         msg_count=len(messages),
         stream=body.get("stream", True),
+    )
+
+    is_echo, echo_detail = likely_recent_tts_echo(server, user_text)
+    if is_echo:
+        logger.info(
+            "llm_compat.echo_text_dropped",
+            chat_id=chat_id,
+            request_id=request_id,
+            user_text=user_text[:80],
+            **echo_detail,
+        )
+        return StreamingResponse(
+            _empty_completion_stream(chat_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    logger.info(
+        "llm_compat.echo_text_kept",
+        chat_id=chat_id,
+        request_id=request_id,
+        user_text=user_text[:80],
+        **echo_detail,
     )
 
     async def _generate():
@@ -202,6 +235,7 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
             if not tts_text:
                 return
             emitted_texts.append(tts_text)
+            remember_tts_text(server, tts_text)
             if not role_sent:
                 yield _make_chunk(chat_id, "", model="lampgo", role="assistant")
                 role_sent = True

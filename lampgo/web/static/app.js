@@ -293,6 +293,9 @@
   let esp32VolumeTimer = null;
   let esp32VolumePending = false;
   let esp32VolumeInitialSyncDone = false;
+  let voiceCallMode = "stable";
+  let voiceEchoGateHangoverMs = 1000;
+  let voiceEchoTextFilterEnabled = true;
 
   function clampEsp32Volume(value) {
     const n = Number(value);
@@ -4936,6 +4939,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   const ESP32_CALL_SPEAKER_MAX_PENDING_FRAMES = 80;
   const ESP32_CALL_SPEAKER_MAX_BUFFERED_BYTES = ESP32_CALL_SPEAKER_FRAME_SAMPLES * 2 * 24;
   const ESP32_CALL_SPEAKER_FULL_SCALE_PEAK = 0.82;
+  const ESP32_CALL_MIC_ECHO_MUTE_DEFAULT_HANGOVER_MS = 1000;
 
   function openEsp32CallSpeakerWs() {
     if (esp32SpeakerWs && esp32SpeakerWs.readyState === WebSocket.OPEN) {
@@ -5023,6 +5027,16 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   function sendOrQueueEsp32SpeakerFrame(frame) {
     if (esp32SpeakerWs && esp32SpeakerWs.readyState === WebSocket.OPEN) {
       if (esp32SpeakerWs.bufferedAmount > ESP32_CALL_SPEAKER_MAX_BUFFERED_BYTES) {
+        if (esp32SpeakerRelayStats) {
+          esp32SpeakerRelayStats.wsBackpressureDrops = (esp32SpeakerRelayStats.wsBackpressureDrops || 0) + 1;
+          if (esp32SpeakerRelayStats.wsBackpressureDrops === 1 || esp32SpeakerRelayStats.wsBackpressureDrops % 50 === 0) {
+            console.warn(
+              "[call] ESP32 speaker WS backpressure drop",
+              `drops=${esp32SpeakerRelayStats.wsBackpressureDrops}`,
+              `buffered=${esp32SpeakerWs.bufferedAmount}`,
+            );
+          }
+        }
         return;
       }
       try {
@@ -5037,6 +5051,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     esp32SpeakerPendingFrames.push(frame);
     while (esp32SpeakerPendingFrames.length > ESP32_CALL_SPEAKER_MAX_PENDING_FRAMES) {
       esp32SpeakerPendingFrames.shift();
+      if (esp32SpeakerRelayStats) {
+        esp32SpeakerRelayStats.pendingDrops = (esp32SpeakerRelayStats.pendingDrops || 0) + 1;
+      }
     }
     if (!esp32SpeakerWsOpening) {
       openEsp32CallSpeakerWs().catch((err) => {
@@ -5113,6 +5130,8 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           `gain=${adaptiveGain.toFixed(2)}`,
           `vol=${volumePct}`,
           `rate=${inputRate}`,
+          `wsDrops=${esp32SpeakerRelayStats.wsBackpressureDrops || 0}`,
+          `pendingDrops=${esp32SpeakerRelayStats.pendingDrops || 0}`,
         );
       }
     }
@@ -5129,11 +5148,27 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     sendOrQueueEsp32SpeakerFrame(silence.buffer);
   }
 
+  function shouldMuteEsp32MicForSpeakerEcho() {
+    if (voiceCallMode !== "stable") return false;
+    if (!esp32SpeakerRelayStats || !esp32SpeakerRelayStats.lastVoiceAt) return false;
+    const hangover = Number.isFinite(Number(voiceEchoGateHangoverMs))
+      ? Number(voiceEchoGateHangoverMs)
+      : ESP32_CALL_MIC_ECHO_MUTE_DEFAULT_HANGOVER_MS;
+    if (hangover <= 0) return false;
+    return Date.now() - esp32SpeakerRelayStats.lastVoiceAt <= hangover;
+  }
+
   async function startEsp32SpeakerRelay(remoteTrack) {
     cleanupEsp32SpeakerRelay();
     esp32SpeakerPendingFrames = [];
     esp32SpeakerPcmRemainder = new Int16Array(0);
-    esp32SpeakerRelayStats = { frames: 0, voicedFrames: 0, lastVoiceAt: 0 };
+    esp32SpeakerRelayStats = {
+      frames: 0,
+      voicedFrames: 0,
+      lastVoiceAt: 0,
+      wsBackpressureDrops: 0,
+      pendingDrops: 0,
+    };
     const mediaTrack = remoteTrack && (remoteTrack.mediaStreamTrack || remoteTrack._mediaStreamTrack);
     if (!mediaTrack) {
       console.warn("[call] ESP32 speaker relay skipped: no MediaStreamTrack on remote track");
@@ -5208,6 +5243,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   function feedEsp32Audio(pcmBytes) {
     if (!esp32WorkletNode) return;
     const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+    const mutedForEcho = shouldMuteEsp32MicForSpeakerEcho();
     if (esp32MicRelayStats) {
       let sumSq = 0;
       let peak = 0;
@@ -5219,7 +5255,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       }
       const rms = int16.length ? Math.sqrt(sumSq / int16.length) : 0;
       esp32MicRelayStats.frames += 1;
-      if (rms > 0.01) {
+      if (mutedForEcho) {
+        esp32MicRelayStats.echoMutedFrames = (esp32MicRelayStats.echoMutedFrames || 0) + 1;
+      } else if (rms > 0.01) {
         esp32MicRelayStats.voicedFrames += 1;
         esp32MicRelayStats.lastVoiceAt = Date.now();
         touchBrowserCallActivity("mic_audio", { audio: true });
@@ -5227,12 +5265,14 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       if (
         esp32MicRelayStats.frames === 1 ||
         esp32MicRelayStats.frames % 100 === 0 ||
-        (rms > 0.01 && esp32MicRelayStats.voicedFrames <= 5)
+        (rms > 0.01 && esp32MicRelayStats.voicedFrames <= 5) ||
+        (mutedForEcho && (esp32MicRelayStats.echoMutedFrames || 0) <= 5)
       ) {
         console.log(
           "[call] ESP32 mic relay audio",
           `frames=${esp32MicRelayStats.frames}`,
           `voiced=${esp32MicRelayStats.voicedFrames}`,
+          `echoMuted=${esp32MicRelayStats.echoMutedFrames || 0}`,
           `rms=${rms.toFixed(4)}`,
           `peak=${peak.toFixed(4)}`,
           `ctx=${esp32AudioCtx ? esp32AudioCtx.state : "none"}`,
@@ -5240,8 +5280,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       }
     }
     const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / 32768;
+    if (!mutedForEcho) {
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768;
+      }
     }
     const outputRate = esp32AudioCtx ? esp32AudioCtx.sampleRate : 16000;
     esp32WorkletNode.port.postMessage(resampleFloat32(float32, 16000, outputRate));
@@ -5261,7 +5303,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     const dest = esp32AudioCtx.createMediaStreamDestination();
     esp32WorkletNode.connect(dest);
     esp32MediaStream = dest.stream;
-    esp32MicRelayStats = { frames: 0, voicedFrames: 0, lastVoiceAt: 0 };
+    esp32MicRelayStats = { frames: 0, voicedFrames: 0, lastVoiceAt: 0, echoMutedFrames: 0 };
 
     send({ type: "start_esp32_relay" });
     esp32RelayActive = true;
@@ -5317,9 +5359,17 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       const callAttemptId = browserCallPendingId || `${browserCallClientId}_${Date.now().toString(36)}`;
       browserCallPendingId = callAttemptId;
       const roomName = `lampgo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+      const modeLabel = VOICE_CALL_MODE_LABELS[voiceCallMode] || VOICE_CALL_MODE_LABELS.stable;
       let room = null;
       try {
-        console.log("[call] starting LiveKit call", { reason, roomName, mic: useEsp32 ? "esp32" : (selectedMicId || "default") });
+        console.log("[call] starting LiveKit call", {
+          reason,
+          roomName,
+          mic: useEsp32 ? "esp32" : (selectedMicId || "default"),
+          callMode: voiceCallMode,
+          echoGateHangoverMs: voiceEchoGateHangoverMs,
+          echoTextFilter: voiceEchoTextFilterEnabled,
+        });
         addCallSystemNote("正在获取 LiveKit 通话令牌…");
         const resp = await fetch("/api/livekit/token", {
           method: "POST",
@@ -5385,6 +5435,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         lkClientCallId = callAttemptId;
         browserCallPendingId = "";
         addCallSystemNote("LiveKit 房间已连接，正在发布麦克风…");
+        if (useEsp32) {
+          addCallSystemNote(`ESP32 通话模式：${modeLabel}`);
+        }
 
         if (useEsp32) {
           const mediaTrack = await createEsp32AudioTrack();
@@ -7711,6 +7764,19 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       btn._bound = true;
       btn.addEventListener("click", () => saveCfgFromButton(btn));
     });
+    document.querySelectorAll("[data-cfg-segmented]").forEach((group) => {
+      if (group._bound) return;
+      group._bound = true;
+      group.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest("[data-cfg-segment-value]");
+        if (!btn || !group.contains(btn)) return;
+        const dotted = group.dataset.cfgSegmented || "";
+        const input = document.querySelector(`[data-cfg-input="${dotted}"]`);
+        if (!input || input.disabled) return;
+        input.value = normalizeVoiceCallMode(btn.dataset.cfgSegmentValue);
+        applyVoiceRuntimeField(dotted, input.value);
+      });
+    });
     const ttsProviderSel = document.querySelector('[data-cfg-input="voice.tts_provider"]');
     if (ttsProviderSel && !ttsProviderSel._ttsBound) {
       ttsProviderSel._ttsBound = true;
@@ -7955,6 +8021,54 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     wn9_xiaoluxiaolu_tts2: "wn9_xiaoluxiaolu_tts2",
     wn9_hixiaoxing_tts: "wn9_hixiaoxing_tts",
   };
+  const ESP32_AUDIO_PROFILE_BY_CALL_MODE = {
+    stable: "stable_raw",
+    interruptible: "interruptible_raw",
+    esp32_aec: "aec_experiment",
+  };
+  const VOICE_CALL_MODE_LABELS = {
+    stable: "稳定",
+    interruptible: "可打断",
+    esp32_aec: "ESP32 AEC",
+  };
+
+  function normalizeVoiceCallMode(value) {
+    const raw = String(value || "stable").trim().toLowerCase().replace(/-/g, "_");
+    const aliases = {
+      safe: "stable",
+      half_duplex: "stable",
+      interrupt: "interruptible",
+      interruptions: "interruptible",
+      barge_in: "interruptible",
+      aec: "esp32_aec",
+      experimental_aec: "esp32_aec",
+    };
+    const mode = aliases[raw] || raw;
+    return ESP32_AUDIO_PROFILE_BY_CALL_MODE[mode] ? mode : "stable";
+  }
+
+  function syncCfgSegmentedControl(dotted, value) {
+    const group = document.querySelector(`[data-cfg-segmented="${dotted}"]`);
+    if (!group) return;
+    const selected = normalizeVoiceCallMode(value);
+    group.querySelectorAll("[data-cfg-segment-value]").forEach((btn) => {
+      const active = btn.dataset.cfgSegmentValue === selected;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-checked", active ? "true" : "false");
+    });
+  }
+
+  function applyVoiceRuntimeField(dotted, value) {
+    if (dotted === "voice.call_mode") {
+      voiceCallMode = normalizeVoiceCallMode(value);
+      syncCfgSegmentedControl(dotted, voiceCallMode);
+    } else if (dotted === "voice.echo_gate_hangover_ms") {
+      const ms = Number(value);
+      voiceEchoGateHangoverMs = Number.isFinite(ms) ? Math.max(0, Math.min(5000, ms)) : 1000;
+    } else if (dotted === "voice.echo_text_filter_enabled") {
+      voiceEchoTextFilterEnabled = Boolean(value);
+    }
+  }
 
   // Toggle the TTS Model ID input based on the current provider.
   function syncTtsModelEnabled() {
@@ -8058,10 +8172,11 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
 
   function applyCfgFieldValue(dotted, cell) {
     const input = document.querySelector(`[data-cfg-input="${dotted}"]`);
+    const value = cell ? cell.value : null;
+    applyVoiceRuntimeField(dotted, value);
     if (!input) return;
     input.value = "";
     input.checked = false;
-    const value = cell ? cell.value : null;
     if (input.type === "checkbox") {
       input.checked = Boolean(value);
     } else {
@@ -8089,6 +8204,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       }
     }
     if (dotted === "voice.tts_voice") syncTtsVoiceCustomInput();
+    if (dotted === "voice.call_mode") {
+      input.value = normalizeVoiceCallMode(input.value);
+      syncCfgSegmentedControl(dotted, input.value);
+    }
   }
 
   async function loadCfgAll() {
@@ -8183,6 +8302,24 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       return { ok: false, error: body.error || `HTTP ${res.status}` };
     }
     return { ok: true, skipped: false };
+  }
+
+  async function pushEsp32AudioProfileFromVoiceValues(values) {
+    if (!values || values["voice.call_mode"] === undefined) {
+      return { ok: true, skipped: true, reason: "empty" };
+    }
+    const mode = normalizeVoiceCallMode(values["voice.call_mode"]);
+    const audioProfile = ESP32_AUDIO_PROFILE_BY_CALL_MODE[mode] || ESP32_AUDIO_PROFILE_BY_CALL_MODE.stable;
+    const res = await fetch("/api/device/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audio_profile: audioProfile }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) {
+      return { ok: false, error: body.error || `HTTP ${res.status}` };
+    }
+    return { ok: true, skipped: false, mode, audioProfile };
   }
 
   async function saveCfgFromButton(btn) {
@@ -8302,6 +8439,22 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         }
       } catch (err) {
         if (statusEl) statusEl.textContent = `已保存，但 ESP32 未同步：${err.message || "设备离线"}`;
+      }
+    }
+    if (!errors.length && primarySection === "voice" && grouped.voice && grouped.voice["voice.call_mode"] !== undefined) {
+      if (statusEl) statusEl.textContent = "已保存，正在同步 ESP32 音频 profile…";
+      try {
+        const pushed = await pushEsp32AudioProfileFromVoiceValues(grouped.voice);
+        if (statusEl) {
+          if (pushed.ok) {
+            const modeLabel = VOICE_CALL_MODE_LABELS[pushed.mode] || VOICE_CALL_MODE_LABELS.stable;
+            statusEl.textContent = pushed.skipped ? "已保存" : `已保存并同步为${modeLabel}模式`;
+          } else {
+            statusEl.textContent = `已保存，但 ESP32 音频 profile 未同步：${pushed.error || "设备离线"}`;
+          }
+        }
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `已保存，但 ESP32 音频 profile 未同步：${err.message || "设备离线"}`;
       }
     }
     if (needsRestart.length) showColdRestartBanner(needsRestart);

@@ -68,6 +68,7 @@ from lampgo.skills.loader import (
 )
 from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.registry import SkillRegistry
+from lampgo.voice.echo_filter import likely_recent_tts_echo, remember_tts_text
 from lampgo.voice.stt import VolcengineASR, build_stt
 
 logger = structlog.get_logger(__name__)
@@ -555,6 +556,7 @@ class LampgoServer:
             return
         text = self._extract_response_text(result)
         if text:
+            remember_tts_text(self, text)
             task = asyncio.create_task(self._tts_for_web(text, request_id))
             self._tts_tasks.add(task)
             task.add_done_callback(self._tts_tasks.discard)
@@ -626,6 +628,42 @@ class LampgoServer:
             if "enable_thinking" in data
             else bool(self.config.llm.enable_thinking)
         )
+        raw_history = data.get("history") or []
+        history = raw_history if isinstance(raw_history, list) else []
+        call_mode = (
+            bool(data.get("call_mode"))
+            or
+            self._wake_loop is not None
+            and self._wake_loop.conversation_state.value in ("joining", "active")
+        )
+        voice_input = bool(data.get("voice_input")) or call_mode
+
+        if voice_input and not bool(data.get("echo_checked")):
+            is_echo, echo_detail = likely_recent_tts_echo(self, text)
+            if is_echo:
+                logger.info(
+                    "server.echo_text_dropped",
+                    text=text[:80],
+                    request_id=request_id,
+                    **echo_detail,
+                )
+                return {
+                    "ok": True,
+                    "result": {
+                        "type": "chat",
+                        "response": "",
+                        "source": "echo_filter",
+                        "detail": "dropped likely self-echo ASR text",
+                        "matched_keyword": None,
+                        "echo_filtered": True,
+                    },
+                }
+            logger.info(
+                "server.echo_text_kept",
+                text=text[:80],
+                request_id=request_id,
+                **echo_detail,
+            )
 
         alias = self._resolve_recording_alias(text)
         if alias:
@@ -647,6 +685,8 @@ class LampgoServer:
             }
 
         async def _publish_intent_progress(stage: str, message: str, source: str) -> asyncio.Task | None:
+            if stage == "llm_narration" and message.strip():
+                remember_tts_text(self, message)
             await self.events.publish(
                 IntentProgress(
                     stage=stage,
@@ -661,15 +701,6 @@ class LampgoServer:
                 task.add_done_callback(self._tts_tasks.discard)
                 return task
             return None
-
-        raw_history = data.get("history") or []
-        history = raw_history if isinstance(raw_history, list) else []
-        call_mode = (
-            bool(data.get("call_mode"))
-            or
-            self._wake_loop is not None
-            and self._wake_loop.conversation_state.value in ("joining", "active")
-        )
 
         intent = self.router.route(text)
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
@@ -845,6 +876,31 @@ class LampgoServer:
             return {"ok": True, "result": {"type": "chat", "response": "抱歉，没有听清您说的话。", "source": "audio"}}
 
         logger.info("server.audio_transcribed", request_id=request_id, text=text)
+        is_echo, echo_detail = likely_recent_tts_echo(self, text)
+        if is_echo:
+            logger.info(
+                "server.audio_echo_text_dropped",
+                text=text[:80],
+                request_id=request_id,
+                **echo_detail,
+            )
+            return {
+                "ok": True,
+                "result": {
+                    "type": "chat",
+                    "response": "",
+                    "source": "echo_filter",
+                    "detail": "dropped likely self-echo ASR text",
+                    "matched_keyword": None,
+                    "echo_filtered": True,
+                },
+            }
+        logger.info(
+            "server.audio_echo_text_kept",
+            text=text[:80],
+            request_id=request_id,
+            **echo_detail,
+        )
         await self.events.publish(
             IntentProgress(stage="audio_transcribed", message=f"听到：{text}", source="llm", request_id=request_id)
         )
@@ -854,6 +910,8 @@ class LampgoServer:
                 "input": text,
                 "request_id": request_id,
                 "history": data.get("history") or [],
+                "voice_input": True,
+                "echo_checked": True,
                 "enable_thinking": (
                     bool(data.get("enable_thinking"))
                     if "enable_thinking" in data
@@ -2055,12 +2113,15 @@ class LampgoServer:
         try:
             from lampgo.voice.agent_sdk import AgentSDKManager
 
+            if self._agent_sdk is not None and self._agent_sdk.is_running:
+                return
             self._agent_sdk = AgentSDKManager(
                 self.config.voice,
                 web_port=self.config.web.port,
             )
             started = await self._agent_sdk.start()
             if not started:
+                logger.warning("server.agent_sdk_not_started", error=self._agent_sdk.last_error)
                 return
             ready = await self._agent_sdk.wait_ready(timeout_s=20.0)
             if ready:
@@ -2069,6 +2130,19 @@ class LampgoServer:
                 logger.warning("server.agent_sdk_ready_timeout")
         except Exception:
             logger.exception("server.agent_sdk_start_failed")
+
+    async def ensure_agent_sdk_ready(self, *, timeout_s: float = 10.0) -> tuple[bool, str]:
+        """Ensure the LiveKit Agent SDK is running for a manual browser call."""
+        if self._agent_sdk is None or not self._agent_sdk.is_running:
+            await self._start_agent_sdk()
+        if self._agent_sdk is None:
+            return False, "voice agent SDK is not configured"
+        if not self._agent_sdk.is_running:
+            return False, self._agent_sdk.last_error or "voice agent SDK is not running"
+        ready = await self._agent_sdk.wait_ready(timeout_s=timeout_s)
+        if not ready:
+            return False, "voice agent SDK is still starting"
+        return True, ""
 
 
 async def run_server(config: LampgoConfig) -> None:
