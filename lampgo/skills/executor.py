@@ -21,6 +21,7 @@ PRIORITY_SKILLS = {"estop", "return_safe"}
 
 _MOTION_SKILLS = {
     "nod", "headshake", "look_at", "idle_sway",
+    "dance_to_music",
     "move_to", "return_safe", "estop",
     "presence_react", "face_follow",
     "play_recording", "teleop_mouse", "teleop_gamepad",
@@ -80,17 +81,18 @@ class SkillExecutor:
         await self._events.publish(SkillStarted(skill_id=skill_id, invocation_id=invocation_id))
         logger.info("executor.invoke", skill_id=skill_id, invocation_id=invocation_id)
 
+        task = asyncio.create_task(skill.execute(ctx, **params))
+        self._current_task = task
         try:
             result = await asyncio.wait_for(
-                skill.execute(ctx, **params),
+                task,
                 timeout=300.0,
             )
         except TimeoutError:
             logger.error("executor.timeout", skill_id=skill_id)
             result = SkillResult(status="error", message="timeout")
         except asyncio.CancelledError:
-            import traceback
-            logger.error("executor.cancelled", skill_id=skill_id, tb=traceback.format_exc())
+            logger.info("executor.cancelled", skill_id=skill_id, invocation_id=invocation_id)
             result = SkillResult(status="cancelled", message="pre-empted")
         except Exception as e:
             logger.exception("executor.skill_error", skill_id=skill_id)
@@ -100,9 +102,10 @@ class SkillExecutor:
             SkillFinished(skill_id=skill_id, invocation_id=invocation_id, status=result.status)
         )
 
-        self._current_skill = None
-        self._current_invocation_id = None
-        self._current_task = None
+        if self._current_invocation_id == invocation_id:
+            self._current_skill = None
+            self._current_invocation_id = None
+            self._current_task = None
 
         return InvokeResult(
             invocation_id=invocation_id,
