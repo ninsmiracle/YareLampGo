@@ -32,6 +32,7 @@
   const chipJointDot = document.getElementById("chip-joint-dot");
   const chipCamera = document.getElementById("chip-camera");
   const chipCameraDot = document.getElementById("chip-camera-dot");
+  const chipCameraLabel = chipCamera ? chipCamera.querySelector(".device-chip-label") : null;
   const chipMic = document.getElementById("chip-mic");
   const chipMicDot = document.getElementById("chip-mic-dot");
   const chipLed = document.getElementById("chip-led");
@@ -2227,6 +2228,114 @@
   let cameraPopoverEl = null;
   let cameraCache = { cameras: [], active: "", available: true, reason: "", esp32: null };
   let cameraPendingRequest = 0;
+  const PHONE_CAMERA_CHECK_INTERVAL_MS = 15000;
+  let phoneCameraStatus = { state: "unknown", checkedAt: 0, error: "", lastOnline: false };
+  let phoneCameraCheckPromise = null;
+
+  function isPhoneCameraPort(port) {
+    return /^(https?|rtsp):\/\//i.test(String(port || "").trim());
+  }
+
+  function currentPhoneCameraPort() {
+    const active = String(cameraCache.active || "").trim();
+    return isPhoneCameraPort(active) ? active : "";
+  }
+
+  function formatPhoneCameraEndpoint(port) {
+    const value = String(port || "").trim();
+    try {
+      const url = new URL(value);
+      return `${url.hostname}${url.port ? `:${url.port}` : ""}`;
+    } catch (_) {
+      return value;
+    }
+  }
+
+  function phoneCameraStatusLabel() {
+    if (phoneCameraStatus.state === "online") return "在线";
+    if (phoneCameraStatus.state === "offline") return phoneCameraStatus.error || "离线";
+    if (phoneCameraStatus.state === "checking") return "检查中";
+    return "待检查";
+  }
+
+  function setCameraChipState(online, title, label) {
+    if (!chipCamera) return;
+    chipCamera.classList.toggle("is-online", online);
+    chipCamera.classList.toggle("is-offline", !online);
+    if (chipCameraDot) {
+      chipCameraDot.classList.toggle("is-online", online);
+      chipCameraDot.classList.toggle("is-offline", !online);
+    }
+    chipCamera.title = title;
+    if (chipCameraLabel) chipCameraLabel.textContent = label || "摄像头";
+  }
+
+  function updatePhoneCameraChip() {
+    const port = currentPhoneCameraPort();
+    if (!port) return false;
+    const visualOnline = phoneCameraStatus.state === "online"
+      || (phoneCameraStatus.state === "checking" && phoneCameraStatus.lastOnline);
+    setCameraChipState(
+      visualOnline,
+      `手机摄像头：${phoneCameraStatusLabel()} · ${formatPhoneCameraEndpoint(port)}`,
+      "手机摄像头",
+    );
+    return true;
+  }
+
+  async function refreshPhoneCameraStatus(opts) {
+    const port = currentPhoneCameraPort();
+    if (!port) return;
+    const force = Boolean(opts && opts.force);
+    const now = Date.now();
+    if (!force && phoneCameraStatus.state !== "unknown" && now - phoneCameraStatus.checkedAt < PHONE_CAMERA_CHECK_INTERVAL_MS) {
+      updatePhoneCameraChip();
+      return;
+    }
+    if (phoneCameraCheckPromise) return phoneCameraCheckPromise;
+
+    phoneCameraStatus = {
+      state: "checking",
+      checkedAt: now,
+      error: "",
+      lastOnline: phoneCameraStatus.lastOnline || phoneCameraStatus.state === "online",
+    };
+    updatePhoneCameraChip();
+    if (isCameraPopoverOpen()) renderCameraPopover(false);
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 8000);
+    phoneCameraCheckPromise = fetch("/api/camera/snap", { signal: controller.signal })
+      .then((resp) => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+      })
+      .then((body) => {
+        const ok = Boolean(body && body.ok && body.result && body.result.data_url);
+        phoneCameraStatus = {
+          state: ok ? "online" : "offline",
+          checkedAt: Date.now(),
+          error: ok ? "" : "抓帧失败",
+          lastOnline: ok,
+        };
+      })
+      .catch((err) => {
+        phoneCameraStatus = {
+          state: "offline",
+          checkedAt: Date.now(),
+          error: err && err.name === "AbortError" ? "连接超时" : "连接失败",
+          lastOnline: false,
+        };
+      })
+      .finally(() => {
+        window.clearTimeout(timer);
+        phoneCameraCheckPromise = null;
+        updatePhoneCameraChip();
+        if (isCameraPopoverOpen()) renderCameraPopover(false);
+        repopulateCameraPortSelect();
+      });
+    return phoneCameraCheckPromise;
+  }
 
   function ensureCameraPopover() {
     if (!cameraPopoverEl) cameraPopoverEl = buildDevicePopover("device-popover-camera");
@@ -2247,6 +2356,7 @@
     renderCameraPopover(true);
     positionPopover(popover, chipCamera);
     if (chipCamera) chipCamera.classList.add("is-active");
+    if (isPhoneCameraPort(cameraCache.active)) refreshPhoneCameraStatus();
     send({ type: "list_cameras", request_id: `cam_${Date.now()}` });
     cameraPendingRequest = performance.now();
   }
@@ -2254,9 +2364,19 @@
   function renderCameraPopover(loading) {
     if (!cameraPopoverEl) return;
     const { cameras, active, available, reason, esp32 } = cameraCache;
+    const activePort = String(active || "").trim();
+    const phonePort = isPhoneCameraPort(activePort) ? activePort : "";
     const items = [];
     items.push({ id: "", label: "关闭摄像头", meta: "禁用视觉输入", group: "off" });
     const espVisible = !!(esp32 && !esp32.hidden && !esp32.needs_firmware_update);
+    if (phonePort) {
+      items.push({
+        id: phonePort,
+        label: "手机摄像头",
+        meta: `${formatPhoneCameraEndpoint(phonePort)} · ${phoneCameraStatusLabel()}`,
+        group: "phone",
+      });
+    }
     if (espVisible && esp32.enabled !== false) {
       const status = esp32.online ? "在线" : "离线";
       const host = esp32.host || "自动发现";
@@ -2276,12 +2396,13 @@
     let subtitle = "";
     if (loading) subtitle = "正在探测可用摄像头...";
     else if (!available) subtitle = reason || "摄像头探测不可用";
+    else if (phonePort) subtitle = `手机摄像头 ${phoneCameraStatusLabel()} · 已探测 ${localCount} 个本地${espVisible ? " + ESP32" : ""}`;
     else subtitle = `已探测 ${localCount} 个本地${espVisible ? " + ESP32" : ""} · 运行时切换`;
     renderDevicePopover(cameraPopoverEl, {
       title: "摄像头设备",
       subtitle,
       items,
-      activeId: (active || "").trim(),
+      activeId: activePort,
       emptyText: loading ? "加载中..." : "未检测到可用摄像头",
       onPick: (item) => selectCameraPort(item.id),
     });
@@ -2291,8 +2412,15 @@
     cameraCache.active = port || "";
     send({ type: "set_camera", port: port || "", request_id: `cam_set_${Date.now()}` });
     if (chipCamera) {
-      if (port === "esp32") chipCamera.title = esp32PeripheralLabel("camera", cameraCache.esp32);
-      else chipCamera.title = port ? `摄像头 port = ${port}` : "摄像头已关闭";
+      if (port === "esp32") {
+        setCameraChipState(Boolean(cameraCache.esp32 && cameraCache.esp32.online), esp32PeripheralLabel("camera", cameraCache.esp32), "摄像头");
+      } else if (isPhoneCameraPort(port)) {
+        phoneCameraStatus = { state: "unknown", checkedAt: 0, error: "", lastOnline: false };
+        updatePhoneCameraChip();
+        refreshPhoneCameraStatus({ force: true });
+      } else {
+        setCameraChipState(Boolean(port), port ? `摄像头 port = ${port}` : "摄像头已关闭", "摄像头");
+      }
     }
     closeCameraPopover();
   }
@@ -2375,6 +2503,7 @@
         }));
         repopulateCameraPortSelect();
         maybeSyncInitialEsp32Volume();
+        if (isPhoneCameraPort(cameraCache.active)) refreshPhoneCameraStatus();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
       }
       return;
@@ -2388,6 +2517,7 @@
         const displayPort = msg.result.active === "esp32" ? "" : (msg.result.active || "");
         repopulateCameraPortSelect(displayPort);
         maybeSyncInitialEsp32Volume();
+        if (isPhoneCameraPort(cameraCache.active)) refreshPhoneCameraStatus({ force: true });
         if (isCameraPopoverOpen()) renderCameraPopover(false);
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
       }
@@ -2957,14 +3087,14 @@
     }
 
     if (chipCamera) {
-      const online = Boolean(data.camera_ready);
-      chipCamera.classList.toggle("is-online", online);
-      chipCamera.classList.toggle("is-offline", !online);
-      if (chipCameraDot) {
-        chipCameraDot.classList.toggle("is-online", online);
-        chipCameraDot.classList.toggle("is-offline", !online);
+      const phonePort = currentPhoneCameraPort();
+      if (phonePort) {
+        updatePhoneCameraChip();
+        refreshPhoneCameraStatus();
+      } else {
+        const online = Boolean(data.camera_ready);
+        setCameraChipState(online, online ? "摄像头已接入" : "摄像头未配置", "摄像头");
       }
-      chipCamera.title = online ? "摄像头已接入" : "摄像头未配置";
     }
 
     if (chipLed) {
@@ -8129,6 +8259,10 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       : `${esp32PeripheralLabel("camera", esp)} (${espStatus})`;
     addOpt("esp32", espLabel);
     const seen = new Set(["", "esp32"]);
+    if (keep && isPhoneCameraPort(keep)) {
+      addOpt(keep, `手机摄像头 (${formatPhoneCameraEndpoint(keep)} · ${phoneCameraStatusLabel()})`);
+      seen.add(keep);
+    }
     detectedDevices.cameras.forEach((cam) => {
       const port = String(cam.port || "");
       if (!port || seen.has(port)) return;
@@ -8136,7 +8270,9 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       addOpt(port, cam.name ? `${port} (${cam.name})` : `摄像头 ${port}`);
     });
     if (keep && !seen.has(keep)) {
-      addOpt(keep, `${keep}（自定义，保留原值）`);
+      addOpt(keep, isPhoneCameraPort(keep)
+        ? `手机摄像头 (${formatPhoneCameraEndpoint(keep)} · ${phoneCameraStatusLabel()})`
+        : `${keep}（自定义，保留原值）`);
     }
     sel.value = keep || "";
   }
@@ -8488,7 +8624,12 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       // "edge-tts" would leave the model input editable until the next manual
       // provider change.
       syncTtsModelEnabled();
-      repopulateCameraPortSelect(cameraCell ? (cameraCell.value || "") : undefined);
+      const cameraPortValue = cameraCell ? (cameraCell.value || "") : undefined;
+      if (cameraPortValue !== undefined) {
+        cameraCache.active = cameraPortValue || "";
+      }
+      repopulateCameraPortSelect(cameraPortValue);
+      if (isPhoneCameraPort(cameraCache.active)) refreshPhoneCameraStatus();
       repopulateMicDeviceSelect(micCell ? (micCell.value || "") : undefined);
       // Motion default playback mode → chip bar. If the user hasn't yet
       // clicked a chip this session (no localStorage override), adopt the
