@@ -51,6 +51,8 @@
   const btnMic = document.getElementById("btn-mic");
   const btnVoiceCancel = document.getElementById("btn-voice-cancel");
   const btnStop = document.getElementById("btn-stop");
+  const btnMusicMode = document.getElementById("btn-music-mode");
+  const musicModeLabel = document.getElementById("music-mode-label");
   const voiceWave = document.getElementById("voice-wave");
   const voiceCanvas = document.getElementById("voice-canvas");
   const recordNameDialog = document.getElementById("record-name-dialog");
@@ -154,6 +156,7 @@
     headshake: { title: "摇头", description: "左右摇头，表达不同意。" },
     look_at: { title: "注视", description: "朝指定方向看过去。" },
     idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
+    dance_to_music: { title: "跟音乐跳舞", description: "读取音乐节奏，间隔拍点做明确律动。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
     presence_react: { title: "人来反应", description: "检测到人时转向并展示问候表情。" },
@@ -473,6 +476,7 @@
   let recordTimerTask = null;
   let recordingFps = 30;
   let recordingFrames = 0;
+  let musicModeRequestId = null;
 
   let sessions = [];
   let activeSessionId = null;
@@ -1612,6 +1616,17 @@
     });
   }
 
+  function handleHintChip(chip) {
+    const skill = chip.dataset.skill || "";
+    if (skill === "dance_to_music") {
+      toggleMusicMode();
+      return;
+    }
+    const prompt = chip.dataset.prompt || chip.textContent || "";
+    chatInput.value = prompt;
+    chatInput.focus();
+  }
+
   /* ---- Empty state ---- */
 
   let emptyStateHost = null;
@@ -1624,11 +1639,7 @@
     emptyStateHost.classList.remove("hidden");
     chatMessages.appendChild(emptyStateHost);
     emptyStateHost.querySelectorAll(".hint-chip").forEach((chip) => {
-      chip.addEventListener("click", () => {
-        const prompt = chip.dataset.prompt || chip.textContent || "";
-        chatInput.value = prompt;
-        chatInput.focus();
-      });
+      chip.addEventListener("click", () => handleHintChip(chip));
     });
   }
 
@@ -2944,6 +2955,11 @@
     }
 
     if (isJointPopoverOpen()) renderJointPopoverContent();
+    if (data.running_skill === "dance_to_music") {
+      setMusicModeActive(true);
+    } else if (!data.is_busy && musicModeRequestId) {
+      setMusicModeActive(false);
+    }
 
     const rec = data.recording || {};
     isMotionRecording = Boolean(rec.active);
@@ -3021,7 +3037,7 @@
   let userSkillQuery = "";
   let recordingQuery = "";
   let expressionQuery = "";
-  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway"]);
+  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway", "dance_to_music"]);
 
   function renderEmptyCell(grid, text) {
     const empty = document.createElement("div");
@@ -3634,6 +3650,52 @@
     send({ type: "invoke", skill_id: skillId, params: {}, wait: true, request_id: requestId });
   }
 
+  function setMusicModeActive(active, requestId = null) {
+    const isActive = !!active;
+    if (isActive && requestId) musicModeRequestId = requestId;
+    if (!isActive) musicModeRequestId = null;
+    if (!btnMusicMode) return;
+    btnMusicMode.classList.toggle("is-active", isActive);
+    btnMusicMode.setAttribute("aria-pressed", isActive ? "true" : "false");
+    btnMusicMode.title = isActive ? "退出跟音乐跳舞模式" : "进入跟音乐跳舞模式";
+    if (musicModeLabel) musicModeLabel.textContent = isActive ? "退出律动" : "音乐律动";
+  }
+
+  function toggleMusicMode() {
+    if (musicModeRequestId) {
+      send({ type: "stop_loop", request_id: musicModeRequestId });
+      if (activeAgentRequestId === musicModeRequestId) {
+        activeAgentRequestId = null;
+        btnStop.classList.add("hidden");
+      }
+      setMusicModeActive(false);
+      addSystemMessage("已退出音乐律动模式");
+      return;
+    }
+
+    clearEmptyState();
+    const requestId = nextId();
+    const bubble = addAssistantBubble(requestId);
+    activeAgentRequestId = requestId;
+    btnStop.classList.remove("hidden");
+    setMusicModeActive(true, requestId);
+    addStep(getPreludeArea(ensureActivityLog(bubble)), "进入音乐律动模式", "active");
+    send({
+      type: "invoke",
+      skill_id: "dance_to_music",
+      params: {
+        duration: 0,
+        source: "system",
+        style: "jazz",
+        amplitude: 0.85,
+        beat_stride: 0,
+        led: true,
+      },
+      wait: true,
+      request_id: requestId,
+    });
+  }
+
   async function invokeSkillViaHttp(skillId, params, requestId) {
     const resp = await fetch("/api/invoke", {
       method: "POST",
@@ -4055,6 +4117,9 @@
     if (msg.request_id === activeAgentRequestId) {
       activeAgentRequestId = null;
       btnStop.classList.add("hidden");
+    }
+    if (msg.request_id === musicModeRequestId) {
+      setMusicModeActive(false);
     }
 
     const isPreempted = !!(result.preempted);
@@ -4665,9 +4730,16 @@
   btnStop.addEventListener("click", () => {
     stopAllTts();
     send({ type: "stop_loop", request_id: activeAgentRequestId || "" });
+    if (activeAgentRequestId === musicModeRequestId) {
+      setMusicModeActive(false);
+    }
     btnStop.classList.add("hidden");
     activeAgentRequestId = null;
   });
+
+  if (btnMusicMode) {
+    btnMusicMode.addEventListener("click", toggleMusicMode);
+  }
 
   btnEstop.addEventListener("click", () => {
     if (confirm("确认强行停止？将立即切断电机力矩，终止一切动作。")) {
@@ -6080,11 +6152,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   });
 
   hintChips.forEach((chip) => {
-    chip.addEventListener("click", () => {
-      const prompt = chip.dataset.prompt || chip.textContent || "";
-      chatInput.value = prompt;
-      chatInput.focus();
-    });
+    chip.addEventListener("click", () => handleHintChip(chip));
   });
 
   if (historySearch) {

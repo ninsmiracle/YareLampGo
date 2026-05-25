@@ -133,6 +133,12 @@
         </div>
 
         <div class="topbar-right">
+          <button id="btn-music-mode" class="ghost-button music-mode-button" type="button" aria-pressed="false" title="进入跟音乐跳舞模式">
+            <span class="music-mode-icon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            </span>
+            <span id="music-mode-label" class="music-mode-label">音乐律动</span>
+          </button>
           <button id="btn-pet-open" class="ghost-button pet-open-button" type="button" title="打开 lampgo pet">Pet</button>
           <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">安全急停</button>
         </div>
@@ -185,6 +191,7 @@
               <div class="empty-state-hints">
                 <button class="hint-chip" type="button" data-prompt="做一个点头的动作">做个点头</button>
                 <button class="hint-chip" type="button" data-prompt="切换到开心的表情">切换表情</button>
+                <button class="hint-chip" type="button" data-skill="dance_to_music" data-prompt="跟着电脑音乐跳舞">音乐律动</button>
                 <button class="hint-chip" type="button" data-prompt="帮我分析下桌面上有什么">分析现场</button>
                 <button class="hint-chip" type="button" data-prompt="回到安全位置">回到安全位</button>
               </div>
