@@ -13,10 +13,12 @@ import asyncio
 import os
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import structlog
 
@@ -82,6 +84,17 @@ voice_agents:
 
 
 AGENT_SDK_PORT = 18790
+
+_LOCAL_NO_PROXY_HOSTS = (
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "0.0.0.0",
+    ".local",
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+)
 
 # ``sitecustomize.py`` is auto-imported by every Python interpreter that has
 # the containing directory on ``sys.path``.  By staging this file in a
@@ -526,13 +539,42 @@ class AgentSDKManager:
         self._patch_dir: Path | None = None
         self._monitor_task: asyncio.Task | None = None
         self._ready_event = asyncio.Event()
+        self._last_error = ""
 
     @property
     def port(self) -> int:
         return self._port
 
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    def _set_last_error(self, error: str) -> None:
+        self._last_error = error
+
+    def _local_livekit_server_reachable(self) -> bool:
+        parsed = urlparse(self._voice.livekit_url or "")
+        host = parsed.hostname or ""
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            return True
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            self._set_last_error(
+                f"LiveKit server is not reachable at {self._voice.livekit_url}; start it before voice calls."
+            )
+            logger.warning(
+                "agent_sdk.livekit_server_unreachable",
+                livekit_url=self._voice.livekit_url,
+                hint="start LiveKit server before starting a voice call",
+            )
+            return False
+
     def _can_start(self) -> bool:
         """Check that all required config fields are present."""
+        self._set_last_error("")
         v = self._voice
         missing = []
         if not v.livekit_url:
@@ -546,11 +588,15 @@ class AgentSDKManager:
         if not v.volcengine_access_token:
             missing.append("volcengine_access_token")
         if missing:
+            self._set_last_error("Missing voice config: " + ", ".join(missing))
             logger.info("agent_sdk.missing_config", fields=missing)
+            return False
+        if not self._local_livekit_server_reachable():
             return False
         try:
             import lampgo_livekit_agent  # noqa: F401
         except ImportError:
+            self._set_last_error("lampgo-livekit-agent package is not installed")
             logger.warning(
                 "agent_sdk.package_not_found",
                 hint="Install voice extras: uv pip install lampgo[voice]",
@@ -597,6 +643,16 @@ class AgentSDKManager:
         which = shutil.which("lampgo-livekit-agent")
         return which
 
+    @staticmethod
+    def _merge_no_proxy(value: str | None) -> str:
+        existing = [item.strip() for item in (value or "").split(",") if item.strip()]
+        seen = {item.lower() for item in existing}
+        for host in _LOCAL_NO_PROXY_HOSTS:
+            if host.lower() not in seen:
+                existing.append(host)
+                seen.add(host.lower())
+        return ",".join(existing)
+
     async def start(self) -> bool:
         """Start the Agent SDK subprocess if config is complete."""
         if self._process is not None:
@@ -608,6 +664,7 @@ class AgentSDKManager:
 
         sdk_binary = self._resolve_sdk_binary()
         if sdk_binary is None:
+            self._set_last_error("lampgo-livekit-agent CLI is missing from PATH and venv/bin")
             logger.warning(
                 "agent_sdk.binary_not_found",
                 hint="lampgo-livekit-agent CLI is missing from PATH and venv/bin",
@@ -624,7 +681,28 @@ class AgentSDKManager:
         env["PYTHONPATH"] = (
             f"{self._patch_dir}{os.pathsep}{existing_pp}" if existing_pp else str(self._patch_dir)
         )
-        env["LAMPGO_LIVEKIT_ALLOW_INTERRUPTIONS"] = "1" if self._voice.livekit_allow_interruptions else "0"
+        call_mode = str(getattr(self._voice, "call_mode", "") or "stable").strip().lower().replace("-", "_")
+        call_mode = {
+            "safe": "stable",
+            "half_duplex": "stable",
+            "interrupt": "interruptible",
+            "interruptions": "interruptible",
+            "barge_in": "interruptible",
+            "aec": "esp32_aec",
+            "experimental_aec": "esp32_aec",
+        }.get(call_mode, call_mode)
+        allow_interruptions = (
+            call_mode in {"interruptible", "esp32_aec"}
+            if call_mode
+            else bool(self._voice.livekit_allow_interruptions)
+        )
+        env["LAMPGO_LIVEKIT_ALLOW_INTERRUPTIONS"] = "1" if allow_interruptions else "0"
+        no_proxy = self._merge_no_proxy(
+            ",".join(value for value in (env.get("NO_PROXY"), env.get("no_proxy")) if value)
+        )
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
+        logger.info("agent_sdk.no_proxy_configured", no_proxy=no_proxy)
 
         self._ready_event.clear()
         try:
@@ -652,6 +730,7 @@ class AgentSDKManager:
             )
             return True
         except Exception:
+            self._set_last_error("failed to start lampgo-livekit-agent")
             logger.exception("agent_sdk.start_failed")
             self._cleanup_roles()
             self._cleanup_patch_dir()

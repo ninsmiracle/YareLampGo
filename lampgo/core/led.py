@@ -240,7 +240,7 @@ class LEDController:
             body = manager.with_owner_auth(payload, reason="led") if hasattr(manager, "with_owner_auth") else payload
             import httpx
 
-            resp = httpx.post(f"{base_url}/device/led", json=body, timeout=2.0)
+            resp = httpx.post(f"{base_url}/device/led", json=body, timeout=2.0, trust_env=False)
             ok = resp.status_code < 400
             if ok:
                 try:

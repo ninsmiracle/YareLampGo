@@ -3512,6 +3512,41 @@ section.view[data-view="settings"] .view-header {
   box-shadow: 0 0 0 3px rgba(222, 147, 136, 0.15);
 }
 
+.settings-segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  min-height: 38px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #f6f1ec;
+}
+
+.settings-segment {
+  min-width: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-segment.is-active {
+  background: #fffdfb;
+  color: var(--text);
+  box-shadow: 0 1px 4px rgba(80, 56, 42, 0.12);
+}
+
+.settings-field.is-override-env .settings-segmented {
+  opacity: 0.65;
+  pointer-events: none;
+}
+
 .settings-input.hidden {
   display: none;
 }

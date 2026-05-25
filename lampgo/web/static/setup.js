@@ -348,20 +348,20 @@
 
   if (dom.btnForget) {
     dom.btnForget.addEventListener("click", async () => {
-      if (!confirm("解绑设备会解除当前电脑与这台 ESP32 的配对，但保留设备 WiFi。另一台电脑之后可以重新配对。继续？")) return;
-      setActionStatus("解绑中…");
+      if (!confirm("解绑设备会清除当前配对和设备 WiFi，ESP32 将重启并重新开启 Lampgo-Setup 热点。继续？")) return;
+      setActionStatus("解绑并重置 WiFi 中…");
       try {
-        const res = await fetch("/api/device/unpair", { method: "POST" });
+        const res = await fetch("/api/device/forget-wifi", { method: "POST" });
         const body = await res.json().catch(() => ({}));
         if (body && body.ok) {
-          setActionStatus("已解绑设备");
+          setActionStatus("已清除设备 WiFi，等待 ESP32 重启并开启 Lampgo-Setup 热点");
           const status = await fetchStatus();
           renderStatus(status);
         } else {
-          setActionStatus("解绑失败：" + (body.error || "无权限或设备离线"));
+          setActionStatus("重置失败：" + (body.error || "无权限或设备离线"));
         }
       } catch (err) {
-        setActionStatus("解绑失败：" + err.message);
+        setActionStatus("重置失败：" + err.message);
       }
     });
   }
@@ -488,6 +488,9 @@
     try {
       const result = await deviceProbe("/scan", { method: "GET" });
       const body = result.body || {};
+      if (Number.isFinite(body.scan_result) && body.scan_result < 0) {
+        throw new Error(`ESP32 扫描失败：${body.error || "scan_failed"} (${body.scan_result})`);
+      }
       const networks = Array.isArray(body.networks) ? body.networks : [];
       dom.ssidSelect.innerHTML = "";
       if (!networks.length) {
@@ -560,11 +563,20 @@
     dom.wait.textContent = "已发送 WiFi 信息，ESP32 正在重启并连接…\n请将电脑切回家庭 WiFi（如仍连着 Lampgo-Setup 热点）";
     const start = Date.now();
     let phase2 = false;
+    let lastDiscoveryRestartAt = 0;
     while (Date.now() - start < SETUP_WAIT_TIMEOUT_MS) {
       await new Promise((r) => setTimeout(r, SETUP_WAIT_POLL_MS));
       if (!phase2 && Date.now() - start > 8000) {
         phase2 = true;
         dom.wait.textContent = "正在通过 mDNS 搜索设备…（请确认电脑已连回家庭 WiFi）";
+      }
+      if (phase2 && Date.now() - lastDiscoveryRestartAt > 10000) {
+        lastDiscoveryRestartAt = Date.now();
+        void fetch("/api/device/discovery/restart", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clear_devices: false }),
+        }).catch(() => {});
       }
       try {
         const status = await fetchStatus();

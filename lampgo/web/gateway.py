@@ -197,6 +197,7 @@ class WebGateway:
             Route("/api/device/reboot", self.api_esp32_reboot, methods=["POST"]),
             Route("/api/device/forget-wifi", self.api_esp32_forget_wifi, methods=["POST"]),
             Route("/api/device/probe", self.api_esp32_probe, methods=["POST"]),
+            Route("/api/device/discovery/restart", self.api_esp32_restart_discovery, methods=["POST"]),
             Route("/api/device/capture-audio/start", self.api_esp32_capture_start, methods=["POST"]),
             Route("/api/device/capture-audio/stop", self.api_esp32_capture_stop, methods=["POST"]),
             Route("/api/device/capture-audio/cancel", self.api_esp32_capture_cancel, methods=["POST"]),
@@ -767,26 +768,31 @@ class WebGateway:
             client_call_id=client_call_id,
         )
         agent_sdk = getattr(self.server, "_agent_sdk", None)
-        wait_ready = getattr(agent_sdk, "wait_ready", None)
-        if callable(wait_ready):
-            ready = await wait_ready(timeout_s=10.0)
-            if not ready:
-                logger.info(
-                    "web.livekit_token_agent_not_ready",
-                    room=room_name,
-                    user_identity=user_identity,
-                    voice_agent=voice_agent,
-                    client_call_id=client_call_id,
-                )
-                async with self._livekit_token_lock:
-                    if self._livekit_token_gate_owner == client_call_id:
-                        self._livekit_token_gate_until = 0.0
-                        self._livekit_token_gate_owner = ""
-                return JSONResponse(
-                    {"ok": False, "error": "voice agent is still starting"},
-                    status_code=503,
-                )
-        async with httpx_module.AsyncClient(timeout=10) as client:
+        ensure_ready = getattr(self.server, "ensure_agent_sdk_ready", None)
+        if callable(ensure_ready):
+            ready, error = await ensure_ready(timeout_s=10.0)
+        else:
+            wait_ready = getattr(agent_sdk, "wait_ready", None)
+            ready = bool(callable(wait_ready) and await wait_ready(timeout_s=10.0))
+            error = "" if ready else "voice agent SDK is not running"
+        if not ready:
+            logger.info(
+                "web.livekit_token_agent_not_ready",
+                room=room_name,
+                user_identity=user_identity,
+                voice_agent=voice_agent,
+                client_call_id=client_call_id,
+                error=error,
+            )
+            async with self._livekit_token_lock:
+                if self._livekit_token_gate_owner == client_call_id:
+                    self._livekit_token_gate_until = 0.0
+                    self._livekit_token_gate_owner = ""
+            return JSONResponse(
+                {"ok": False, "error": error or "voice agent SDK is not ready"},
+                status_code=503,
+            )
+        async with httpx_module.AsyncClient(timeout=10, trust_env=False) as client:
             resp = await client.post(
                 f"http://127.0.0.1:{AGENT_SDK_PORT}/rtc/token",
                 json={
@@ -1116,7 +1122,10 @@ class WebGateway:
             "voice.livekit_api_key",
             "voice.livekit_api_secret",
             "voice.livekit_room",
+            "voice.call_mode",
             "voice.livekit_allow_interruptions",
+            "voice.echo_gate_hangover_ms",
+            "voice.echo_text_filter_enabled",
             "voice.volcengine_app_id",
             "voice.volcengine_access_token",
             "voice.livekit_tts_voice",
@@ -1144,7 +1153,10 @@ class WebGateway:
             "voice.livekit_api_key",
             "voice.livekit_api_secret",
             "voice.livekit_room",
+            "voice.call_mode",
             "voice.livekit_allow_interruptions",
+            "voice.echo_gate_hangover_ms",
+            "voice.echo_text_filter_enabled",
             "voice.silence_timeout_s",
             "voice.volcengine_app_id",
             "voice.volcengine_access_token",
@@ -1197,6 +1209,40 @@ class WebGateway:
 
     def _list_env_overrides(self, provenance: dict[str, str]) -> list[str]:
         return sorted(k for k, v in provenance.items() if v == "env")
+
+    @staticmethod
+    def _normalize_voice_call_mode(value: Any) -> str:
+        mode = str(value or "stable").strip().lower().replace("-", "_")
+        aliases = {
+            "safe": "stable",
+            "half_duplex": "stable",
+            "barge_in": "interruptible",
+            "interrupt": "interruptible",
+            "interruptions": "interruptible",
+            "aec": "esp32_aec",
+            "experimental_aec": "esp32_aec",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in {"stable", "interruptible", "esp32_aec"}:
+            raise ValueError("voice.call_mode must be stable, interruptible, or esp32_aec")
+        return mode
+
+    def _derive_voice_mode_fields(self, flat: dict[str, Any]) -> None:
+        """Keep the product-level call mode as the source of truth.
+
+        The old raw ``livekit_allow_interruptions`` switch is still persisted
+        for the Agent SDK, but whenever the user saves ``voice.call_mode`` we
+        derive it from the mode so the UI and runtime cannot drift.
+        """
+        if "voice.call_mode" in flat:
+            mode = self._normalize_voice_call_mode(flat["voice.call_mode"])
+            flat["voice.call_mode"] = mode
+            flat["voice.livekit_allow_interruptions"] = mode in {"interruptible", "esp32_aec"}
+        if "voice.echo_gate_hangover_ms" in flat and flat["voice.echo_gate_hangover_ms"] is not None:
+            hangover = int(flat["voice.echo_gate_hangover_ms"])
+            if hangover < 0 or hangover > 5000:
+                raise ValueError("voice.echo_gate_hangover_ms must be between 0 and 5000")
+            flat["voice.echo_gate_hangover_ms"] = hangover
 
     async def api_config_all(self, request: Request) -> JSONResponse:
         """Return every editable field grouped by tab, with per-field provenance."""
@@ -1264,6 +1310,11 @@ class WebGateway:
 
         if not flat:
             return JSONResponse({"ok": False, "error": "no fields to update"}, status_code=400)
+        try:
+            if section == "voice":
+                self._derive_voice_mode_fields(flat)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"invalid value: {exc}"}, status_code=400)
 
         # Build nested patch for personastore.
         patch: dict[str, Any] = {}
@@ -1905,6 +1956,17 @@ class WebGateway:
             }
         )
 
+    async def api_esp32_restart_discovery(self, request: Request) -> JSONResponse:
+        if not self.server.esp32 or not self.server.config.device_esp32.enabled:
+            return JSONResponse({"ok": False, "error": "esp32_not_enabled"}, status_code=400)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        clear_devices = bool(payload.get("clear_devices", False)) if isinstance(payload, dict) else False
+        await self.server.esp32.restart_discovery(clear_devices=clear_devices, reason="api")
+        return JSONResponse({"ok": True, "result": self.server.esp32.get_status()})
+
     async def api_esp32_snapshot(self, request: Request) -> Any:
         """GET /api/device/snapshot — proxy a single JPEG frame from the device."""
         from starlette.responses import Response
@@ -2271,7 +2333,7 @@ class WebGateway:
 
         url = f"{base_url}{path}"
         try:
-            async with httpx_module.AsyncClient(timeout=5.0) as client:
+            async with httpx_module.AsyncClient(timeout=5.0, trust_env=False) as client:
                 if method == "GET":
                     resp = await client.get(url)
                 elif method == "POST":
@@ -2279,8 +2341,9 @@ class WebGateway:
                 else:
                     return JSONResponse({"ok": False, "error": f"unsupported method: {method}"}, status_code=400)
         except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
             return JSONResponse(
-                {"ok": False, "error": f"probe_failed: {exc}", "url": url},
+                {"ok": False, "error": f"probe_failed: {detail}", "url": url},
                 status_code=502,
             )
 

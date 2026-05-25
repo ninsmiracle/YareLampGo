@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
@@ -381,9 +381,23 @@ class VoiceConfig(BaseModel):
         default="mimo-agent-lampgo-jarvis",
         description="Agent name dispatched in the LiveKit room (must match roles.yaml name_prefix + voice_agent).",
     )
+    call_mode: Literal["stable", "interruptible", "esp32_aec"] = Field(
+        default="stable",
+        description="LiveKit call mode: stable half-duplex, interruptible without ESP32 AEC, or experimental ESP32 AEC.",
+    )
     livekit_allow_interruptions: bool = Field(
-        default=True,
+        default=False,
         description="Allow users to barge in during LiveKit RTC conversations and interrupt current playback/LLM turn.",
+    )
+    echo_gate_hangover_ms: int = Field(
+        default=1000,
+        ge=0,
+        le=5000,
+        description="Stable-mode ESP32 mic mute hangover after speaker voice energy, in milliseconds.",
+    )
+    echo_text_filter_enabled: bool = Field(
+        default=True,
+        description="Drop likely self-echo ASR text in interruptible modes without enabling ESP32-side AEC.",
     )
     silence_timeout_s: int = Field(default=60, ge=10, le=300, description="Seconds of silence before ending a conversation")
     volcengine_app_id: str = Field(default="", description="Volcengine app ID for ASR/TTS")
@@ -402,6 +416,23 @@ class VoiceConfig(BaseModel):
         if s in {"mimo", "mimo-tts", "mimo-stt"}:
             return "volcengine"
         return s
+
+    @field_validator("call_mode", mode="before")
+    @classmethod
+    def _normalize_call_mode(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        s = v.strip().lower().replace("-", "_")
+        aliases = {
+            "safe": "stable",
+            "half_duplex": "stable",
+            "barge_in": "interruptible",
+            "interrupt": "interruptible",
+            "interruptions": "interruptible",
+            "aec": "esp32_aec",
+            "experimental_aec": "esp32_aec",
+        }
+        return aliases.get(s, s)
 
     @field_validator("stt_model", mode="before")
     @classmethod
@@ -434,6 +465,23 @@ class VoiceConfig(BaseModel):
         if s == "BV700_streaming":
             return "zh_female_vv_uranus_bigtts"
         return _volcengine_voice_or_default(s)
+
+    @field_validator(
+        "livekit_url",
+        "livekit_api_key",
+        "livekit_api_secret",
+        "livekit_room",
+        "livekit_agent_name",
+        "volcengine_app_id",
+        "volcengine_access_token",
+        "wake_word",
+        mode="before",
+    )
+    @classmethod
+    def _strip_voice_runtime_strings(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip()
+        return v
 
 
 class WebConfig(BaseModel):
@@ -632,7 +680,10 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_VOICE_LIVEKIT_API_KEY": ("voice", "livekit_api_key"),
         "LAMPGO_VOICE_LIVEKIT_API_SECRET": ("voice", "livekit_api_secret"),
         "LAMPGO_VOICE_LIVEKIT_ROOM": ("voice", "livekit_room"),
+        "LAMPGO_VOICE_CALL_MODE": ("voice", "call_mode"),
         "LAMPGO_VOICE_LIVEKIT_ALLOW_INTERRUPTIONS": ("voice", "livekit_allow_interruptions"),
+        "LAMPGO_VOICE_ECHO_GATE_HANGOVER_MS": ("voice", "echo_gate_hangover_ms"),
+        "LAMPGO_VOICE_ECHO_TEXT_FILTER_ENABLED": ("voice", "echo_text_filter_enabled"),
         "LAMPGO_VOICE_SILENCE_TIMEOUT_S": ("voice", "silence_timeout_s"),
         "LAMPGO_VOICE_VOLCENGINE_APP_ID": ("voice", "volcengine_app_id"),
         "LAMPGO_VOICE_VOLCENGINE_ACCESS_TOKEN": ("voice", "volcengine_access_token"),
