@@ -19,6 +19,9 @@ dependencies = [
     "sounddevice>=0.5.5",
     "edge-tts>=7.2.8",
     "httpx>=0.28.1",
+    "openai>=2.9.0",
+    "Pillow>=12.0.0",
+    "requests>=2.31.0",
     "starlette>=0.45",
     "uvicorn>=0.34",
     "websockets>=14.0",
@@ -71,6 +74,8 @@ build-backend = "hatchling.build"
 packages = ["lampgo"]
 artifacts = [
     "lampgo/bin/LampgoAudioTap",
+    "lampgo/vendor/open_autoglm/LICENSE",
+    "lampgo/vendor/open_autoglm/tools/ADBKeyboard.apk",
 ]
 
 [tool.ruff]
