@@ -240,10 +240,10 @@ class LookAtSkill(Skill):
 class IdleSwaySkill(Skill):
     """Gentle idle sway using a pre-computed dual-axis sinusoidal frame sequence.
 
-    Both ``base_pitch`` and ``base_yaw`` are oscillated at slightly different
-    frequencies (ratio 1 : 0.7) to produce a natural Lissajous-like organic
-    sway pattern.  The entire trajectory is generated once and streamed, so
-    the control thread never needs to re-plan mid-motion.
+    Both ``base_pitch`` and ``base_yaw`` are oscillated at slightly different,
+    randomly varied frequencies to produce a natural Lissajous-like organic
+    sway pattern.  The entire trajectory is generated once and streamed, so the
+    control thread never needs to re-plan mid-motion.
     """
 
     skill_id = "idle_sway"
@@ -264,9 +264,13 @@ class IdleSwaySkill(Skill):
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = ctx.motion
-        amplitude = float(params.get("amplitude", 5.0))
-        period = float(params.get("period", 4.0))
-        duration = float(params.get("duration", 20.0))
+        amplitude = max(0.0, _jitter(float(params.get("amplitude", 5.0)), 0.18))
+        period = max(0.5, _jitter(float(params.get("period", 4.0)), 0.12))
+        duration = max(0.5, float(params.get("duration", 20.0)))
+        pitch_direction = random.choice((-1.0, 1.0))
+        yaw_direction = random.choice((-1.0, 1.0))
+        yaw_scale = random.uniform(0.22, 0.42)
+        yaw_period_ratio = random.uniform(0.62, 0.82)
 
         base_pitch = ctx.state.get("base_pitch", 0.0)
         base_yaw = ctx.state.get("base_yaw", 0.0)
@@ -274,10 +278,14 @@ class IdleSwaySkill(Skill):
         frames = generate_sine_frames(
             base={"base_pitch": base_pitch, "base_yaw": base_yaw},
             axes={
-                "base_pitch": {"amplitude": amplitude, "period": period, "phase": 0.0},
+                "base_pitch": {
+                    "amplitude": amplitude * pitch_direction,
+                    "period": period,
+                    "phase": 0.0,
+                },
                 "base_yaw": {
-                    "amplitude": amplitude * 0.3,
-                    "period": period / 0.7,  # slightly different frequency for Lissajous feel
+                    "amplitude": amplitude * yaw_scale * yaw_direction,
+                    "period": period / yaw_period_ratio,
                     "phase": 0.0,
                 },
             },
@@ -293,7 +301,14 @@ class IdleSwaySkill(Skill):
         finally:
             self._motion = None
 
-        return SkillResult(status="ok")
+        return SkillResult(
+            status="ok",
+            data={
+                "amplitude": round(amplitude, 2),
+                "period": round(period, 2),
+                "duration": round(duration, 2),
+            },
+        )
 
     async def cancel(self) -> None:
         if self._motion is not None:

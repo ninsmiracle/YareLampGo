@@ -1009,23 +1009,63 @@
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.default_playback_mode"></span>
                 </label>
-                <label class="settings-field" data-cfg-field="motion.breathing_enabled">
+                <label class="settings-field" data-cfg-field="motion.idle_sway_enabled">
                   <span class="settings-field-label">
-                    <input type="checkbox" data-cfg-input="motion.breathing_enabled">
-                    呼吸动作（待机时轻微起伏）
+                    <input type="checkbox" data-cfg-input="motion.idle_sway_enabled">
+                    待机随机摆动
                   </span>
                   <span class="settings-field-hint">
-                    空闲时叠加一个低频正弦微动，让台灯看上去"在呼吸"、不显得僵硬。有正在执行的动作时会自动让位。
+                    台灯空闲一段时间后，按随机间隔触发一次出厂技能 <code>idle_sway</code>。关闭后待机时保持静止。
                   </span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.breathing_enabled"></span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_enabled"></span>
                 </label>
-                <label class="settings-field" data-cfg-field="motion.breathing_amplitude">
-                  <span class="settings-field-label">呼吸幅度 (度)</span>
-                  <input class="settings-input" type="number" step="0.5" min="0" data-cfg-input="motion.breathing_amplitude">
+                <label class="settings-field" data-cfg-field="motion.idle_sway_idle_after_s">
+                  <span class="settings-field-label">空闲多久后触发 (秒)</span>
+                  <input class="settings-input" type="number" step="10" min="0" data-cfg-input="motion.idle_sway_idle_after_s">
                   <span class="settings-field-hint">
-                    呼吸起伏的峰值角度（各关节会再按比例缩放）。默认 <code>3°</code>；调小接近"屏息"，调大约到 <code>8°</code> 会明显晃。
+                    默认 <code>600</code>，也就是空闲 10 分钟后才开始自动摆动。
                   </span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.breathing_amplitude"></span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_idle_after_s"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.idle_sway_interval_s">
+                  <span class="settings-field-label">触发间隔基准 (秒)</span>
+                  <input class="settings-input" type="number" step="1" min="1" data-cfg-input="motion.idle_sway_interval_s">
+                  <span class="settings-field-hint">
+                    进入空闲状态后，每隔约这个时间触发一次随机摆动。默认 <code>30</code>。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_interval_s"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.idle_sway_interval_jitter_s">
+                  <span class="settings-field-label">间隔随机浮动 (±秒)</span>
+                  <input class="settings-input" type="number" step="1" min="0" data-cfg-input="motion.idle_sway_interval_jitter_s">
+                  <span class="settings-field-hint">
+                    避免每次都像计时器一样准点触发。默认 <code>8</code>。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_interval_jitter_s"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.idle_sway_duration_s">
+                  <span class="settings-field-label">单次摆动时长 (秒)</span>
+                  <input class="settings-input" type="number" step="0.5" min="1" data-cfg-input="motion.idle_sway_duration_s">
+                  <span class="settings-field-hint">
+                    每次 <code>idle_sway</code> 持续多久。默认 <code>8</code>。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_duration_s"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.idle_sway_amplitude">
+                  <span class="settings-field-label">摆动幅度 (度)</span>
+                  <input class="settings-input" type="number" step="0.5" min="0" data-cfg-input="motion.idle_sway_amplitude">
+                  <span class="settings-field-hint">
+                    默认 <code>6°</code>，比旧的小幅抖动更容易被识别为主动动作。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_amplitude"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="motion.idle_sway_period_s">
+                  <span class="settings-field-label">摆动周期 (秒)</span>
+                  <input class="settings-input" type="number" step="0.5" min="1" data-cfg-input="motion.idle_sway_period_s">
+                  <span class="settings-field-hint">
+                    控制摆动节奏。默认 <code>4.5</code>。
+                  </span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="motion.idle_sway_period_s"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="motion.overlapping_action">
                   <span class="settings-field-label">
