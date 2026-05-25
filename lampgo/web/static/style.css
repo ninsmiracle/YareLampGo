@@ -787,6 +787,23 @@ button {
   flex-shrink: 0;
 }
 
+.music-mode-button {
+  gap: 7px;
+  padding: 0 12px;
+  color: #6b5f4a;
+}
+
+.music-mode-icon {
+  display: inline-flex;
+}
+
+.music-mode-button.is-active {
+  color: #7b4d17;
+  background: #fff4cf;
+  border-color: rgba(196, 135, 35, 0.45);
+  box-shadow: 0 0 0 3px rgba(229, 181, 103, 0.16);
+}
+
 /* ── Call view ── */
 .view[data-view="call"] {
   display: flex;
@@ -3324,6 +3341,15 @@ button.device-chip.is-active {
 @media (max-width: 640px) {
   .topbar {
     padding: 8px 12px;
+  }
+
+  .music-mode-button {
+    width: 34px;
+    padding: 0;
+  }
+
+  .music-mode-label {
+    display: none;
   }
 
   .view {
