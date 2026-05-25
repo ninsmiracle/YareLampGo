@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+**/.build/
 .venv/
 .env
 lampgo.toml
@@ -18,7 +19,6 @@ assets/recordings/aliases.json
 .env_backup
 lampgo.toml_backup
 scripts/
-tests/
 docs/zhiqi/
 
 docs/whitepapers/
