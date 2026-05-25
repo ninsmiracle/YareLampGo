@@ -64,6 +64,9 @@ def test_api_config_post_motion_writes_overrides_and_hot_applies(monkeypatch, tm
     payload = {
         "motion.default_max_velocity": 3.5,
         "motion.default_style": "snappy",
+        "motion.idle_sway_enabled": False,
+        "motion.idle_sway_idle_after_s": 42.0,
+        "motion.idle_sway_interval_s": 13.0,
     }
 
     with TestClient(gateway.app) as client:
@@ -81,11 +84,17 @@ def test_api_config_post_motion_writes_overrides_and_hot_applies(monkeypatch, tm
     server = gateway.server
     assert server.config.motion.default_max_velocity == 3.5
     assert server.config.motion.default_style == "snappy"
+    assert server.config.motion.idle_sway_enabled is False
+    assert server.config.motion.idle_sway_idle_after_s == 42.0
+    assert server.config.motion.idle_sway_interval_s == 13.0
 
     # ~/.lampgo/config.toml persisted.
     overrides = personastore.get_overrides_toml()
     assert overrides["motion"]["default_max_velocity"] == 3.5
     assert overrides["motion"]["default_style"] == "snappy"
+    assert overrides["motion"]["idle_sway_enabled"] is False
+    assert overrides["motion"]["idle_sway_idle_after_s"] == 42.0
+    assert overrides["motion"]["idle_sway_interval_s"] == 13.0
 
     # Second GET reflects the new values with source=user_config.
     with TestClient(gateway.app) as client:
