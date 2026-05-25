@@ -56,13 +56,22 @@ use_degrees = true
 [motion]
 tick_rate_hz = 50.0
 default_max_velocity = 120.0
+idle_sway_enabled = true
+idle_sway_idle_after_s = 600.0
+idle_sway_interval_s = 30.0
+idle_sway_interval_jitter_s = 8.0
+idle_sway_duration_s = 8.0
+idle_sway_amplitude = 6.0
+idle_sway_period_s = 4.5
 
 [safety]
 max_velocity = 180.0
 max_acceleration = 900.0
 ```
 
-运动参数可通过 Web 设置页热更新；硬件串口、设备 ID 等字段通常需要重启服务。
+`idle_sway_*` 控制待机随机摆动：台灯空闲到 `idle_sway_idle_after_s` 后，会按
+`idle_sway_interval_s ± idle_sway_interval_jitter_s` 的随机间隔触发一次出厂技能
+`idle_sway`。运动参数可通过 Web 设置页热更新；硬件串口、设备 ID 等字段通常需要重启服务。
 
 ### LLM
 

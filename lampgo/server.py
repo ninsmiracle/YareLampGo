@@ -10,6 +10,7 @@ The server owns:
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import signal
 import time
@@ -31,6 +32,7 @@ from lampgo.core.events import (
     IntentRouting,
     OpenClawAskRequested,
     OpenClawAskResolved,
+    SkillStarted,
     ToolCallFinished,
     ToolCallPlanned,
     TtsAudio,
@@ -115,7 +117,12 @@ class LampgoServer:
         self._record_fps: int = 30
         self._record_motion_was_running: bool = False
         self._motor_reload_lock = asyncio.Lock()
+        self._idle_sway_task: asyncio.Task | None = None
+        self._last_foreground_activity_at = time.monotonic()
+        self._next_idle_sway_at = 0.0
+        self._auto_idle_sway_invoking = False
         self._started = False
+        self.events.subscribe(SkillStarted, self._on_skill_started)
 
     def _use_virtual_motion(self) -> None:
         """Switch motion to the no-hardware in-memory runtime."""
@@ -200,6 +207,88 @@ class LampgoServer:
             events=self.events,
             state=self.motion.current_state,
         )
+
+    async def _on_skill_started(self, event: SkillStarted) -> None:
+        if event.skill_id == "idle_sway" and self._auto_idle_sway_invoking:
+            return
+        self._mark_foreground_activity()
+
+    def _mark_foreground_activity(self) -> None:
+        now = time.monotonic()
+        self._last_foreground_activity_at = now
+        self._schedule_next_idle_sway(now)
+
+    def _idle_sway_delay_s(self) -> float:
+        cfg = self.config.motion
+        base = max(float(getattr(cfg, "idle_sway_interval_s", 30.0)), 1.0)
+        jitter = max(float(getattr(cfg, "idle_sway_interval_jitter_s", 0.0)), 0.0)
+        if jitter > 0:
+            base += random.uniform(-jitter, jitter)
+        return max(1.0, base)
+
+    def _schedule_next_idle_sway(self, now: float | None = None) -> None:
+        self._next_idle_sway_at = (now if now is not None else time.monotonic()) + self._idle_sway_delay_s()
+
+    def _start_idle_sway_scheduler(self) -> None:
+        if self._idle_sway_task is not None and not self._idle_sway_task.done():
+            return
+        self._mark_foreground_activity()
+        self._idle_sway_task = asyncio.create_task(self._idle_sway_scheduler_loop())
+
+    async def _stop_idle_sway_scheduler(self) -> None:
+        task = self._idle_sway_task
+        self._idle_sway_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _idle_sway_scheduler_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            cfg = self.config.motion
+            if not getattr(cfg, "idle_sway_enabled", True):
+                self._next_idle_sway_at = 0.0
+                continue
+            if not self.motion.is_running or self.safety.is_estopped() or self._record_recorder is not None:
+                self._mark_foreground_activity()
+                continue
+            if self.executor.current_skill_id:
+                continue
+
+            now = time.monotonic()
+            idle_after_s = max(float(getattr(cfg, "idle_sway_idle_after_s", 600.0)), 0.0)
+            if now - self._last_foreground_activity_at < idle_after_s:
+                continue
+            if self._next_idle_sway_at <= 0.0:
+                self._schedule_next_idle_sway(now)
+                continue
+            if now < self._next_idle_sway_at:
+                continue
+
+            params = {
+                "amplitude": float(getattr(cfg, "idle_sway_amplitude", 6.0)),
+                "period": float(getattr(cfg, "idle_sway_period_s", 4.5)),
+                "duration": float(getattr(cfg, "idle_sway_duration_s", 8.0)),
+            }
+            logger.info("server.idle_sway_auto_trigger", params=params)
+            self._auto_idle_sway_invoking = True
+            try:
+                result = await self.executor.invoke("idle_sway", self.make_context(), **params)
+                if result.status != "ok":
+                    logger.warning(
+                        "server.idle_sway_auto_failed",
+                        status=result.status,
+                        error=result.error_detail,
+                    )
+            except Exception:
+                logger.exception("server.idle_sway_auto_error")
+            finally:
+                self._auto_idle_sway_invoking = False
+                self._schedule_next_idle_sway(time.monotonic())
 
     async def handle_request(self, data: dict[str, Any]) -> dict[str, Any]:
         """Route an IPC request to the appropriate handler."""
@@ -1713,6 +1802,7 @@ class LampgoServer:
         self._load_user_skills()
         if self.config.home_on_start:
             await self._home_on_start()
+        self._start_idle_sway_scheduler()
         await self._ipc.start()
         if self.config.device_esp32.enabled:
             try:
@@ -1909,6 +1999,7 @@ class LampgoServer:
 
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
+        await self._stop_idle_sway_scheduler()
         async with self._record_lock:
             if self._record_recorder is not None and self._record_recorder.is_recording:
                 self._record_recorder.stop()
