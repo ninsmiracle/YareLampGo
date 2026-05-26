@@ -39,6 +39,7 @@ class SkillExecutor:
     def __init__(self, registry: SkillRegistry, events: EventBus) -> None:
         self._registry = registry
         self._events = events
+        self._lock = asyncio.Lock()
         self._current_task: asyncio.Task | None = None
         self._current_skill: Skill | None = None
         self._current_invocation_id: str | None = None
@@ -71,28 +72,34 @@ class SkillExecutor:
                 result={"note": "LED not connected, skipped"},
             )
 
-        # Cancel current skill if running
-        if self._current_task is not None and not self._current_task.done():
-            await self._cancel_current()
+        async with self._lock:
+            # Cancel current skill if running. This gives rapid UI clicks
+            # last-writer-wins semantics without leaving old skill coroutines
+            # around to run their own cleanup motions later.
+            if self._current_task is not None and not self._current_task.done():
+                await self._cancel_current_locked()
 
-        self._current_skill = skill
-        self._current_invocation_id = invocation_id
+            self._current_skill = skill
+            self._current_invocation_id = invocation_id
+            self._current_task = asyncio.create_task(skill.execute(ctx, **params))
+            task = self._current_task
 
-        await self._events.publish(SkillStarted(skill_id=skill_id, invocation_id=invocation_id))
-        logger.info("executor.invoke", skill_id=skill_id, invocation_id=invocation_id)
+            await self._events.publish(SkillStarted(skill_id=skill_id, invocation_id=invocation_id))
+            logger.info("executor.invoke", skill_id=skill_id, invocation_id=invocation_id)
 
-        task = asyncio.create_task(skill.execute(ctx, **params))
-        self._current_task = task
         try:
-            result = await asyncio.wait_for(
-                task,
-                timeout=300.0,
-            )
+            result = await asyncio.wait_for(task, timeout=300.0)
         except TimeoutError:
             logger.error("executor.timeout", skill_id=skill_id)
+            async with self._lock:
+                if self._current_task is task:
+                    await self._cancel_current_locked()
             result = SkillResult(status="error", message="timeout")
         except asyncio.CancelledError:
             logger.info("executor.cancelled", skill_id=skill_id, invocation_id=invocation_id)
+            async with self._lock:
+                if self._current_task is task:
+                    await self._cancel_current_locked()
             result = SkillResult(status="cancelled", message="pre-empted")
         except Exception as e:
             logger.exception("executor.skill_error", skill_id=skill_id)
@@ -102,10 +109,11 @@ class SkillExecutor:
             SkillFinished(skill_id=skill_id, invocation_id=invocation_id, status=result.status)
         )
 
-        if self._current_invocation_id == invocation_id:
-            self._current_skill = None
-            self._current_invocation_id = None
-            self._current_task = None
+        async with self._lock:
+            if self._current_task is task:
+                self._current_skill = None
+                self._current_invocation_id = None
+                self._current_task = None
 
         return InvokeResult(
             invocation_id=invocation_id,
@@ -118,17 +126,38 @@ class SkillExecutor:
         await self._cancel_current()
 
     async def _cancel_current(self) -> None:
-        if self._current_skill is not None:
-            skill_id = self._current_skill.skill_id
-            inv_id = self._current_invocation_id or ""
+        async with self._lock:
+            await self._cancel_current_locked()
+
+    async def _cancel_current_locked(self) -> None:
+        skill = self._current_skill
+        task = self._current_task
+        inv_id = self._current_invocation_id or ""
+        if skill is None and task is None:
+            return
+
+        skill_id = skill.skill_id if skill is not None else ""
+        if skill is not None:
             logger.info("executor.cancelling", skill_id=skill_id)
             try:
-                await self._current_skill.cancel()
+                await skill.cancel()
             except Exception:
                 logger.exception("executor.cancel_error")
-            if self._current_task is not None and not self._current_task.done():
-                self._current_task.cancel()
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("executor.cancelled_task_error", skill_id=skill_id)
+        if skill_id:
             await self._events.publish(SkillCancelled(skill_id=skill_id, invocation_id=inv_id))
+
+        if self._current_task is task:
+            self._current_skill = None
+            self._current_invocation_id = None
+            self._current_task = None
 
     @property
     def is_busy(self) -> bool:

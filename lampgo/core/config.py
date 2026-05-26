@@ -443,7 +443,7 @@ class VoiceConfig(BaseModel):
     volcengine_access_token: str = Field(default="", description="Volcengine access token for ASR/TTS")
     livekit_tts_voice: str = Field(
         default="zh_female_vv_uranus_bigtts",
-        description="Volcengine TTS voice for LiveKit conversations",
+        description="Deprecated compatibility field; LiveKit conversations use tts_voice.",
     )
 
     @field_validator("stt_provider", "tts_provider", mode="before")
@@ -472,6 +472,18 @@ class VoiceConfig(BaseModel):
             "experimental_aec": "esp32_aec",
         }
         return aliases.get(s, s)
+
+    @field_validator("wake_word", mode="before")
+    @classmethod
+    def _normalize_wake_word(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if not s:
+            return ""
+        if s.lower() in {"0", "false", "off", "none", "disabled"}:
+            return ""
+        return "wn9_hixiaoxing_tts"
 
     @field_validator("stt_model", mode="before")
     @classmethod

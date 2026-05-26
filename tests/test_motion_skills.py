@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from lampgo.core.events import EventBus
 from lampgo.core.types import SkillResult
-from lampgo.skills.base import Skill
+from lampgo.skills.base import Skill, SkillContext
 from lampgo.skills.executor import SkillExecutor
 from lampgo.skills.registry import SkillRegistry
 
@@ -92,3 +95,61 @@ def test_executor_preempts_running_skill():
         assert executor.is_busy is False
 
     asyncio.run(run())
+
+
+class _HangingSkill(Skill):
+    skill_id = "first"
+    description = "hang until cancelled"
+    parameters = {}
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.started = asyncio.Event()
+        self.cancel_count = 0
+
+    async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        self.events.append("first:start")
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.events.append("first:finally")
+
+    async def cancel(self) -> None:
+        self.cancel_count += 1
+        self.events.append("first:cancel")
+
+
+class _InstantSkill(Skill):
+    skill_id = "second"
+    description = "finish immediately"
+    parameters = {}
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        self.events.append("second:start")
+        return SkillResult(status="ok", data={"played": "second"})
+
+
+@pytest.mark.asyncio
+async def test_new_invoke_cancels_running_skill_before_starting_next() -> None:
+    events: list[str] = []
+    registry = SkillRegistry()
+    first = _HangingSkill(events)
+    second = _InstantSkill(events)
+    registry.register(first)
+    registry.register(second)
+    executor = SkillExecutor(registry, EventBus())
+
+    first_invoke = asyncio.create_task(executor.invoke("first", ctx=None))  # type: ignore[arg-type]
+    await first.started.wait()
+
+    second_result = await executor.invoke("second", ctx=None)  # type: ignore[arg-type]
+    first_result = await first_invoke
+
+    assert first_result.status == "cancelled"
+    assert second_result.status == "ok"
+    assert first.cancel_count == 1
+    assert events == ["first:start", "first:cancel", "first:finally", "second:start"]

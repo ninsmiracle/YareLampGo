@@ -71,7 +71,7 @@ defaults:
     provider: volc_main
     options:
       cluster: volcano_tts
-      voice: {livekit_tts_voice}
+      voice: {tts_voice}
       sample_rate: 24000
       streaming: true
 
@@ -606,6 +606,7 @@ class AgentSDKManager:
 
     def _generate_roles_yaml(self) -> Path:
         """Write a temporary roles.yaml from current config values."""
+        tts_voice = self._voice.tts_voice or "zh_female_vv_uranus_bigtts"
         content = ROLES_YAML_TEMPLATE.format(
             livekit_url=self._voice.livekit_url,
             livekit_api_key=self._voice.livekit_api_key,
@@ -613,15 +614,11 @@ class AgentSDKManager:
             web_port=self._web_port,
             volcengine_app_id=self._voice.volcengine_app_id,
             volcengine_access_token=self._voice.volcengine_access_token,
-            livekit_tts_voice=(
-                self._voice.tts_voice
-                or self._voice.livekit_tts_voice
-                or "zh_female_vv_uranus_bigtts"
-            ),
+            tts_voice=tts_voice,
         )
         tmp = Path(tempfile.mktemp(suffix=".yaml", prefix="lampgo-roles-"))
         tmp.write_text(content, encoding="utf-8")
-        logger.info("agent_sdk.roles_yaml_generated", path=str(tmp))
+        logger.info("agent_sdk.roles_yaml_generated", path=str(tmp), tts_voice=tts_voice)
         return tmp
 
     def _generate_patch_dir(self) -> Path:
