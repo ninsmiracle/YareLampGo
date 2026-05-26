@@ -52,6 +52,7 @@
   const btnVoiceCancel = document.getElementById("btn-voice-cancel");
   const btnStop = document.getElementById("btn-stop");
   const btnMusicMode = document.getElementById("btn-music-mode");
+  const musicStyleSelect = document.getElementById("music-style-select");
   const musicModeLabel = document.getElementById("music-mode-label");
   const voiceWave = document.getElementById("voice-wave");
   const voiceCanvas = document.getElementById("voice-canvas");
@@ -156,7 +157,7 @@
     headshake: { title: "摇头", description: "左右摇头，表达不同意。" },
     look_at: { title: "注视", description: "朝指定方向看过去。" },
     idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
-    dance_to_music: { title: "跟音乐跳舞", description: "读取音乐节奏，间隔拍点做明确律动。" },
+    dance_to_music: { title: "跟音乐跳舞", description: "读取音乐节奏，按风格预设做明确律动。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
     presence_react: { title: "人来反应", description: "检测到人时转向并展示问候表情。" },
@@ -164,6 +165,15 @@
     teleop_mouse: { title: "鼠标遥操作", description: "用手臂当作鼠标控制光标。" },
     teleop_gamepad: { title: "手柄遥操作", description: "将关节映射为按键，当作游戏手柄。" },
     set_expression: { title: "设置表情", description: "切换 LED 灯光表情（例如 笑脸、爱心、生气）。" },
+  });
+
+  const MUSIC_STYLE_LABELS_CN = Object.freeze({
+    jazz: "爵士",
+    electronic: "电子",
+    rock: "摇滚",
+    ambient: "氛围",
+    gufeng: "古风",
+    dj: "DJ",
   });
 
   const expressionMetaByName = new Map();
@@ -247,6 +257,15 @@
       title: (entry && entry.title) || (skill && skill.skill_id) || "",
       description: (entry && entry.description) || (skill && skill.description) || "",
     };
+  }
+
+  function selectedMusicStyle() {
+    const value = musicStyleSelect ? musicStyleSelect.value : "jazz";
+    return MUSIC_STYLE_LABELS_CN[value] ? value : "jazz";
+  }
+
+  function musicStyleLabel(style) {
+    return MUSIC_STYLE_LABELS_CN[style] || MUSIC_STYLE_LABELS_CN.jazz;
   }
 
   const RECORDING_EXPRESSIONS = Object.freeze({
@@ -3659,6 +3678,7 @@
     const isActive = !!active;
     if (isActive && requestId) musicModeRequestId = requestId;
     if (!isActive) musicModeRequestId = null;
+    if (musicStyleSelect) musicStyleSelect.disabled = isActive;
     if (!btnMusicMode) return;
     btnMusicMode.classList.toggle("is-active", isActive);
     btnMusicMode.setAttribute("aria-pressed", isActive ? "true" : "false");
@@ -3667,9 +3687,11 @@
   }
 
   function toggleMusicMode() {
-    if (musicModeRequestId) {
-      send({ type: "stop_loop", request_id: musicModeRequestId });
-      if (activeAgentRequestId === musicModeRequestId) {
+    const isMusicModeActive = !!musicModeRequestId || !!(btnMusicMode && btnMusicMode.classList.contains("is-active"));
+    if (isMusicModeActive) {
+      const stopRequestId = musicModeRequestId || activeAgentRequestId || "";
+      send({ type: "stop_loop", request_id: stopRequestId });
+      if (!musicModeRequestId || activeAgentRequestId === musicModeRequestId) {
         activeAgentRequestId = null;
         btnStop.classList.add("hidden");
       }
@@ -3679,19 +3701,20 @@
     }
 
     clearEmptyState();
+    const style = selectedMusicStyle();
     const requestId = nextId();
     const bubble = addAssistantBubble(requestId);
     activeAgentRequestId = requestId;
     btnStop.classList.remove("hidden");
     setMusicModeActive(true, requestId);
-    addStep(getPreludeArea(ensureActivityLog(bubble)), "进入音乐律动模式", "active");
+    addStep(getPreludeArea(ensureActivityLog(bubble)), `进入音乐律动模式 · ${musicStyleLabel(style)}`, "active");
     send({
       type: "invoke",
       skill_id: "dance_to_music",
       params: {
         duration: 0,
         source: "system",
-        style: "jazz",
+        style,
         amplitude: 0.85,
         beat_stride: 0,
         led: true,
