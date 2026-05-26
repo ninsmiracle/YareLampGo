@@ -10,10 +10,11 @@ import queue
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 import numpy as np
+
+from lampgo.macos_audio import ensure_macos_audio_tap
 
 
 @dataclass(frozen=True)
@@ -674,7 +675,7 @@ class MacSystemAudioSource:
             )
         except FileNotFoundError as exc:
             raise AudioSourceError(
-                "Swift toolchain not found; install Xcode Command Line Tools or use source=mic"
+                "LampGo 系统音频组件没有找到，请重新运行 `uv run lampgo onboard`。"
             ) from exc
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -686,10 +687,13 @@ class MacSystemAudioSource:
             return data
         except asyncio.IncompleteReadError as exc:
             detail = self._stderr_detail()
-            raise AudioSourceError(
-                "macOS system audio capture stopped. Grant Screen Recording permission to LampgoAudioTap, "
-                f"then restart lampgo. {detail}"
-            ) from exc
+            if "permission" in detail.lower() or "screen recording" in detail.lower():
+                raise AudioSourceError(
+                    "需要授权 macOS“屏幕与系统音频录制”权限。请在弹出的系统窗口中允许，"
+                    "或到 系统设置 → 隐私与安全性 → 屏幕录制/屏幕与系统音频录制 打开 LampGo/终端权限，"
+                    f"然后重启 LampGo。{detail}"
+                ) from exc
+            raise AudioSourceError(f"macOS 系统音频组件启动失败。{detail}") from exc
         except TimeoutError:
             return None
 
@@ -715,9 +719,15 @@ class MacSystemAudioSource:
     def _helper_command(self) -> list[str]:
         bin_path = os.environ.get("LAMPGO_AUDIO_TAP_BIN", "").strip()
         if bin_path:
+            bin_path = os.path.expanduser(bin_path)
+            if not os.path.isfile(bin_path) or not os.access(bin_path, os.X_OK):
+                raise AudioSourceError(f"LAMPGO_AUDIO_TAP_BIN 指向的文件不可执行：{bin_path}")
             return [bin_path]
-        package = Path(__file__).resolve().parents[1] / "macos" / "audio_capture"
-        return ["swift", "run", "--package-path", str(package), "-c", "release", "LampgoAudioTap"]
+        prepared = ensure_macos_audio_tap(auto_install_tools=True)
+        if prepared.ok and prepared.binary_path is not None:
+            return [str(prepared.binary_path)]
+        detail = f" {prepared.detail}" if prepared.detail else ""
+        raise AudioSourceError(f"{prepared.message}{detail}")
 
     async def _drain_stderr(self) -> None:
         proc = self._proc

@@ -81,6 +81,10 @@ uv run lampgo run --web
 uv run lampgo run --web --no-hw
 ```
 
+### macOS 音乐律动权限
+
+`uv run lampgo onboard` 会自动准备音乐律动需要的系统音频组件。首次使用“音乐律动”时，macOS 会请求“屏幕录制/屏幕与系统音频录制”权限；允许后请重启 LampGo 再进入音乐律动。
+
 ## 常用命令
 
 ```bash

@@ -48,7 +48,7 @@ def test_run_install_llm_only_works_without_hardware(fake_lampgo_home, cwd_sandb
     report = installer.run_install(
         non_interactive=True,
         assume_yes=True,
-        skip_steps=("env_check", "hardware", "persona_memory", "openclaw_plugin"),
+        skip_steps=("env_check", "audio_tap", "hardware", "persona_memory", "openclaw_plugin"),
         llm_provider="mimo",
         llm_key="sk-install-test-key-0000-1234",
         printer=lambda msg="": captured.append(msg),
@@ -141,10 +141,10 @@ def test_run_install_skip_steps_records_skipped_outcomes(fake_lampgo_home, cwd_s
     report = installer.run_install(
         non_interactive=True,
         assume_yes=True,
-        skip_steps=("hardware", "llm", "persona_memory", "openclaw_plugin"),
+        skip_steps=("audio_tap", "hardware", "llm", "persona_memory", "openclaw_plugin"),
         printer=lambda *_a, **_k: None,
     )
     steps_with_skipped = {
         o.step for o in report.outcomes if o.status == "skipped" and "skipped via --skip" in o.message
     }
-    assert steps_with_skipped >= {"hardware", "llm", "persona_memory", "openclaw_plugin"}
+    assert steps_with_skipped >= {"audio_tap", "hardware", "llm", "persona_memory", "openclaw_plugin"}
