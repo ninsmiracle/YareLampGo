@@ -3,12 +3,13 @@
 Invoked by ``uv run lampgo onboard``. Walks the user through:
 
 1. env_check         — Python / uv / openclaw CLI sanity
-2. hardware          — serial port + camera + microphone selection
-3. llm               — provider + api_base + api_key (+ optional ping)
-4. persona_memory    — import from OpenClaw / default template / skip
-5. openclaw_plugin   — register OpenClaw plugin + skill (reuses
+2. audio_tap         — prepare macOS system-audio helper for music mode
+3. hardware          — serial port + camera + microphone selection
+4. llm               — provider + api_base + api_key (+ optional ping)
+5. persona_memory    — import from OpenClaw / default template / skip
+6. openclaw_plugin   — register OpenClaw plugin + skill (reuses
                        ``lampgo.bridge.openclaw_installer``)
-6. summary           — final ``~/.lampgo/`` state
+7. summary           — final ``~/.lampgo/`` state
 
 Each step is a standalone function that takes an :class:`InstallContext` and
 returns a list of :class:`StepOutcome` entries. The orchestrator supports:
@@ -39,6 +40,7 @@ StepName = str
 
 ALL_STEPS: tuple[StepName, ...] = (
     "env_check",
+    "audio_tap",
     "hardware",
     "llm",
     "persona_memory",
@@ -308,7 +310,7 @@ def _confirm(ctx: InstallContext, prompt: str, default_yes: bool = True) -> bool
 
 
 def _step_env_check(ctx: InstallContext) -> list[StepOutcome]:
-    _print_section(ctx, 1, 5, "环境体检")
+    _print_section(ctx, 1, 6, "环境体检")
     outcomes: list[StepOutcome] = []
 
     def _row(label: str, marker: str, detail: str = "") -> None:
@@ -364,6 +366,58 @@ def _step_env_check(ctx: InstallContext) -> list[StepOutcome]:
     return outcomes
 
 
+# ---------- Step 2: macOS audio helper -------------------------------------
+
+
+def _step_audio_tap(ctx: InstallContext) -> list[StepOutcome]:
+    _print_section(ctx, 2, 6, "系统音频组件")
+    from lampgo.macos_audio import ensure_macos_audio_tap
+
+    result = ensure_macos_audio_tap(auto_install_tools=False)
+    if result.ok:
+        _print_dim(ctx, f"✓ 音乐律动系统音频组件已就绪：{result.binary_path}")
+        return [
+            StepOutcome(
+                step="audio_tap",
+                status="ok",
+                message=result.message,
+                data={"binary_path": str(result.binary_path or "")},
+            )
+        ]
+
+    if result.status == "unsupported_os":
+        _print_dim(ctx, f"· {result.message}")
+        return [StepOutcome(step="audio_tap", status="skipped", message=result.message)]
+
+    if result.status == "developer_tools_missing":
+        _print_dim(ctx, "音乐律动需要一个本机系统音频组件，当前电脑还缺 Apple Command Line Tools。")
+        if result.detail:
+            _print_dim(ctx, result.detail)
+        if _confirm(ctx, "    现在打开 Apple 官方安装器？", default_yes=True):
+            launched = ensure_macos_audio_tap(auto_install_tools=True, build=False)
+            _print_dim(ctx, launched.message)
+            return [
+                StepOutcome(
+                    step="audio_tap",
+                    status="skipped",
+                    message=launched.message,
+                    data={"installer_started": launched.installer_started, "detail": launched.detail},
+                )
+            ]
+
+    if result.detail:
+        _print_dim(ctx, result.detail)
+    _print_dim(ctx, f"✗ {result.message}")
+    return [
+        StepOutcome(
+            step="audio_tap",
+            status="error",
+            message=result.message,
+            data={"status": result.status, "detail": result.detail},
+        )
+    ]
+
+
 # ---------- helpers shared across steps -----------------------------------
 
 
@@ -377,7 +431,7 @@ def _count_leaves(data: dict[str, Any]) -> int:
     return n
 
 
-# ---------- Step 2: hardware ----------------------------------------------
+# ---------- Step 3: hardware ----------------------------------------------
 
 
 def _current_overrides() -> dict[str, Any]:
@@ -393,7 +447,7 @@ def _current_value(section: str, key: str, default: str = "") -> str:
 
 
 def _step_hardware(ctx: InstallContext) -> list[StepOutcome]:
-    _print_section(ctx, 2, 5, "硬件")
+    _print_section(ctx, 3, 6, "硬件")
     _print_dim(ctx, "每一项单独询问；macOS 首次探测摄像头/麦克风会弹权限弹窗，授权后重跑。")
     _print_dim(ctx, "扫描中…（首次可能耗时几秒）")
 
@@ -583,7 +637,7 @@ def _step_hardware(ctx: InstallContext) -> list[StepOutcome]:
 
 
 def _step_llm(ctx: InstallContext) -> list[StepOutcome]:
-    _print_section(ctx, 3, 5, "LLM")
+    _print_section(ctx, 4, 6, "LLM")
     outcomes: list[StepOutcome] = []
 
     ov = _current_overrides().get("llm") if isinstance(_current_overrides(), dict) else None
@@ -731,7 +785,7 @@ def _probe_llm_sync(
 
 
 def _step_persona_memory(ctx: InstallContext) -> list[StepOutcome]:
-    _print_section(ctx, 4, 5, "人设 / 记忆")
+    _print_section(ctx, 5, 6, "人设 / 记忆")
     outcomes: list[StepOutcome] = []
 
     oc_home = personastore.openclaw_home()
@@ -791,7 +845,7 @@ def _step_persona_memory(ctx: InstallContext) -> list[StepOutcome]:
 
 
 def _step_openclaw_plugin(ctx: InstallContext) -> list[StepOutcome]:
-    _print_section(ctx, 5, 5, "OpenClaw 插件")
+    _print_section(ctx, 6, 6, "OpenClaw 插件")
 
     if shutil.which("openclaw") is None:
         _print_dim(ctx, "未检测到 `openclaw` 命令，跳过。之后可跑 `lampgo install-openclaw`。")
@@ -887,6 +941,7 @@ def run_install(
     report = InstallReport()
     steps: list[tuple[str, Callable[[InstallContext], list[StepOutcome]]]] = [
         ("env_check", _step_env_check),
+        ("audio_tap", _step_audio_tap),
         ("hardware", _step_hardware),
         ("llm", _step_llm),
         ("persona_memory", _step_persona_memory),

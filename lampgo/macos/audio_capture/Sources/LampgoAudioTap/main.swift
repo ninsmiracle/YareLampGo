@@ -1,4 +1,5 @@
 import AudioToolbox
+import CoreGraphics
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
@@ -195,6 +196,17 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
 @main
 struct LampgoAudioTap {
     static func main() async {
+        guard CGPreflightScreenCaptureAccess() else {
+            fputs("LampgoAudioTap permission: requesting Screen Recording / system audio access\n", stderr)
+            let granted = CGRequestScreenCaptureAccess()
+            if granted {
+                fputs("LampgoAudioTap permission granted; restart LampGo and enter music mode again.\n", stderr)
+            } else {
+                fputs("LampgoAudioTap permission not granted; enable Screen Recording for LampGo or the terminal app in System Settings.\n", stderr)
+            }
+            exit(64)
+        }
+
         let tap = AudioTap()
         do {
             try await tap.start()

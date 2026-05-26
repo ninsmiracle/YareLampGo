@@ -349,6 +349,10 @@ class WebGateway:
                 "wait": body.get("wait", True),
             }
         )
+        if not result.get("ok") and not result.get("error"):
+            nested_error = ((result.get("result") or {}).get("error") or "").strip()
+            if nested_error:
+                result["error"] = nested_error
         return JSONResponse(result)
 
     async def api_status(self, request: Request) -> JSONResponse:
@@ -3028,6 +3032,10 @@ class WebGateway:
                     "wait": msg.get("wait", True),
                 }
             )
+            if not result.get("ok") and not result.get("error"):
+                nested_error = ((result.get("result") or {}).get("error") or "").strip()
+                if nested_error:
+                    result["error"] = nested_error
             result["request_id"] = request_id
             await ws.send_json(result)
 

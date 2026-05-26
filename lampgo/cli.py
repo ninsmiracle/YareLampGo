@@ -149,7 +149,7 @@ def main() -> None:
         "--skip",
         default="",
         help="Comma-separated step names to skip "
-        "(env_check, hardware, llm, persona_memory, openclaw_plugin).",
+        "(env_check, audio_tap, hardware, llm, persona_memory, openclaw_plugin).",
     )
     inst_p.add_argument("--motor-port", default=None, help="Preset motor serial port for the hardware step.")
     inst_p.add_argument("--llm-provider", default=None, help="Preset LLM provider for the llm step.")
