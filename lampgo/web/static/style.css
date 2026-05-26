@@ -787,6 +787,41 @@ button {
   flex-shrink: 0;
 }
 
+.music-style-control {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--text-soft);
+}
+
+.music-style-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.music-style-select {
+  width: 76px;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.music-style-select:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 .music-mode-button {
   gap: 7px;
   padding: 0 12px;
@@ -3346,6 +3381,19 @@ button.device-chip.is-active {
   .music-mode-button {
     width: 34px;
     padding: 0;
+  }
+
+  .music-style-control {
+    padding: 0 6px;
+  }
+
+  .music-style-label {
+    display: none;
+  }
+
+  .music-style-select {
+    width: 60px;
+    font-size: 12px;
   }
 
   .music-mode-label {

@@ -17,6 +17,7 @@ from lampgo.perception.music import (
     DancePhraseRenderer,
     MusicFeatureExtractor,
     MusicFeatures,
+    get_music_style_preset,
     make_music_source,
 )
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
@@ -52,7 +53,7 @@ class DanceToMusicSkill(Skill):
             type="str",
             required=False,
             default="jazz",
-            description="Dance style: jazz, electronic, or ambient.",
+            description="Dance style: jazz, electronic, rock, ambient, gufeng, or dj.",
         ),
         "sensitivity": ParameterSpec(
             name="sensitivity",
@@ -92,14 +93,19 @@ class DanceToMusicSkill(Skill):
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         duration = max(0.0, float(params.get("duration", 60.0)))
         source_name = str(params.get("source") or "system")
-        style = str(params.get("style") or "jazz").strip().lower()
+        style_preset = get_music_style_preset(str(params.get("style") or "jazz"))
+        style = style_preset.style_id
         sensitivity = max(0.0, float(params.get("sensitivity", 1.0)))
         amplitude = max(0.0, float(params.get("amplitude", 1.0)))
         beat_stride = int(params.get("beat_stride", 0) or 0)
         led_enabled = _coerce_bool(params.get("led", True))
 
         source = make_music_source(source_name)
-        gate = BeatGate(beat_stride=beat_stride)
+        gate = BeatGate(
+            beat_stride=beat_stride,
+            min_accent_interval_s=style_preset.min_accent_interval_s,
+            accent_threshold=style_preset.accent_threshold,
+        )
         renderer = DancePhraseRenderer(style=style, fps=_FPS)
         features: deque[MusicFeatures] = deque(maxlen=18)
         pending_accent: BeatDecision | None = None
@@ -108,10 +114,10 @@ class DanceToMusicSkill(Skill):
         self._source = source
         self._motion = ctx.motion
         anchor = dict(ctx.motion.current_state.positions or ctx.state.positions)
-        groove_interval_s = 0.62
-        groove_duration_s = 0.72
-        accent_duration_s = 0.56
-        min_phrase_gap_s = 0.26
+        groove_interval_s = style_preset.groove_interval_s
+        groove_duration_s = style_preset.groove_duration_s
+        accent_duration_s = style_preset.accent_duration_s
+        min_phrase_gap_s = style_preset.min_phrase_gap_s
         next_groove_at = time.monotonic()
         last_phrase_at = -1e9
         started_at = time.monotonic()
@@ -138,7 +144,7 @@ class DanceToMusicSkill(Skill):
                 now = time.monotonic()
                 if not features:
                     continue
-                if pending_accent is not None and now - pending_accent.timestamp > 0.45:
+                if pending_accent is not None and now - pending_accent.timestamp > accent_duration_s:
                     pending_accent = None
 
                 should_accent = pending_accent is not None and now - last_phrase_at >= min_phrase_gap_s

@@ -10,10 +10,11 @@ import queue
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 import numpy as np
+
+from lampgo.macos_audio import ensure_macos_audio_tap
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,207 @@ class BeatDecision:
     bpm_estimate: float
     reason: str = ""
     timestamp: float = 0.0
+
+
+@dataclass(frozen=True)
+class DanceStylePreset:
+    style_id: str
+    label: str
+    aliases: tuple[str, ...]
+    groove: float
+    pitch: float
+    accent: float
+    treble: float
+    period: float
+    rebound: float
+    accent_window_s: float
+    groove_interval_s: float
+    groove_duration_s: float
+    accent_duration_s: float
+    min_phrase_gap_s: float
+    min_accent_interval_s: float
+    accent_threshold: float
+    yaw_base: float = 6.0
+    yaw_bass: float = 12.0
+    pitch_base: float = 2.6
+    pitch_level: float = 4.6
+    pitch_mid: float = 2.6
+    wrist_roll_base: float = 3.5
+    wrist_roll_treble: float = 8.5
+    wrist_pitch_base: float = 2.8
+    wrist_pitch_treble: float = 4.6
+    wrist_pitch_level: float = 2.2
+    accent_pitch_base: float = 5.5
+    accent_pitch_intensity: float = 6.5
+    accent_elbow_base: float = 2.5
+    accent_elbow_intensity: float = 3.0
+    accent_yaw_base: float = 2.0
+    accent_yaw_ratio: float = 0.26
+    accent_yaw_cap: float = 5.0
+
+
+MUSIC_STYLE_PRESETS: dict[str, DanceStylePreset] = {
+    "jazz": DanceStylePreset(
+        style_id="jazz",
+        label="爵士",
+        aliases=("爵士", "jazz", "swing"),
+        groove=1.0,
+        pitch=0.85,
+        accent=0.95,
+        treble=0.7,
+        period=1.15,
+        rebound=0.16,
+        accent_window_s=0.30,
+        groove_interval_s=0.62,
+        groove_duration_s=0.72,
+        accent_duration_s=0.56,
+        min_phrase_gap_s=0.26,
+        min_accent_interval_s=0.45,
+        accent_threshold=0.16,
+    ),
+    "electronic": DanceStylePreset(
+        style_id="electronic",
+        label="电子",
+        aliases=("电子", "电音", "electronic", "edm", "techno"),
+        groove=1.18,
+        pitch=1.0,
+        accent=1.2,
+        treble=0.9,
+        period=0.86,
+        rebound=0.12,
+        accent_window_s=0.22,
+        groove_interval_s=0.46,
+        groove_duration_s=0.58,
+        accent_duration_s=0.44,
+        min_phrase_gap_s=0.22,
+        min_accent_interval_s=0.34,
+        accent_threshold=0.14,
+    ),
+    "rock": DanceStylePreset(
+        style_id="rock",
+        label="摇滚",
+        aliases=("摇滚", "rock", "queen"),
+        groove=0.0,
+        pitch=1.08,
+        accent=1.42,
+        treble=0.0,
+        period=0.92,
+        rebound=0.38,
+        accent_window_s=0.24,
+        groove_interval_s=0.54,
+        groove_duration_s=0.62,
+        accent_duration_s=0.44,
+        min_phrase_gap_s=0.20,
+        min_accent_interval_s=0.32,
+        accent_threshold=0.13,
+        yaw_base=0.0,
+        yaw_bass=0.0,
+        wrist_roll_base=0.0,
+        wrist_roll_treble=0.0,
+        wrist_pitch_base=0.0,
+        wrist_pitch_treble=0.0,
+        wrist_pitch_level=0.0,
+        accent_pitch_base=6.8,
+        accent_pitch_intensity=7.5,
+        accent_elbow_base=3.4,
+        accent_elbow_intensity=3.8,
+        accent_yaw_base=0.0,
+        accent_yaw_ratio=0.0,
+        accent_yaw_cap=0.0,
+    ),
+    "ambient": DanceStylePreset(
+        style_id="ambient",
+        label="氛围",
+        aliases=("氛围", "ambient", "lofi", "lo-fi"),
+        groove=0.58,
+        pitch=0.62,
+        accent=0.42,
+        treble=0.35,
+        period=1.7,
+        rebound=0.08,
+        accent_window_s=0.36,
+        groove_interval_s=0.9,
+        groove_duration_s=1.08,
+        accent_duration_s=0.72,
+        min_phrase_gap_s=0.48,
+        min_accent_interval_s=0.7,
+        accent_threshold=0.2,
+    ),
+    "gufeng": DanceStylePreset(
+        style_id="gufeng",
+        label="古风",
+        aliases=("古风", "国风", "gufeng", "chinese", "traditional"),
+        groove=0.62,
+        pitch=0.72,
+        accent=0.58,
+        treble=0.82,
+        period=1.45,
+        rebound=0.14,
+        accent_window_s=0.34,
+        groove_interval_s=0.74,
+        groove_duration_s=0.92,
+        accent_duration_s=0.68,
+        min_phrase_gap_s=0.36,
+        min_accent_interval_s=0.54,
+        accent_threshold=0.17,
+        yaw_base=4.2,
+        yaw_bass=7.0,
+        wrist_roll_base=4.8,
+        wrist_roll_treble=9.6,
+        wrist_pitch_base=4.2,
+        wrist_pitch_treble=6.2,
+        accent_yaw_cap=3.2,
+    ),
+    "dj": DanceStylePreset(
+        style_id="dj",
+        label="DJ",
+        aliases=("dj", "DJ", "club", "蹦迪", "舞曲"),
+        groove=1.38,
+        pitch=0.0,
+        accent=1.35,
+        treble=1.12,
+        period=0.72,
+        rebound=0.0,
+        accent_window_s=0.2,
+        groove_interval_s=0.38,
+        groove_duration_s=0.48,
+        accent_duration_s=0.38,
+        min_phrase_gap_s=0.2,
+        min_accent_interval_s=0.3,
+        accent_threshold=0.13,
+        yaw_base=8.0,
+        yaw_bass=16.0,
+        wrist_roll_base=5.5,
+        wrist_roll_treble=10.5,
+        wrist_pitch_base=0.0,
+        wrist_pitch_treble=0.0,
+        wrist_pitch_level=0.0,
+        accent_pitch_base=0.0,
+        accent_pitch_intensity=0.0,
+        accent_elbow_base=0.0,
+        accent_elbow_intensity=0.0,
+        accent_yaw_base=3.0,
+        accent_yaw_ratio=0.32,
+        accent_yaw_cap=7.0,
+    ),
+}
+
+_STYLE_ALIASES = {
+    alias.lower(): style_id
+    for style_id, preset in MUSIC_STYLE_PRESETS.items()
+    for alias in (preset.aliases + (style_id,))
+}
+
+
+def normalize_music_style(style: str | None) -> str:
+    key = str(style or "jazz").strip()
+    if not key:
+        return "jazz"
+    return _STYLE_ALIASES.get(key.lower(), "jazz")
+
+
+def get_music_style_preset(style: str | None) -> DanceStylePreset:
+    return MUSIC_STYLE_PRESETS[normalize_music_style(style)]
 
 
 class AudioSourceError(RuntimeError):
@@ -230,14 +432,9 @@ class BeatGate:
 class DancePhraseRenderer:
     """Render music features into short, visible, non-tiny motion phrases."""
 
-    _STYLE = {
-        "jazz": {"groove": 1.0, "pitch": 0.85, "accent": 0.95, "treble": 0.7, "period": 1.15},
-        "electronic": {"groove": 1.18, "pitch": 1.0, "accent": 1.2, "treble": 0.9, "period": 0.86},
-        "ambient": {"groove": 0.58, "pitch": 0.62, "accent": 0.42, "treble": 0.35, "period": 1.7},
-    }
-
     def __init__(self, *, style: str = "jazz", fps: int = 50, min_motion_amplitude_deg: float = 2.5) -> None:
-        self.style = style if style in self._STYLE else "jazz"
+        self.preset = get_music_style_preset(style)
+        self.style = self.preset.style_id
         self.fps = max(10, int(fps))
         self.min_motion_amplitude_deg = max(0.0, float(min_motion_amplitude_deg))
         self._yaw_phase = 0.0
@@ -258,7 +455,7 @@ class DancePhraseRenderer:
             return []
 
         recent = features[-8:]
-        cfg = self._STYLE[self.style]
+        preset = self.preset
         level = min(1.0, max((f.rms for f in recent), default=0.0) * 5.0)
         bass_level = min(1.0, max((f.bass_energy for f in recent), default=0.0) * 32.0)
         mid_level = min(1.0, max((f.mid_energy for f in recent), default=0.0) * 18.0)
@@ -267,17 +464,27 @@ class DancePhraseRenderer:
             return []
 
         scale = max(0.0, float(amplitude_scale))
-        yaw_amp = (6.0 + 12.0 * bass_level) * cfg["groove"] * scale
-        pitch_amp = (2.6 + 4.6 * level + 2.6 * mid_level) * cfg["pitch"] * scale
-        wrist_roll_amp = (3.5 + 8.5 * treble_level) * cfg["treble"] * scale
-        wrist_pitch_amp = (2.8 + 4.6 * treble_level + 2.2 * level) * cfg["treble"] * scale
+        yaw_amp = (preset.yaw_base + preset.yaw_bass * bass_level) * preset.groove * scale
+        pitch_amp = (
+            preset.pitch_base + preset.pitch_level * level + preset.pitch_mid * mid_level
+        ) * preset.pitch * scale
+        wrist_roll_amp = (preset.wrist_roll_base + preset.wrist_roll_treble * treble_level) * preset.treble * scale
+        wrist_pitch_amp = (
+            preset.wrist_pitch_base + preset.wrist_pitch_treble * treble_level + preset.wrist_pitch_level * level
+        ) * preset.treble * scale
         accent_pitch_amp = 0.0
         accent_elbow_amp = 0.0
         accent_yaw_amp = 0.0
         if beat is not None and beat.accent:
-            accent_pitch_amp = (5.5 + 6.5 * beat.intensity) * cfg["accent"] * scale
-            accent_elbow_amp = (2.5 + 3.0 * beat.intensity) * cfg["accent"] * scale
-            accent_yaw_amp = self._accent_side * min(5.0, 2.0 + yaw_amp * 0.26)
+            accent_pitch_amp = (
+                preset.accent_pitch_base + preset.accent_pitch_intensity * beat.intensity
+            ) * preset.accent * scale
+            accent_elbow_amp = (
+                preset.accent_elbow_base + preset.accent_elbow_intensity * beat.intensity
+            ) * preset.accent * scale
+            accent_yaw_amp = self._accent_side * min(
+                preset.accent_yaw_cap, preset.accent_yaw_base + yaw_amp * preset.accent_yaw_ratio
+            )
             self._accent_side *= -1.0
 
         yaw_amp = self._visible(yaw_amp)
@@ -300,9 +507,11 @@ class DancePhraseRenderer:
 
         duration_s = max(0.2, float(duration_s))
         n_frames = max(1, round(duration_s * self.fps))
-        period = float(cfg["period"])
+        period = preset.period
         frames: list[dict[str, float]] = []
-        accent_window = min(0.28, duration_s)
+        accent_window = min(preset.accent_window_s, duration_s)
+        rebound_start = min(duration_s, accent_window * 0.92)
+        rebound_window = max(0.12, duration_s - rebound_start)
         for idx in range(n_frames):
             t = idx / self.fps
             pose: dict[str, float] = {}
@@ -319,6 +528,9 @@ class DancePhraseRenderer:
             pitch_offset = -pitch_amp * pitch_groove * (0.45 + 0.55 * bass_level)
             if accent_pitch_amp:
                 pitch_offset -= accent_pitch_amp * accent_env
+                if preset.rebound > 0 and t >= rebound_start:
+                    rebound_t = min(1.0, (t - rebound_start) / rebound_window)
+                    pitch_offset += accent_pitch_amp * preset.rebound * math.sin(math.pi * rebound_t)
             if abs(pitch_offset) >= self.min_motion_amplitude_deg:
                 pose["base_pitch"] = anchor.get("base_pitch", 0.0) + pitch_offset
             if accent_elbow_amp:
@@ -463,7 +675,7 @@ class MacSystemAudioSource:
             )
         except FileNotFoundError as exc:
             raise AudioSourceError(
-                "Swift toolchain not found; install Xcode Command Line Tools or use source=mic"
+                "LampGo 系统音频组件没有找到，请重新运行 `uv run lampgo onboard`。"
             ) from exc
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -475,10 +687,13 @@ class MacSystemAudioSource:
             return data
         except asyncio.IncompleteReadError as exc:
             detail = self._stderr_detail()
-            raise AudioSourceError(
-                "macOS system audio capture stopped. Grant Screen Recording permission to LampgoAudioTap, "
-                f"then restart lampgo. {detail}"
-            ) from exc
+            if "permission" in detail.lower() or "screen recording" in detail.lower():
+                raise AudioSourceError(
+                    "需要授权 macOS“屏幕与系统音频录制”权限。请在弹出的系统窗口中允许，"
+                    "或到 系统设置 → 隐私与安全性 → 屏幕录制/屏幕与系统音频录制 打开 LampGo/终端权限，"
+                    f"然后重启 LampGo。{detail}"
+                ) from exc
+            raise AudioSourceError(f"macOS 系统音频组件启动失败。{detail}") from exc
         except TimeoutError:
             return None
 
@@ -504,9 +719,15 @@ class MacSystemAudioSource:
     def _helper_command(self) -> list[str]:
         bin_path = os.environ.get("LAMPGO_AUDIO_TAP_BIN", "").strip()
         if bin_path:
+            bin_path = os.path.expanduser(bin_path)
+            if not os.path.isfile(bin_path) or not os.access(bin_path, os.X_OK):
+                raise AudioSourceError(f"LAMPGO_AUDIO_TAP_BIN 指向的文件不可执行：{bin_path}")
             return [bin_path]
-        package = Path(__file__).resolve().parents[1] / "macos" / "audio_capture"
-        return ["swift", "run", "--package-path", str(package), "-c", "release", "LampgoAudioTap"]
+        prepared = ensure_macos_audio_tap(auto_install_tools=True)
+        if prepared.ok and prepared.binary_path is not None:
+            return [str(prepared.binary_path)]
+        detail = f" {prepared.detail}" if prepared.detail else ""
+        raise AudioSourceError(f"{prepared.message}{detail}")
 
     async def _drain_stderr(self) -> None:
         proc = self._proc
