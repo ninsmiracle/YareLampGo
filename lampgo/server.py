@@ -110,6 +110,7 @@ class LampgoServer:
         self._openclaw_asks: dict[str, asyncio.Future[str]] = {}
         self._openclaw_asks_lock = asyncio.Lock()
         self._tts_tasks: set[asyncio.Task] = set()
+        self._tts_lock = asyncio.Lock()
         self._cancelled_request_ids: set[str] = set()
         self._record_lock = asyncio.Lock()
         self._record_recorder: TeachRecorder | None = None
@@ -1242,6 +1243,10 @@ class LampgoServer:
                 )
                 return
 
+        async with self._tts_lock:
+            await self._tts_for_web_locked(text, request_id)
+
+    async def _tts_for_web_locked(self, text: str, request_id: str) -> None:
         try:
             from lampgo.voice.tts import iter_synthesize_for_web
 

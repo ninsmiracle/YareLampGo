@@ -1128,7 +1128,6 @@ class WebGateway:
             "voice.echo_text_filter_enabled",
             "voice.volcengine_app_id",
             "voice.volcengine_access_token",
-            "voice.livekit_tts_voice",
         }
     )
 
@@ -1160,7 +1159,6 @@ class WebGateway:
             "voice.silence_timeout_s",
             "voice.volcengine_app_id",
             "voice.volcengine_access_token",
-            "voice.livekit_tts_voice",
         ),
         "motion": (
             "motion.tick_rate_hz",
@@ -1378,7 +1376,7 @@ class WebGateway:
             # Coerce to the current field's type for pydantic friendliness.
             current = getattr(obj, tail, None)
             coerced = _coerce_value(current, value)
-            if head == "voice" and tail in {"tts_voice", "livekit_tts_voice"}:
+            if head == "voice" and tail == "tts_voice":
                 from lampgo.voice.tts import _volcengine_voice_or_default
 
                 coerced = _volcengine_voice_or_default(str(coerced or ""))

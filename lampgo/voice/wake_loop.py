@@ -32,13 +32,12 @@ logger = structlog.get_logger(__name__)
 
 DEVICE_WAKE_IDLE_LOG_S = 30.0
 ESP32_WAKE_MODEL_BY_CONFIG = {
-    "hey_jarvis": "wn9_jarvis_tts",
-    "wn9_jarvis_tts": "wn9_jarvis_tts",
-    "wn9_xiaomeitongxue_tts": "wn9_xiaomeitongxue_tts",
-    "wn9_xiaoyaxiaoya_tts2": "wn9_xiaoyaxiaoya_tts2",
-    "wn9_xiaoluxiaolu_tts2": "wn9_xiaoluxiaolu_tts2",
     "wn9_hixiaoxing_tts": "wn9_hixiaoxing_tts",
+    "hi,小星": "wn9_hixiaoxing_tts",
+    "hi 小星": "wn9_hixiaoxing_tts",
 }
+ESP32_WAKE_AUDIO_PROFILE = "wake_only"
+ESP32_AEC_AUDIO_PROFILE = "aec_experiment"
 
 
 class WakeLoop:
@@ -312,7 +311,7 @@ class WakeLoop:
         if not (hasattr(self._server, "esp32") and self._server.esp32):
             return
         configured = str(self._server.config.voice.wake_word or "").strip()
-        desired = ESP32_WAKE_MODEL_BY_CONFIG.get(configured)
+        desired = ESP32_WAKE_MODEL_BY_CONFIG.get(configured) or ESP32_WAKE_MODEL_BY_CONFIG.get(configured.lower())
         if not desired:
             return
         now = asyncio.get_running_loop().time()
@@ -335,7 +334,20 @@ class WakeLoop:
 
         active = str(body.get("wake_model") or "")
         requested = str(body.get("wake_requested_model") or "")
-        if active == desired and requested == desired:
+        audio_profile = str(body.get("audio_profile") or "")
+        call_mode = str(getattr(self._server.config.voice, "call_mode", "") or "stable").strip().lower().replace("-", "_")
+        desired_audio_profile = (
+            ESP32_AEC_AUDIO_PROFILE if call_mode == "esp32_aec" else ESP32_WAKE_AUDIO_PROFILE
+        )
+        if active == desired and requested == desired and audio_profile == desired_audio_profile:
+            return
+        if active and requested == desired and audio_profile == desired_audio_profile:
+            logger.warning(
+                "wake_loop.wake_model_using_device_fallback",
+                desired=desired,
+                active=active,
+                requested=requested,
+            )
             return
 
         supported = body.get("wake_supported_models") or []
@@ -349,7 +361,7 @@ class WakeLoop:
             )
             return
 
-        payload = {"wake_model": desired}
+        payload = {"wake_model": desired, "audio_profile": desired_audio_profile}
         if hasattr(self._server.esp32, "with_owner_auth"):
             payload = self._server.esp32.with_owner_auth(payload, reason="wake_model_sync")
         try:
@@ -360,6 +372,7 @@ class WakeLoop:
                 desired=desired,
                 active=active,
                 requested=requested,
+                audio_profile=audio_profile,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
@@ -370,6 +383,7 @@ class WakeLoop:
                 desired=desired,
                 active=active,
                 requested=requested,
+                audio_profile=audio_profile,
                 status=sync_status,
                 body=str(sync_body)[:200],
             )
@@ -379,6 +393,8 @@ class WakeLoop:
             desired=desired,
             previous_active=active,
             previous_requested=requested,
+            previous_audio_profile=audio_profile,
+            audio_profile=payload.get("audio_profile", audio_profile),
         )
 
     async def _handle_wake_detected(self, *, model: str, source: str) -> None:

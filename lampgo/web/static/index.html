@@ -588,14 +588,10 @@
                   <span class="settings-field-label">唤醒词</span>
                   <select class="settings-input" data-cfg-input="voice.wake_word">
                     <option value="">禁用</option>
-                    <option value="hey_jarvis">Jarvis</option>
-                    <option value="wn9_xiaomeitongxue_tts">小美同学</option>
-                    <option value="wn9_xiaoyaxiaoya_tts2">小鸭小鸭</option>
-                    <option value="wn9_xiaoluxiaolu_tts2">小鹿小鹿</option>
                     <option value="wn9_hixiaoxing_tts">Hi,小星</option>
                   </select>
                   <span class="settings-field-hint">
-                    保存后会同步到 ESP32 端 WakeNet；中文唤醒词需要刷入包含对应模型的固件。
+                    保存后会同步到 ESP32 端 WakeNet 并热启动；当前仅支持 Hi,小星。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.wake_word"></span>
                 </label>

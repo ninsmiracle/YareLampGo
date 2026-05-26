@@ -22,6 +22,7 @@ logger = structlog.get_logger(__name__)
 TTS_SAMPLE_RATE = 24000
 DEFAULT_VOLCENGINE_TTS_VOICE = "zh_female_vv_uranus_bigtts"
 VOLCENGINE_TTS_ENDPOINT = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
+VOLCENGINE_TTS_RECEIVE_TIMEOUT_S = 20.0
 VOLCENGINE_SEED_TTS_2_RESOURCE_ID = "seed-tts-2.0"
 VOLCENGINE_SEED_TTS_1_RESOURCE_ID = "seed-tts-1.0"
 VOLCENGINE_SEED_ICL_2_RESOURCE_ID = "seed-icl-2.0"
@@ -271,7 +272,15 @@ class VolcengineTTS:
             audio_bytes = 0
             try:
                 while True:
-                    msg = await _receive_message(websocket)
+                    try:
+                        msg = await asyncio.wait_for(
+                            _receive_message(websocket),
+                            timeout=VOLCENGINE_TTS_RECEIVE_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise RuntimeError(
+                            f"volcengine TTS receive timeout after {VOLCENGINE_TTS_RECEIVE_TIMEOUT_S:.0f}s"
+                        ) from exc
                     if msg.msg_type == MsgType.AUDIO_ONLY_SERVER:
                         if msg.payload:
                             audio_bytes += len(msg.payload)

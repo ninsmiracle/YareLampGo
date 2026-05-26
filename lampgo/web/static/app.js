@@ -2496,6 +2496,10 @@
       return;
     }
 
+    if (msg.request_id && msg.call_mode) {
+      ensureCallBubbleForResult(msg);
+    }
+
     if (msg.request_id && pendingMessages.has(msg.request_id)) {
       finishPending(msg);
       return;
@@ -2519,6 +2523,7 @@
     }
     if (evt === "ConversationStateChanged" && data.state && !lkRoom) updateCallViewState(data.state);
     if (evt === "WakeWordDetected") {
+      if (!webPageOwnerActive || document.visibilityState === "hidden") return;
       if (
         isFreshLiveEvent(msg, CALL_WAKE_FRESH_MS) &&
         !lkRoom &&
@@ -4084,6 +4089,38 @@
     return (finalEl.textContent || "").trim();
   }
 
+  function assistantDisplayTextFromResult(result, { preferSpoken = false } = {}) {
+    const primary = String((result && (result.response || result.chat_response)) || "").trim();
+    const spoken = Array.isArray(result && result.spoken_texts)
+      ? result.spoken_texts.map((t) => String(t || "").trim()).filter(Boolean)
+      : [];
+    const spokenText = spoken.join("\n");
+    if (!spokenText) return primary;
+    if (!primary) return spokenText;
+    if ((result && result.suppress_final_tts) || preferSpoken) {
+      if (primary.length <= 12 || spokenText.includes(primary) || primary.includes(spokenText)) {
+        return spokenText;
+      }
+    }
+    if (spokenText.includes(primary) || primary.includes(spokenText)) return spokenText.length >= primary.length ? spokenText : primary;
+    return `${spokenText}\n${primary}`;
+  }
+
+  function ensureCallBubbleForResult(msg) {
+    const requestId = msg && msg.request_id;
+    if (!requestId || pendingMessages.has(requestId)) return;
+    if (!msg.call_mode) return;
+    ensureLiveCallSessionVisible();
+    const result = msg.result || {};
+    const userText = String(msg.voice_user_text || result.original_text || "").trim() || "语音输入";
+    if (!callUserRequestIds.has(requestId)) {
+      addCallUserBubble(userText);
+      callUserRequestIds.add(requestId);
+      pushCallMessage("user", userText);
+    }
+    addCallAssistantBubble(requestId, userText, false);
+  }
+
   function finishPending(msg) {
     const bubble = pendingMessages.get(msg.request_id);
     if (!bubble) return;
@@ -4101,8 +4138,9 @@
     }
 
     const result = msg.result || {};
-    const text = result.response || result.chat_response;
     const ocTask = result.openclaw_task;
+    const isCallBubble = bubble.dataset.callView === "true";
+    const text = assistantDisplayTextFromResult(result, { preferSpoken: isCallBubble });
 
     if (ocTask && ocTask.task_id) {
       appendOpenClawLinkCard(bubble, ocTask);
@@ -4125,7 +4163,6 @@
     const isPreempted = !!(result.preempted);
     const isUserCancelled = result.stop_reason === "user_cancelled";
     const isCancelled = isPreempted || isUserCancelled;
-    const isCallBubble = bubble.dataset.callView === "true";
     if (isPreempted && isCallBubble) callPreemptedAwaitingResponse = true;
 
     if (log) finalizeActivity(log, { cancelled: isCancelled });
@@ -5459,6 +5496,8 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           const error = (body && body.error) || `HTTP ${resp.status}`;
           if (resp.status === 409 && error === "another call is already starting") {
             addCallSystemNote("通话正在接入中，请稍候…");
+            browserCallPendingId = "";
+            setBrowserCallState("idle");
             return null;
           }
           throw new Error(error);
@@ -7895,6 +7934,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       loadMemoryCore(),
       loadMemoryDailyList(),
       loadCfgAll().then(() => autoFillMotorPortFromDetect()),
+      refreshEsp32WakeSupportedModels(),
     ]).catch((err) => console.warn("[settings] refresh failed", err));
   }
 
@@ -8082,18 +8122,20 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
   };
 
   const ESP32_WAKE_MODEL_BY_CONFIG = {
-    hey_jarvis: "wn9_jarvis_tts",
-    wn9_jarvis_tts: "wn9_jarvis_tts",
-    wn9_xiaomeitongxue_tts: "wn9_xiaomeitongxue_tts",
-    wn9_xiaoyaxiaoya_tts2: "wn9_xiaoyaxiaoya_tts2",
-    wn9_xiaoluxiaolu_tts2: "wn9_xiaoluxiaolu_tts2",
     wn9_hixiaoxing_tts: "wn9_hixiaoxing_tts",
+    "hi,小星": "wn9_hixiaoxing_tts",
+    "hi 小星": "wn9_hixiaoxing_tts",
+  };
+  const ESP32_WAKE_MODEL_LABELS = {
+    wn9_hixiaoxing_tts: "Hi,小星",
   };
   const ESP32_AUDIO_PROFILE_BY_CALL_MODE = {
     stable: "stable_raw",
     interruptible: "interruptible_raw",
     esp32_aec: "aec_experiment",
   };
+  const ESP32_WAKE_AUDIO_PROFILE = "wake_only";
+  let esp32WakeSupportedModels = null;
   const VOICE_CALL_MODE_LABELS = {
     stable: "稳定",
     interruptible: "可打断",
@@ -8113,6 +8155,67 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     };
     const mode = aliases[raw] || raw;
     return ESP32_AUDIO_PROFILE_BY_CALL_MODE[mode] ? mode : "stable";
+  }
+
+  function esp32AudioProfileForVoiceValues(values) {
+    const mode = normalizeVoiceCallMode(values && values["voice.call_mode"]);
+    const wakeWord = String((values && values["voice.wake_word"]) || "");
+    if (wakeWord && mode !== "esp32_aec") return ESP32_WAKE_AUDIO_PROFILE;
+    return ESP32_AUDIO_PROFILE_BY_CALL_MODE[mode] || ESP32_AUDIO_PROFILE_BY_CALL_MODE.stable;
+  }
+
+  function wakeModelForConfigValue(value) {
+    const raw = String(value || "").trim();
+    return ESP32_WAKE_MODEL_BY_CONFIG[raw] || ESP32_WAKE_MODEL_BY_CONFIG[raw.toLowerCase()] || "";
+  }
+
+  function wakeLabelForModel(model) {
+    return ESP32_WAKE_MODEL_LABELS[model] || model;
+  }
+
+  function updateWakeWordSelectAvailability() {
+    const select = document.querySelector('[data-cfg-input="voice.wake_word"]');
+    if (!select) return;
+    const supported = Array.isArray(esp32WakeSupportedModels) ? new Set(esp32WakeSupportedModels) : null;
+    Array.from(select.options).forEach((opt) => {
+      if (!opt.value) {
+        opt.disabled = false;
+        return;
+      }
+      const model = wakeModelForConfigValue(opt.value);
+      const label = wakeLabelForModel(model);
+      const unavailable = !!(supported && supported.size && model && !supported.has(model));
+      opt.disabled = unavailable && opt.value !== select.value;
+      opt.textContent = unavailable ? `${label}（未烧录）` : label;
+    });
+    const hint = select.closest("[data-cfg-field]")?.querySelector(".settings-field-hint:not(.settings-field-hint-override)");
+    if (!hint) return;
+    if (!supported) {
+      hint.textContent = "保存后会同步到 ESP32 端 WakeNet 并热启动；当前仅支持 Hi,小星。";
+      return;
+    }
+    if (!supported.size) {
+      hint.textContent = "未读取到 ESP32 WakeNet 模型；请确认设备在线并已刷入模型分区。";
+      return;
+    }
+    const names = Array.from(supported).map(wakeLabelForModel).join("、");
+    hint.textContent = `设备当前可用：${names}。保存后会热启动 ESP32 唤醒监听；当前仅支持 Hi,小星。`;
+  }
+
+  async function refreshEsp32WakeSupportedModels() {
+    try {
+      const res = await fetch("/api/device/status");
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      const models = body.result && Array.isArray(body.result.wake_supported_models)
+        ? body.result.wake_supported_models
+        : [];
+      esp32WakeSupportedModels = models.map((m) => String(m || "")).filter(Boolean);
+    } catch (err) {
+      console.warn("[settings] ESP32 wake model status failed", err);
+      esp32WakeSupportedModels = null;
+    }
+    updateWakeWordSelectAvailability();
   }
 
   function syncCfgSegmentedControl(dotted, value) {
@@ -8276,6 +8379,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       input.value = normalizeVoiceCallMode(input.value);
       syncCfgSegmentedControl(dotted, input.value);
     }
+    if (dotted === "voice.wake_word") updateWakeWordSelectAvailability();
   }
 
   async function loadCfgAll() {
@@ -8354,16 +8458,32 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     }
     const configuredWakeWord = String(values["voice.wake_word"] || "");
     if (!configuredWakeWord) {
-      return { ok: true, skipped: true, reason: "disabled" };
+      const audioProfile = esp32AudioProfileForVoiceValues(values);
+      const res = await fetch("/api/device/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio_profile: audioProfile }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        return { ok: false, error: body.error || `HTTP ${res.status}` };
+      }
+      return { ok: true, skipped: true, reason: "disabled", audioProfile };
     }
-    const wakeModel = ESP32_WAKE_MODEL_BY_CONFIG[configuredWakeWord];
+    const wakeModel = wakeModelForConfigValue(configuredWakeWord);
     if (!wakeModel) {
       return { ok: false, error: `未知唤醒词：${configuredWakeWord}` };
+    }
+    if (Array.isArray(esp32WakeSupportedModels) && !esp32WakeSupportedModels.includes(wakeModel)) {
+      return { ok: false, error: `ESP32 当前未烧录 ${wakeLabelForModel(wakeModel)} (${wakeModel})` };
     }
     const res = await fetch("/api/device/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wake_model: wakeModel }),
+      body: JSON.stringify({
+        wake_model: wakeModel,
+        audio_profile: esp32AudioProfileForVoiceValues(values),
+      }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !body.ok) {
@@ -8377,7 +8497,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       return { ok: true, skipped: true, reason: "empty" };
     }
     const mode = normalizeVoiceCallMode(values["voice.call_mode"]);
-    const audioProfile = ESP32_AUDIO_PROFILE_BY_CALL_MODE[mode] || ESP32_AUDIO_PROFILE_BY_CALL_MODE.stable;
+    const audioProfile = esp32AudioProfileForVoiceValues(values);
     const res = await fetch("/api/device/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -8500,7 +8620,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           if (pushed.skipped && pushed.reason === "disabled") {
             statusEl.textContent = "已保存，唤醒词已禁用";
           } else if (pushed.ok) {
-            statusEl.textContent = pushed.skipped ? "已保存" : "已保存并同步到 ESP32";
+            statusEl.textContent = pushed.skipped ? "已保存" : "已保存并热启动 ESP32 唤醒词";
           } else {
             statusEl.textContent = `已保存，但 ESP32 未同步：${pushed.error || "设备离线"}`;
           }
@@ -8509,7 +8629,13 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         if (statusEl) statusEl.textContent = `已保存，但 ESP32 未同步：${err.message || "设备离线"}`;
       }
     }
-    if (!errors.length && primarySection === "voice" && grouped.voice && grouped.voice["voice.call_mode"] !== undefined) {
+    if (
+      !errors.length &&
+      primarySection === "voice" &&
+      grouped.voice &&
+      grouped.voice["voice.call_mode"] !== undefined &&
+      grouped.voice["voice.wake_word"] === undefined
+    ) {
       if (statusEl) statusEl.textContent = "已保存，正在同步 ESP32 音频 profile…";
       try {
         const pushed = await pushEsp32AudioProfileFromVoiceValues(grouped.voice);

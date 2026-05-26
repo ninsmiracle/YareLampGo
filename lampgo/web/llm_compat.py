@@ -301,7 +301,7 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
                             fallback=fallback_sentence[:80],
                             emitted_count=len(emitted_texts),
                         )
-                    await _broadcast_result(server, result, request_id)
+                    await _broadcast_result(server, result, request_id, user_text=user_text)
                 except (asyncio.CancelledError, Exception):
                     pass
 
@@ -384,7 +384,7 @@ def _extract_response(result: dict) -> str:
     return r.get("response") or r.get("chat_response") or ""
 
 
-async def _broadcast_result(server: LampgoServer, result: dict, request_id: str) -> None:
+async def _broadcast_result(server: LampgoServer, result: dict, request_id: str, *, user_text: str = "") -> None:
     """Broadcast the handle_request result to frontend WS clients.
 
     The call view's finishPending needs this to display the response text.
@@ -397,6 +397,9 @@ async def _broadcast_result(server: LampgoServer, result: dict, request_id: str)
         return
     msg = dict(result)
     msg["request_id"] = request_id
+    msg["call_mode"] = True
+    if user_text:
+        msg["voice_user_text"] = user_text
     try:
         await bridge.broadcast(msg)
     except Exception:

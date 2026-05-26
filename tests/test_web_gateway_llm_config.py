@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 from starlette.testclient import TestClient
 
 from lampgo.core.config import DeviceConfig, LampgoConfig
+from lampgo.perception import llm_client as llm_client_module
 from lampgo.perception.llm_client import LLMClient
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.server import LampgoServer
@@ -307,3 +311,86 @@ async def test_llm_request_forwards_enable_thinking(monkeypatch) -> None:
     assert result.intent_type == "chat"
     assert result.response == "好"
     assert seen_kwargs["enable_thinking"] is True
+
+
+async def test_agent_say_tts_tasks_are_awaited_before_finish(monkeypatch) -> None:
+    client = LLMClient(
+        LampgoConfig().llm.model_copy(
+            update={
+                "provider": "mimo",
+                "api_key": "test-key",
+                "api_base": "https://api.example/v1",
+                "fast_model": "mimo-v2.5",
+            }
+        ),
+        skill_specs=[],
+    )
+    original_sleep = asyncio.sleep
+    events: list[str] = []
+
+    async def fake_stream_chat_completion(**kwargs):
+        return {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "say", "arguments": json.dumps({"text": "第一句"})},
+                },
+                {
+                    "id": "call_2",
+                    "function": {"name": "say", "arguments": json.dumps({"text": "第二句"})},
+                },
+                {
+                    "id": "call_3",
+                    "function": {"name": "finish_response", "arguments": json.dumps({"message": ""})},
+                },
+            ],
+        }
+
+    async def execute_tool(*args, **kwargs):
+        raise AssertionError("say and finish_response should not execute external tools")
+
+    async def on_progress(stage: str, message: str, source: str):
+        if stage != "llm_narration":
+            return None
+        events.append(f"progress:{message}")
+
+        async def tts_job() -> None:
+            events.append(f"start:{message}")
+            await original_sleep(0)
+            events.append(f"end:{message}")
+
+        return asyncio.create_task(tts_job())
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(client, "_stream_chat_completion", fake_stream_chat_completion)
+    monkeypatch.setattr(llm_client_module.asyncio, "sleep", fake_sleep)
+
+    result = await client.run_agent_loop("连说两句", execute_tool=execute_tool, on_progress=on_progress)
+
+    assert result.stop_reason == "finish_response"
+    assert events.index("progress:第一句") < events.index("progress:第二句")
+    assert events[-2:] == ["end:第一句", "end:第二句"]
+
+
+async def test_server_tts_for_web_serializes_concurrent_requests(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null")))
+    original_sleep = asyncio.sleep
+    events: list[str] = []
+
+    async def fake_tts_for_web_locked(text: str, request_id: str) -> None:
+        events.append(f"start:{text}")
+        await original_sleep(0)
+        events.append(f"end:{text}")
+
+    monkeypatch.setattr(server, "_tts_for_web_locked", fake_tts_for_web_locked)
+
+    await asyncio.gather(
+        server._tts_for_web("第一句", "r1"),
+        server._tts_for_web("第二句", "r2"),
+    )
+
+    assert events == ["start:第一句", "end:第一句", "start:第二句", "end:第二句"]

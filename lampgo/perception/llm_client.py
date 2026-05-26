@@ -111,7 +111,8 @@ Finish_response anti-repetition rules (VERY IMPORTANT):
 
 {recording_actions_block}
 Narration (say tool):
-- Use the say tool to speak ALL user-facing audible content: simple answers, observations, factual results, apologies, and action narrations. Call say alongside other tools in the same turn when useful — the speech plays while the action executes, making you feel alive.
+- Use the say tool to speak ALL user-facing audible content: simple answers, observations, factual results, apologies, and action narrations.
+- Multiple say narrations in the same turn are spoken in tool-call order.
 - Speak in first person (我). Be lively, cute, and expressive — like a curious little lamp with personality. Each narration should contain two parts: (1) your understanding of the previous result or the user's request, and (2) what you're about to do next.
 - Good examples (notice both parts in each):
   - "你想看我跳舞呀，我先摆个造型~" (understood request → preparing pose)
@@ -713,7 +714,8 @@ class LLMClient:
             pending_tts: list[asyncio.Task] = []
             has_say = False
 
-            # Process say tools first so TTS starts before action tools execute
+            # Process say tools first so TTS starts before action tools execute.
+            # Server-side TTS serialization preserves tool-call order.
             for call in tool_calls:
                 fn_name = call.get("function", {}).get("name", "")
                 if fn_name != "say":
