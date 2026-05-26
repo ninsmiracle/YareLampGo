@@ -396,17 +396,39 @@ def _step_audio_tap(ctx: InstallContext) -> list[StepOutcome]:
         if _confirm(ctx, "    现在打开 Apple 官方安装器？", default_yes=True):
             launched = ensure_macos_audio_tap(auto_install_tools=True, build=False)
             _print_dim(ctx, launched.message)
+            if not ctx.non_interactive:
+                _print_dim(ctx, "请先完成 Apple 安装器里的安装；安装完成后回到这里按回车继续检查。")
+                _print_dim(ctx, "如果没有弹出安装器，或安装失败，请输入 skip，稍后按下方修复命令处理。")
+                raw = _ask(ctx, "    安装完成后按回车继续 / 输入 skip 稍后处理", "")
+                if raw.strip().lower() not in {"skip", "s", "跳过"}:
+                    result = ensure_macos_audio_tap(auto_install_tools=False)
+                    if result.ok:
+                        _print_dim(ctx, f"✓ 音乐律动系统音频组件已就绪：{result.binary_path}")
+                        return [
+                            StepOutcome(
+                                step="audio_tap",
+                                status="ok",
+                                message=result.message,
+                                data={"binary_path": str(result.binary_path or "")},
+                            )
+                        ]
+            _print_audio_tap_repair_hint(ctx)
             return [
                 StepOutcome(
                     step="audio_tap",
-                    status="skipped",
-                    message=launched.message,
-                    data={"installer_started": launched.installer_started, "detail": launched.detail},
+                    status="error",
+                    message="Apple Command Line Tools 尚未安装完成，音乐律动系统音频暂不可用",
+                    data={
+                        "installer_started": launched.installer_started,
+                        "detail": launched.detail or result.detail,
+                    },
                 )
             ]
 
     if result.detail:
         _print_dim(ctx, result.detail)
+    if result.status == "developer_tools_missing":
+        _print_audio_tap_repair_hint(ctx)
     _print_dim(ctx, f"✗ {result.message}")
     return [
         StepOutcome(
@@ -416,6 +438,15 @@ def _step_audio_tap(ctx: InstallContext) -> list[StepOutcome]:
             data={"status": result.status, "detail": result.detail},
         )
     ]
+
+
+def _print_audio_tap_repair_hint(ctx: InstallContext) -> None:
+    _print_dim(ctx, "修复方式：")
+    _print_dim(ctx, "  1. 先完成弹出的 Apple Command Line Tools 安装器。")
+    _print_dim(ctx, "  2. 如果没有弹窗或仍失败，说明本机 Command Line Tools 目录已损坏，执行：")
+    _print_dim(ctx, "     sudo rm -rf /Library/Developer/CommandLineTools")
+    _print_dim(ctx, "     xcode-select --install")
+    _print_dim(ctx, "  3. 安装完成后重新运行 `uv run lampgo onboard`。")
 
 
 # ---------- helpers shared across steps -----------------------------------

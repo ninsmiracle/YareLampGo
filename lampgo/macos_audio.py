@@ -100,7 +100,7 @@ def ensure_macos_audio_tap(*, auto_install_tools: bool = False, build: bool = Tr
         message = (
             "需要安装 Apple Command Line Tools 后才能准备系统音频组件。"
             if not installer_started
-            else "已打开 Apple Command Line Tools 安装器；安装完成后请重启 LampGo，再进入音乐律动。"
+            else "已打开 Apple Command Line Tools 安装器；请完成安装，完成前音乐律动不可用。"
         )
         return AudioTapPrepareResult(
             ok=False,
