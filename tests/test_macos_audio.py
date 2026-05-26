@@ -20,6 +20,23 @@ def test_audio_tap_uses_explicit_binary(monkeypatch, tmp_path):
     assert result.binary_path == binary
 
 
+def test_audio_tap_uses_bundled_binary_without_building(monkeypatch, tmp_path):
+    from lampgo import macos_audio
+
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("LAMPGO_AUDIO_TAP_BIN", raising=False)
+    monkeypatch.setattr(macos_audio.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(macos_audio, "audio_tap_source_dir", lambda: tmp_path / "audio_capture")
+
+    bundled = macos_audio.Path(macos_audio.__file__).resolve().parent / "bin" / macos_audio.HELPER_NAME
+
+    result = macos_audio.ensure_macos_audio_tap()
+
+    assert result.ok is True
+    assert result.status == "ready"
+    assert result.binary_path == bundled
+
+
 def test_audio_tap_missing_tools_can_start_apple_installer(monkeypatch, tmp_path):
     from lampgo import macos_audio
 
