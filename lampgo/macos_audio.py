@@ -62,9 +62,11 @@ def find_audio_tap_binary() -> Path | None:
 def ensure_macos_audio_tap(*, auto_install_tools: bool = False, build: bool = True) -> AudioTapPrepareResult:
     """Return a ready helper binary, building/caching it if possible.
 
-    If Apple Command Line Tools are missing, ``auto_install_tools`` launches the
-    official GUI installer. macOS does not allow us to silently install these
-    tools without the user's approval.
+    Prefer the v1 runtime path: if a helper is not already available, try to
+    build it directly with Swift. Some macOS installs report broken ``xcrun
+    --sdk`` metadata while ``swift build`` still works, so we only send users
+    to the Apple installer after Swift itself is unavailable or the build
+    fails with a developer-tools error.
     """
 
     if platform.system() != "Darwin":
@@ -92,22 +94,11 @@ def ensure_macos_audio_tap(*, auto_install_tools: bool = False, build: bool = Tr
             detail=str(source_dir),
         )
 
-    tools = _check_apple_developer_tools()
+    tools = _check_swift_toolchain()
     if not tools.ok:
-        installer_started = False
-        if auto_install_tools:
-            installer_started = _start_command_line_tools_installer()
-        message = (
-            "需要安装 Apple Command Line Tools 后才能准备系统音频组件。"
-            if not installer_started
-            else "已打开 Apple Command Line Tools 安装器；请完成安装，完成前音乐律动不可用。"
-        )
-        return AudioTapPrepareResult(
-            ok=False,
-            status="developer_tools_missing",
-            message=message,
+        return _developer_tools_missing_result(
             detail=tools.detail,
-            installer_started=installer_started,
+            auto_install_tools=auto_install_tools,
         )
 
     if not build:
@@ -119,6 +110,11 @@ def ensure_macos_audio_tap(*, auto_install_tools: bool = False, build: bool = Tr
 
     built = _build_audio_tap(source_dir)
     if not built.ok or built.binary_path is None:
+        if _looks_like_developer_tools_error(built.detail):
+            return _developer_tools_missing_result(
+                detail=built.detail,
+                auto_install_tools=auto_install_tools,
+            )
         return built
 
     cache_path = cached_audio_tap_path()
@@ -139,27 +135,53 @@ class _ToolCheck:
     detail: str = ""
 
 
-def _check_apple_developer_tools() -> _ToolCheck:
+def _check_swift_toolchain() -> _ToolCheck:
     if shutil.which("swift") is None:
         return _ToolCheck(False, "未找到 swift 命令")
-    if shutil.which("xcrun") is None:
-        return _ToolCheck(False, "未找到 xcrun 命令")
 
-    checks = [
-        ["xcrun", "--sdk", "macosx", "--show-sdk-platform-path"],
-        ["swift", "--version"],
-    ]
-    details: list[str] = []
-    for cmd in checks:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=12, check=False)
-        except Exception as exc:  # noqa: BLE001
-            return _ToolCheck(False, f"{cmd[0]} 检查失败：{exc}")
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            return _ToolCheck(False, f"{' '.join(cmd)} 失败：{detail}")
-        details.append((proc.stdout or proc.stderr or "").strip())
-    return _ToolCheck(True, " | ".join(d for d in details if d))
+    cmd = ["swift", "--version"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=12, check=False)
+    except Exception as exc:  # noqa: BLE001
+        return _ToolCheck(False, f"swift 检查失败：{exc}")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return _ToolCheck(False, f"{' '.join(cmd)} 失败：{detail}")
+    return _ToolCheck(True, (proc.stdout or proc.stderr or "").strip())
+
+
+def _developer_tools_missing_result(*, detail: str, auto_install_tools: bool) -> AudioTapPrepareResult:
+    installer_started = False
+    if auto_install_tools:
+        installer_started = _start_command_line_tools_installer()
+    message = (
+        "需要安装 Apple Command Line Tools 后才能准备系统音频组件。"
+        if not installer_started
+        else "已打开 Apple Command Line Tools 安装器；请完成安装，完成前音乐律动不可用。"
+    )
+    return AudioTapPrepareResult(
+        ok=False,
+        status="developer_tools_missing",
+        message=message,
+        detail=detail,
+        installer_started=installer_started,
+    )
+
+
+def _looks_like_developer_tools_error(detail: str) -> bool:
+    text = detail.lower()
+    return any(
+        marker in text
+        for marker in (
+            "xcode-select",
+            "command line tools",
+            "developer tools",
+            "unable to lookup item",
+            "platformpath",
+            "no developer tools",
+            "tool 'swift' requires xcode",
+        )
+    )
 
 
 def _start_command_line_tools_installer() -> bool:

@@ -390,7 +390,7 @@ def _step_audio_tap(ctx: InstallContext) -> list[StepOutcome]:
         return [StepOutcome(step="audio_tap", status="skipped", message=result.message)]
 
     if result.status == "developer_tools_missing":
-        _print_dim(ctx, "音乐律动需要一个本机系统音频组件，当前电脑还缺 Apple Command Line Tools。")
+        _print_dim(ctx, "音乐律动需要准备一个本机系统音频组件，但当前电脑暂时无法完成构建。")
         if result.detail:
             _print_dim(ctx, result.detail)
         if _confirm(ctx, "    现在打开 Apple 官方安装器？", default_yes=True):
@@ -442,11 +442,11 @@ def _step_audio_tap(ctx: InstallContext) -> list[StepOutcome]:
 
 def _print_audio_tap_repair_hint(ctx: InstallContext) -> None:
     _print_dim(ctx, "修复方式：")
-    _print_dim(ctx, "  1. 先完成弹出的 Apple Command Line Tools 安装器。")
-    _print_dim(ctx, "  2. 如果没有弹窗或仍失败，说明本机 Command Line Tools 目录已损坏，执行：")
+    _print_dim(ctx, "  1. 先完成弹出的 Apple Command Line Tools 安装器，安装完成后重跑 `uv run lampgo onboard`。")
+    _print_dim(ctx, "  2. 如果没有弹窗，可手动执行：xcode-select --install")
+    _print_dim(ctx, "  3. 只有当系统提示已安装但仍构建失败时，再清理后重装：")
     _print_dim(ctx, "     sudo rm -rf /Library/Developer/CommandLineTools")
     _print_dim(ctx, "     xcode-select --install")
-    _print_dim(ctx, "  3. 安装完成后重新运行 `uv run lampgo onboard`。")
 
 
 # ---------- helpers shared across steps -----------------------------------
