@@ -38,6 +38,6 @@
 ## 开源前检查
 
 - 根 README 只链接适合公开发布的文档。
-- `docs/internal_project_intro.md` 这类内部介绍不建议随开源仓库发布。
+- 内部介绍、商业 briefing 和未公开规划不随开源仓库发布。
 - 不提交 `.env`、`~/.lampgo/credentials.json`、私有模型 key、内部服务地址或未授权媒体素材。
 - 确认 `pyproject.toml` 中的私有包源和可选依赖是否需要替换为公开可安装方案。

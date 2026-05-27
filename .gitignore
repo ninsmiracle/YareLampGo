@@ -18,10 +18,19 @@ assets/recordings/aliases.json
 .DS_Store
 .env_backup
 lampgo.toml_backup
-scripts/
+/scripts/
 docs/zhiqi/
 
 docs/whitepapers/
+
+# Local research drops, exported packages, and binary reference material.
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+docs/*.pdf
 
 #model assets
 assets/lamp_pack_Go.rar
