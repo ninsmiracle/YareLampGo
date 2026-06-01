@@ -18,6 +18,7 @@ $env:LAMPGO_LLM_PROVIDER="mimo"
 $env:LAMPGO_LLM_MESSAGE_TYPE="openai"
 $env:LAMPGO_LLM_API_KEY="sk-..."
 $env:LAMPGO_PHONE_ENABLED="true"
+$env:LAMPGO_PHONE_ADB=""  # adb 不在 PATH 时，填 adb.exe / adb 的完整路径
 $env:LAMPGO_PHONE_DEVICE_TYPE="adb"
 $env:LAMPGO_PHONE_DEVICE_ID="<adb devices 中的设备 ID>"
 $env:LAMPGO_PHONE_SKIP_MODEL_CHECK="true"

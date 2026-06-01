@@ -106,6 +106,7 @@ class PhoneTaskSkill(Skill):
                 task=original_task,
                 device_id=device_id,
                 device_type=self._config.device_type,
+                adb_path=self._config.adb_path,
                 artifact_dir=self._config.artifact_dir,
             )
             verification = verify_phone_task_result(original_task, observation)

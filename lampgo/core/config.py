@@ -405,6 +405,10 @@ class PhoneAgentConfig(BaseModel):
         default="",
         description="Python executable for the built-in phone agent subprocess. Empty = current Python.",
     )
+    adb_path: str = Field(
+        default="",
+        description="Optional adb executable path. Empty = search PATH, Android SDK env vars, and common install paths.",
+    )
     device_type: str = Field(default="adb", description="Phone control backend: adb, hdc, or ios.")
     device_id: str = Field(default="", description="ADB device id for the mounted Android phone.")
     wda_url: str = Field(default="http://localhost:8100", description="WebDriverAgent URL for iOS control.")
@@ -762,6 +766,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_PHONE_ENABLED": ("phone_agent", "enabled"),
         "LAMPGO_PHONE_AGENT_DIR": ("phone_agent", "agent_dir"),
         "LAMPGO_PHONE_PYTHON": ("phone_agent", "python_executable"),
+        "LAMPGO_PHONE_ADB": ("phone_agent", "adb_path"),
         "LAMPGO_PHONE_DEVICE_TYPE": ("phone_agent", "device_type"),
         "LAMPGO_PHONE_DEVICE_ID": ("phone_agent", "device_id"),
         "LAMPGO_PHONE_WDA_URL": ("phone_agent", "wda_url"),

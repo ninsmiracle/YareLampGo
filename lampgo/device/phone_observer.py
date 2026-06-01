@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 import time
 import uuid
@@ -14,6 +12,8 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from lampgo.device.phone_paths import find_adb
 
 
 @dataclass
@@ -50,6 +50,7 @@ def capture_phone_observation(
     task: str = "",
     device_id: str = "",
     device_type: str = "adb",
+    adb_path: str = "",
     artifact_dir: str | Path = ".lampgo/phone-artifacts",
     timeout_s: float = 12.0,
 ) -> PhoneObservation:
@@ -61,7 +62,7 @@ def capture_phone_observation(
             status="unsupported",
             error=f"result observation is not implemented for device_type={device_type}",
         )
-    adb = _find_adb()
+    adb = find_adb(adb_path)
     if not adb:
         return PhoneObservation(ok=False, status="adb_missing", error="adb not found")
 
@@ -304,18 +305,6 @@ def _extract_foreground_package(text: str) -> str:
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", "", (text or "").lower())
-
-
-def _find_adb() -> str:
-    found = shutil.which("adb")
-    if found:
-        return found
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    if local_app_data:
-        candidate = Path(local_app_data) / "Android" / "Sdk" / "platform-tools" / "adb.exe"
-        if candidate.exists():
-            return str(candidate)
-    return ""
 
 
 __all__ = [

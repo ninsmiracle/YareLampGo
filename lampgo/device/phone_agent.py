@@ -7,8 +7,10 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from lampgo.core.config import LLMConfig, PhoneAgentConfig
+from lampgo.device.phone_paths import find_adb
 
 
 @dataclass
@@ -36,11 +38,16 @@ class PhoneAgentRunner:
 
         return sys.executable or "python"
 
+    def _adb_executable(self) -> str:
+        return find_adb(self.config.adb_path)
+
     def validate(self) -> str | None:
         if not self.config.enabled:
             return "phone agent is disabled; set LAMPGO_PHONE_ENABLED=true"
         if self.config.device_type.strip().lower() not in {"adb", "hdc", "ios"}:
             return "phone agent device_type must be one of: adb, hdc, ios"
+        if self.config.device_type.strip().lower() == "adb" and not self._adb_executable():
+            return "adb not found; install Android platform-tools or set LAMPGO_PHONE_ADB"
         if not self.llm_config.api_base.strip():
             return "llm.api_base is empty; set LAMPGO_LLM_API_BASE for phone_task"
         if not self.llm_config.model.strip():
@@ -79,6 +86,9 @@ class PhoneAgentRunner:
         env["PHONE_AGENT_SKIP_MODEL_CHECK"] = "true" if self.config.skip_model_check else "false"
         env["PHONE_AGENT_LANG"] = self.config.lang.strip() or "cn"
         env["PHONE_AGENT_WDA_URL"] = self.config.wda_url.strip() or "http://localhost:8100"
+        adb = self._adb_executable()
+        if adb:
+            env["PATH"] = f"{Path(adb).parent}{os.pathsep}{env.get('PATH', '')}"
         if resolved_device_id:
             env["PHONE_AGENT_DEVICE_ID"] = resolved_device_id
 
