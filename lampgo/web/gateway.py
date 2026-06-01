@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import json
 import re
 import time
 import uuid
-
-import httpx as httpx_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
+import httpx as httpx_module
 import structlog
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
@@ -44,6 +47,23 @@ logger = structlog.get_logger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_ASSETS_DIR = REPO_ROOT / "assets"
+
+_AUTH_COOKIE_NAME = "lampgo_auth"
+_AUTH_COOKIE_MAX_AGE = 12 * 60 * 60
+_PROTECTED_HTTP_PREFIXES = ("/api/", "/v1/")
+_SAFE_CORS_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+_SAFE_CORS_HEADERS = ["Authorization", "Content-Type", "X-Lampgo-Plugin-Token", "X-Requested-With"]
+_SENSITIVE_CONFIG_FIELDS = frozenset(
+    {
+        "voice.livekit_api_key",
+        "voice.livekit_api_secret",
+        "voice.volcengine_access_token",
+    }
+)
+_SAFETY_MAX_VELOCITY_LIMIT = 240.0
+_SAFETY_MAX_ACCELERATION_LIMIT = 1800.0
+_ESP32_PROBE_PATHS = frozenset({"/status", "/scan", "/connect", "/config"})
+_LLM_LOCAL_PROVIDER_ALLOWLIST = frozenset({"ollama"})
 
 
 def _coerce_value(current: Any, value: Any) -> Any:
@@ -145,6 +165,7 @@ class WebGateway:
         self._livekit_token_gate_until = 0.0
         self._livekit_token_gate_owner = ""
         self._livekit_active_rooms: dict[str, dict[str, Any]] = {}
+        self._rate_limit_buckets: dict[str, list[float]] = {}
         self.app = self._build_app()
 
     def _build_app(self) -> Starlette:
@@ -244,11 +265,13 @@ class WebGateway:
                     pass
 
         app = Starlette(routes=routes, lifespan=lifespan)
+        app.add_middleware(BaseHTTPMiddleware, dispatch=self._http_security_middleware)
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_origins=self._allowed_cors_origins(),
+            allow_credentials=True,
+            allow_methods=_SAFE_CORS_METHODS,
+            allow_headers=_SAFE_CORS_HEADERS,
         )
         return app
 
@@ -287,6 +310,189 @@ class WebGateway:
             "running_skill": self.server.executor.current_skill_id,
             "is_busy": self.server.executor.is_busy,
         }
+
+    def _allowed_cors_origins(self) -> list[str]:
+        port = int(getattr(self.config, "port", 8420) or 8420)
+        hosts = {"localhost", "127.0.0.1", "[::1]"}
+        host = str(getattr(self.config, "host", "") or "").strip()
+        if host and host not in {"0.0.0.0", "::"}:
+            hosts.add(host)
+        return [f"http://{host}:{port}" for host in sorted(hosts)]
+
+    @staticmethod
+    def _is_loopback_host(host: str | None) -> bool:
+        if not host:
+            return False
+        clean = host.strip().strip("[]").lower()
+        if clean in {"localhost", "testclient"}:
+            return True
+        try:
+            return ipaddress.ip_address(clean).is_loopback
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _same_origin(origin: str, scheme: str, host: str | None, port: int | None) -> bool:
+        try:
+            parsed = urlsplit(origin)
+        except Exception:
+            return False
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        try:
+            origin_port = parsed.port
+        except ValueError:
+            return False
+        return parsed.scheme == scheme and parsed.hostname == host and origin_port == port
+
+    def _origin_allowed(self, request: Request) -> bool:
+        origin = request.headers.get("origin", "").strip()
+        if not origin:
+            return True
+        if origin == "null":
+            return False
+        try:
+            parsed = urlsplit(origin)
+        except Exception:
+            return False
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        if self._is_loopback_host(parsed.hostname):
+            return True
+        return self._same_origin(origin, request.url.scheme, request.url.hostname, request.url.port)
+
+    def _expected_auth_token(self) -> str:
+        from lampgo import personastore
+
+        return personastore.get_or_create_plugin_token()
+
+    @staticmethod
+    def _bearer_token(value: str | None) -> str:
+        if not value:
+            return ""
+        prefix = "bearer "
+        stripped = value.strip()
+        if stripped.lower().startswith(prefix):
+            return stripped[len(prefix):].strip()
+        return ""
+
+    def _request_token_candidates(self, request: Request) -> list[str]:
+        return [
+            self._bearer_token(request.headers.get("authorization")),
+            str(request.headers.get("x-lampgo-plugin-token") or "").strip(),
+            str(request.cookies.get(_AUTH_COOKIE_NAME) or "").strip(),
+        ]
+
+    def _is_test_client(self, request: Request | WebSocket) -> bool:
+        client = getattr(request, "client", None)
+        return bool(client and getattr(client, "host", "") == "testclient")
+
+    def _is_loopback_client(self, request: Request | WebSocket) -> bool:
+        client = getattr(request, "client", None)
+        return bool(client and self._is_loopback_host(getattr(client, "host", "")))
+
+    def _is_request_authorized(self, request: Request) -> bool:
+        if self._is_test_client(request):
+            return True
+        try:
+            expected = self._expected_auth_token()
+        except Exception:
+            logger.exception("web.auth_token_load_failed")
+            return False
+        if not expected:
+            return False
+        return any(token and hmac.compare_digest(token, expected) for token in self._request_token_candidates(request))
+
+    def _rate_limit_ok(self, request: Request, *, limit: int = 600, window_s: float = 60.0) -> tuple[bool, int]:
+        client = getattr(request, "client", None)
+        key = getattr(client, "host", None) or "unknown"
+        now = time.monotonic()
+        bucket = [ts for ts in self._rate_limit_buckets.get(key, []) if now - ts < window_s]
+        if len(bucket) >= limit:
+            self._rate_limit_buckets[key] = bucket
+            retry_after = max(1, int(window_s - (now - bucket[0])))
+            return False, retry_after
+        bucket.append(now)
+        self._rate_limit_buckets[key] = bucket
+        return True, 0
+
+    def _security_response(
+        self,
+        payload: dict[str, Any],
+        *,
+        status_code: int,
+        headers: dict[str, str] | None = None,
+    ) -> JSONResponse:
+        response = JSONResponse(payload, status_code=status_code, headers=headers)
+        self._apply_security_headers(response)
+        return response
+
+    async def _http_security_middleware(self, request: Request, call_next: Any):  # type: ignore[no-untyped-def]
+        protected = request.url.path.startswith(_PROTECTED_HTTP_PREFIXES)
+        if protected and not self._origin_allowed(request):
+            logger.warning(
+                "web.auth_origin_rejected",
+                path=request.url.path,
+                origin=request.headers.get("origin", ""),
+                client=getattr(getattr(request, "client", None), "host", ""),
+            )
+            return self._security_response({"ok": False, "error": "origin not allowed"}, status_code=403)
+
+        if protected and request.method != "OPTIONS":
+            allowed, retry_after = self._rate_limit_ok(request)
+            if not allowed:
+                logger.warning(
+                    "web.rate_limit_rejected",
+                    path=request.url.path,
+                    client=getattr(getattr(request, "client", None), "host", ""),
+                )
+                return self._security_response(
+                    {"ok": False, "error": "rate limit exceeded"},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )
+            if not self._is_request_authorized(request):
+                logger.warning(
+                    "web.auth_rejected",
+                    path=request.url.path,
+                    client=getattr(getattr(request, "client", None), "host", ""),
+                )
+                return self._security_response({"ok": False, "error": "authentication required"}, status_code=401)
+
+        response = await call_next(request)
+        self._apply_security_headers(response)
+        if self._is_loopback_client(request) and request.method in {"GET", "HEAD"}:
+            try:
+                response.set_cookie(
+                    _AUTH_COOKIE_NAME,
+                    self._expected_auth_token(),
+                    max_age=_AUTH_COOKIE_MAX_AGE,
+                    httponly=True,
+                    samesite="strict",
+                    secure=request.url.scheme == "https",
+                )
+            except Exception:
+                logger.exception("web.auth_cookie_issue_failed")
+        return response
+
+    @staticmethod
+    def _apply_security_headers(response: Any) -> None:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'; "
+            "img-src 'self' data: blob:; "
+            "media-src 'self' blob:; "
+            "connect-src 'self' http: https: ws: wss:; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline'; "
+            "worker-src 'self' blob:",
+        )
 
     # ---- OpenAI-compatible LLM endpoint ----
 
@@ -1208,6 +1414,10 @@ class WebGateway:
                 value = obj
             else:
                 value = getattr(obj, tail, None) if obj is not None else None
+            if dotted in _SENSITIVE_CONFIG_FIELDS and value:
+                from lampgo import personastore
+
+                value = personastore.mask_api_key(str(value))
             out[dotted] = {
                 "value": value,
                 "source": provenance.get(dotted, "default"),
@@ -1250,6 +1460,22 @@ class WebGateway:
             if hangover < 0 or hangover > 5000:
                 raise ValueError("voice.echo_gate_hangover_ms must be between 0 and 5000")
             flat["voice.echo_gate_hangover_ms"] = hangover
+
+    @staticmethod
+    def _validate_safety_fields(flat: dict[str, Any]) -> None:
+        for key, limit in (
+            ("safety.max_velocity", _SAFETY_MAX_VELOCITY_LIMIT),
+            ("safety.max_acceleration", _SAFETY_MAX_ACCELERATION_LIMIT),
+        ):
+            if key not in flat:
+                continue
+            try:
+                value = float(flat[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be a number") from exc
+            if value <= 0 or value > limit:
+                raise ValueError(f"{key} must be > 0 and <= {limit:g}")
+            flat[key] = value
 
     async def api_config_all(self, request: Request) -> JSONResponse:
         """Return every editable field grouped by tab, with per-field provenance."""
@@ -1320,6 +1546,8 @@ class WebGateway:
         try:
             if section == "voice":
                 self._derive_voice_mode_fields(flat)
+            if section == "safety":
+                self._validate_safety_fields(flat)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"invalid value: {exc}"}, status_code=400)
 
@@ -1340,6 +1568,13 @@ class WebGateway:
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"invalid value: {exc}"}, status_code=400)
         personastore.patch_overrides_toml(patch)
+        if section in {"device", "voice", "motion", "safety", "web", "device_esp32"}:
+            logger.info(
+                "web.config_saved",
+                section=section,
+                fields=sorted(flat.keys()),
+                client=getattr(getattr(request, "client", None), "host", ""),
+            )
 
         needs_restart = sorted(f for f in flat if f in self._COLD_RESTART_FIELDS)
 
@@ -1682,6 +1917,11 @@ class WebGateway:
         else:
             effective_key = api_key
 
+        try:
+            self._validated_llm_base(provider, api_base)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
         if validate:
             probe_error = await self._probe_llm(
                 provider=provider,
@@ -1721,6 +1961,12 @@ class WebGateway:
         if share_memory is not None:
             patch["share_openclaw_memory"] = bool(share_memory)
         personastore.patch_overrides_toml(patch)
+        logger.info(
+            "web.config_saved",
+            section="llm",
+            fields=sorted(patch.get("llm", {}).keys()),
+            client=getattr(getattr(request, "client", None), "host", ""),
+        )
 
         # Persist the effective key into credentials.json so it becomes the
         # durable source of truth (as the UI hint promises). This is
@@ -1814,6 +2060,60 @@ class WebGateway:
             }
         )
 
+    def _provider_allowed_bases(self, provider: str) -> set[str]:
+        preset = self._PROVIDER_PRESETS.get(provider) or {}
+        urls = preset.get("api_urls") if isinstance(preset, dict) else {}
+        out = {str(v).rstrip("/") for v in (urls or {}).values() if v}
+        base_url = str(preset.get("base_url") or "").strip() if isinstance(preset, dict) else ""
+        if base_url:
+            out.add(base_url.rstrip("/"))
+        return out
+
+    @staticmethod
+    def _host_is_public(hostname: str | None) -> bool:
+        if not hostname:
+            return False
+        clean = hostname.strip().strip("[]").lower()
+        if clean in {"localhost"} or clean.endswith(".localhost") or clean.endswith(".local"):
+            return False
+        try:
+            ip = ipaddress.ip_address(clean)
+        except ValueError:
+            return True
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+
+    def _validated_llm_base(self, provider: str, api_base: str) -> str:
+        provider = str(LLMConfig.normalize_provider_alias(provider) or "").strip()
+        base = (api_base or self._PROVIDER_PRESETS.get(provider, {}).get("base_url") or "").strip().rstrip("/")
+        if not base:
+            raise ValueError("Base URL 未配置")
+        try:
+            parsed = urlsplit(base)
+        except Exception as exc:
+            raise ValueError("Base URL 格式无效") from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Base URL 只允许 http(s) URL")
+
+        allowed_bases = self._provider_allowed_bases(provider)
+        if base in allowed_bases:
+            return base
+        if provider in _LLM_LOCAL_PROVIDER_ALLOWLIST:
+            raise ValueError("本地 LLM provider 只允许使用内置本机 Base URL")
+        if provider != "custom":
+            raise ValueError("Base URL 必须匹配所选 provider 的内置白名单")
+        if parsed.scheme != "https":
+            raise ValueError("自定义 Base URL 必须使用 https")
+        if not self._host_is_public(parsed.hostname):
+            raise ValueError("自定义 Base URL 不允许指向本机、内网或链路本地地址")
+        return base
+
     async def _probe_llm(
         self,
         *,
@@ -1828,9 +2128,10 @@ class WebGateway:
             return "API key 为空"
         if not model:
             return "未指定 model"
-        base = api_base.rstrip("/") or self._PROVIDER_PRESETS.get(provider, {}).get("base_url") or ""
-        if not base:
-            return "Base URL 未配置"
+        try:
+            base = self._validated_llm_base(provider, api_base)
+        except ValueError as exc:
+            return str(exc)
         try:
             import httpx
         except Exception:
@@ -2095,6 +2396,9 @@ class WebGateway:
 
     async def ws_esp32_speaker(self, ws: WebSocket) -> None:
         """Proxy browser PCM16 frames to the ESP32 /ws/speaker endpoint."""
+        if not self._is_websocket_authorized(ws):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         logger.info("web.esp32_speaker_proxy_client_connected")
         if self._esp32_capture_active:
@@ -2294,6 +2598,68 @@ class WebGateway:
             logger.exception("web.forget_wifi_cleanup_failed")
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
+    @staticmethod
+    def _url_hostname(value: str) -> str:
+        raw = value.strip()
+        if not raw:
+            return ""
+        if "://" not in raw:
+            raw = f"http://{raw}"
+        try:
+            return (urlsplit(raw).hostname or "").strip().strip("[]").lower()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _url_port(value: str) -> int | None:
+        raw = value.strip()
+        if not raw:
+            return None
+        if "://" not in raw:
+            raw = f"http://{raw}"
+        try:
+            return urlsplit(raw).port
+        except Exception:
+            return None
+
+    def _allowed_esp32_endpoints(self) -> set[tuple[str, int | None]]:
+        out: set[tuple[str, int | None]] = {("192.168.4.1", None), ("192.168.4.1", 80)}
+        active = self.server.esp32.get_active_base_url() if self.server.esp32 else ""
+        preferred = str(getattr(self.server.config.device_esp32, "preferred_host", "") or "")
+        for value in (active or "", preferred):
+            host = self._url_hostname(value)
+            if not host:
+                continue
+            port = self._url_port(value)
+            out.add((host, port))
+            if port is None:
+                out.add((host, 80))
+        return out
+
+    def _validate_esp32_probe_target(self, base_url: str, path: str) -> tuple[str, str | None]:
+        if path not in _ESP32_PROBE_PATHS:
+            return "", f"probe path not allowed: {path}"
+        try:
+            parsed = urlsplit(base_url)
+        except Exception:
+            return "", "invalid base_url"
+        if parsed.scheme != "http" or not parsed.netloc:
+            return "", "base_url must be an http URL"
+        if parsed.username or parsed.password:
+            return "", "base_url credentials are not allowed"
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            return "", "base_url must not include path, query, or fragment"
+        host = (parsed.hostname or "").strip().strip("[]").lower()
+        if not host:
+            return "", "base_url host is required"
+        port = parsed.port
+        allowed = self._allowed_esp32_endpoints()
+        if (host, port) in allowed or (host, None) in allowed:
+            return base_url.rstrip("/"), None
+        if host.endswith(".local") and re.fullmatch(r"lampgo-cam-[a-z0-9-]+\.local", host) and port in {None, 80}:
+            return base_url.rstrip("/"), None
+        return "", "base_url is not an allowed ESP32 endpoint"
+
     async def api_esp32_probe(self, request: Request) -> JSONResponse:
         """POST /api/device/probe — generic HTTP proxy to an ESP32 during setup.
 
@@ -2320,6 +2686,8 @@ class WebGateway:
             path = "/" + path
         method = str(payload.get("method", "GET")).upper()
         body = payload.get("body", None)
+        if method not in {"GET", "POST"}:
+            return JSONResponse({"ok": False, "error": f"unsupported method: {method}"}, status_code=400)
         if (
             method == "POST"
             and path == "/connect"
@@ -2338,6 +2706,16 @@ class WebGateway:
                 )
             base_url = active.rstrip("/")
 
+        base_url, target_error = self._validate_esp32_probe_target(base_url, path)
+        if target_error:
+            logger.warning(
+                "web.esp32_probe_rejected",
+                base_url=str(payload.get("base_url", ""))[:200],
+                path=path,
+                reason=target_error,
+            )
+            return JSONResponse({"ok": False, "error": target_error}, status_code=400)
+
         url = f"{base_url}{path}"
         try:
             async with httpx_module.AsyncClient(timeout=5.0, trust_env=False) as client:
@@ -2345,8 +2723,6 @@ class WebGateway:
                     resp = await client.get(url)
                 elif method == "POST":
                     resp = await client.post(url, json=body or {})
-                else:
-                    return JSONResponse({"ok": False, "error": f"unsupported method: {method}"}, status_code=400)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
             return JSONResponse(
@@ -2528,12 +2904,16 @@ class WebGateway:
                         },
                     }
                 )
+            try:
+                content = personastore.read_memory_daily(date_param)
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
             return JSONResponse(
                 {
                     "ok": True,
                     "result": {
                         "date": date_param if date_param != "today" else None,
-                        "content": personastore.read_memory_daily(date_param),
+                        "content": content,
                     },
                 }
             )
@@ -2546,7 +2926,10 @@ class WebGateway:
         if not isinstance(bullets, list) or not bullets:
             return JSONResponse({"ok": False, "error": "bullets must be a non-empty list"}, status_code=400)
         date_param = str(body.get("date") or "").strip() or None
-        path = personastore.append_memory_daily([str(b) for b in bullets], date_str=date_param)
+        try:
+            path = personastore.append_memory_daily([str(b) for b in bullets], date_str=date_param)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         promote = bool(body.get("promote", False))
         if promote:
             core = personastore.read_memory_core()
@@ -2822,24 +3205,53 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": result})
 
     def _check_plugin_token(self, request: Request) -> bool:
-        """If the request carries an X-Lampgo-Plugin-Token header, validate it.
+        """Validate a privileged write request against the gateway token."""
+        return self._is_request_authorized(request)
 
-        Absence of the header is treated as browser / same-origin UI access and
-        is allowed (the gateway binds to localhost by default). When a token is
-        present, it must match the server's stored value exactly.
-        """
-        supplied = request.headers.get("x-lampgo-plugin-token")
-        if not supplied:
+    def _websocket_origin_allowed(self, ws: WebSocket) -> bool:
+        origin = ws.headers.get("origin", "").strip()
+        if not origin:
             return True
+        if origin == "null":
+            return False
         try:
-            from lampgo import personastore
-
-            expected = personastore.get_plugin_token()
+            parsed = urlsplit(origin)
         except Exception:
+            return False
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        if self._is_loopback_host(parsed.hostname):
+            return True
+        expected_scheme = "https" if ws.url.scheme == "wss" else "http"
+        return self._same_origin(origin, expected_scheme, ws.url.hostname, ws.url.port)
+
+    def _websocket_token_candidates(self, ws: WebSocket) -> list[str]:
+        return [
+            self._bearer_token(ws.headers.get("authorization")),
+            str(ws.headers.get("x-lampgo-plugin-token") or "").strip(),
+            str(ws.cookies.get(_AUTH_COOKIE_NAME) or "").strip(),
+            str(ws.query_params.get("token") or "").strip(),
+        ]
+
+    def _is_websocket_authorized(self, ws: WebSocket) -> bool:
+        if self._is_test_client(ws):
+            return True
+        if not self._websocket_origin_allowed(ws):
+            logger.warning(
+                "web.ws_origin_rejected",
+                path=ws.url.path,
+                origin=ws.headers.get("origin", ""),
+                client=getattr(getattr(ws, "client", None), "host", ""),
+            )
+            return False
+        try:
+            expected = self._expected_auth_token()
+        except Exception:
+            logger.exception("web.ws_auth_token_load_failed")
             return False
         if not expected:
             return False
-        return supplied.strip() == expected
+        return any(token and hmac.compare_digest(token, expected) for token in self._websocket_token_candidates(ws))
 
     def _invalidate_persona_cache(self) -> None:
         try:
@@ -2860,6 +3272,9 @@ class WebGateway:
     # ---- WebSocket endpoint ----
 
     async def ws_endpoint(self, ws: WebSocket) -> None:
+        if not self._is_websocket_authorized(ws):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         await self.bridge.add_client(ws)
         try:

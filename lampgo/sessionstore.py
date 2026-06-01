@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -48,6 +49,13 @@ logger = structlog.get_logger(__name__)
 SCHEMA_VERSION = 1
 MAX_SESSIONS = 40
 MAX_MESSAGES_PER_SESSION = 2000
+MAX_ACTIVITY_HTML_BYTES = 180_000
+_UNSAFE_ACTIVITY_HTML_RE = re.compile(
+    r"(<\s*/?\s*(script|iframe|object|embed|link|meta|style)\b|"
+    r"\bon[a-z]+\s*=|"
+    r"(javascript|vbscript|data)\s*:)",
+    re.IGNORECASE,
+)
 
 
 def sessions_path() -> Path:
@@ -78,6 +86,48 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         os.fsync(tmp.fileno())
         tmp_name = tmp.name
     os.replace(tmp_name, path)
+
+
+def _sanitize_activity_html(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    html = value.strip()
+    if not html:
+        return ""
+    if len(html.encode("utf-8", errors="replace")) > MAX_ACTIVITY_HTML_BYTES:
+        return ""
+    if "activity-log" not in html or not html.lower().startswith("<div"):
+        return ""
+    if _UNSAFE_ACTIVITY_HTML_RE.search(html):
+        return ""
+    return html
+
+
+def _sanitize_meta(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or len(key) > 80:
+            continue
+        if key == "activity_html":
+            safe_html = _sanitize_activity_html(value)
+            if safe_html:
+                out[key] = safe_html
+            continue
+        if isinstance(value, str):
+            out[key] = value[:4096]
+        elif isinstance(value, (bool, int, float)) or value is None:
+            out[key] = value
+        elif isinstance(value, list):
+            out[key] = value[:50]
+        elif isinstance(value, dict):
+            out[key] = {
+                str(k)[:80]: v
+                for k, v in list(value.items())[:50]
+                if isinstance(v, (str, bool, int, float)) or v is None
+            }
+    return out or None
 
 
 def load_snapshot() -> dict[str, Any]:
@@ -129,8 +179,8 @@ def _sanitize_session(raw: Any) -> dict[str, Any] | None:
         ts = m.get("ts")
         if isinstance(ts, (int, float)):
             entry["ts"] = int(ts)
-        meta = m.get("meta")
-        if isinstance(meta, dict):
+        meta = _sanitize_meta(m.get("meta"))
+        if meta:
             entry["meta"] = meta
         cleaned_messages.append(entry)
     out: dict[str, Any] = {

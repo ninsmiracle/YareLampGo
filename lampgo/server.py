@@ -78,6 +78,12 @@ logger = structlog.get_logger(__name__)
 RECORDING_ALIASES_FILE = "aliases.json"
 
 
+def _log_safe(value: Any, *, limit: int = 200) -> str:
+    text = str(value or "")
+    text = re.sub(r"[\r\n\t\x00-\x1f\x7f]+", " ", text)
+    return text[:limit]
+
+
 class LampgoServer:
     """Top-level orchestrator. Owns all components and their lifecycle."""
 
@@ -735,7 +741,7 @@ class LampgoServer:
             if is_echo:
                 logger.info(
                     "server.echo_text_dropped",
-                    text=text[:80],
+                    text=_log_safe(text, limit=80),
                     request_id=request_id,
                     **echo_detail,
                 )
@@ -752,7 +758,7 @@ class LampgoServer:
                 }
             logger.info(
                 "server.echo_text_kept",
-                text=text[:80],
+                text=_log_safe(text, limit=80),
                 request_id=request_id,
                 **echo_detail,
             )
@@ -798,7 +804,7 @@ class LampgoServer:
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
             logger.info(
                 "server.text_escalate_to_llm_agent",
-                text=text,
+                text=_log_safe(text),
                 request_id=request_id,
                 detail=intent.detail,
                 history_len=len(history),
@@ -836,7 +842,7 @@ class LampgoServer:
                 )
                 logger.info(
                     "server.text_agent_handoff_to_openclaw",
-                    text=text,
+                    text=_log_safe(text),
                     request_id=request_id,
                     stop_reason=agent_result.stop_reason,
                     detail=agent_result.detail,
@@ -859,7 +865,7 @@ class LampgoServer:
             )
             logger.info(
                 "server.text_agent_finished",
-                text=text,
+                text=_log_safe(text),
                 request_id=request_id,
                 intent_type=agent_result.intent_type,
                 stop_reason=agent_result.stop_reason,
@@ -884,7 +890,7 @@ class LampgoServer:
 
         logger.info(
             "server.text_intent_resolved",
-            text=text,
+            text=_log_safe(text),
             request_id=request_id,
             intent_type=intent.intent_type.value,
             skill_id=intent.skill_id,
@@ -967,12 +973,12 @@ class LampgoServer:
             logger.warning("server.audio_transcribe_empty", request_id=request_id)
             return {"ok": True, "result": {"type": "chat", "response": "抱歉，没有听清您说的话。", "source": "audio"}}
 
-        logger.info("server.audio_transcribed", request_id=request_id, text=text)
+        logger.info("server.audio_transcribed", request_id=request_id, text=_log_safe(text))
         is_echo, echo_detail = likely_recent_tts_echo(self, text)
         if is_echo:
             logger.info(
                 "server.audio_echo_text_dropped",
-                text=text[:80],
+                text=_log_safe(text, limit=80),
                 request_id=request_id,
                 **echo_detail,
             )
@@ -989,7 +995,7 @@ class LampgoServer:
             }
         logger.info(
             "server.audio_echo_text_kept",
-            text=text[:80],
+            text=_log_safe(text, limit=80),
             request_id=request_id,
             **echo_detail,
         )
@@ -1177,7 +1183,7 @@ class LampgoServer:
         reason: str,
         recent_tool_calls: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        logger.info("server.openclaw_handoff", request_id=request_id, text=text, reason=reason)
+        logger.info("server.openclaw_handoff", request_id=request_id, text=_log_safe(text), reason=_log_safe(reason))
         task = await self.openclaw.submit_complex_task(
             {
                 "request_id": request_id,

@@ -4288,13 +4288,42 @@
     return html;
   }
 
+  function sanitizeActivityLogElement(root) {
+    if (!root || !root.classList || !root.classList.contains("activity-log")) return null;
+    const allowedTags = new Set(["DIV", "SPAN", "BUTTON", "DETAILS", "SUMMARY"]);
+    const allowedAttrs = new Set(["class", "type", "title", "aria-hidden", "aria-expanded"]);
+    const sanitizeAttrs = (el) => {
+      Array.from(el.attributes).forEach((attr) => {
+        const name = attr.name.toLowerCase();
+        const value = attr.value || "";
+        const isAllowed = allowedAttrs.has(name) || name.startsWith("data-");
+        if (!isAllowed || name.startsWith("on") || /^\s*(javascript|data|vbscript):/i.test(value)) {
+          el.removeAttribute(attr.name);
+        }
+      });
+    };
+    sanitizeAttrs(root);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    const remove = [];
+    while (walker.nextNode()) {
+      const el = walker.currentNode;
+      if (!allowedTags.has(el.tagName)) {
+        remove.push(el);
+        continue;
+      }
+      sanitizeAttrs(el);
+    }
+    remove.forEach((el) => el.remove());
+    return root;
+  }
+
   function rehydrateActivityLog(bubble, html) {
     if (!bubble || !html) return;
     const stepsEl = bubble.querySelector(".steps");
     if (!stepsEl) return;
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
-    const newLog = tmp.firstElementChild;
+    const newLog = sanitizeActivityLogElement(tmp.firstElementChild);
     if (!newLog) return;
     stepsEl.replaceWith(newLog);
     const summary = newLog.querySelector(".activity-summary");

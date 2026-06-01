@@ -22,16 +22,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import tomllib
+from collections.abc import Iterable
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+_MEMORY_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ---- paths ----
@@ -448,14 +451,26 @@ def _today_str(now: datetime | None = None) -> str:
     return (now or datetime.now()).strftime("%Y-%m-%d")
 
 
+def _normalize_memory_date(date_str: str | None) -> str:
+    if not date_str or date_str == "today":
+        return _today_str()
+    value = str(date_str).strip()
+    if not _MEMORY_DATE_RE.fullmatch(value):
+        raise ValueError("invalid memory date; expected YYYY-MM-DD")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("invalid memory date") from exc
+    return value
+
+
 def memory_daily_path(date_str: str) -> Path:
-    return lampgo_home() / "memory" / f"{date_str}.md"
+    safe_date = _normalize_memory_date(date_str)
+    return lampgo_home() / "memory" / f"{safe_date}.md"
 
 
 def read_memory_daily(date_str: str | None = None) -> str:
-    if not date_str or date_str == "today":
-        date_str = _today_str()
-    return _read_text_or_default(memory_daily_path(date_str), "")
+    return _read_text_or_default(memory_daily_path(_normalize_memory_date(date_str)), "")
 
 
 def list_memory_dates() -> list[str]:
@@ -495,7 +510,7 @@ def append_memory_daily(
     header: str | None = None,
 ) -> Path:
     """Append dedup'd bullets to today's memory file."""
-    target = memory_daily_path(date_str or _today_str())
+    target = memory_daily_path(_normalize_memory_date(date_str))
     target.parent.mkdir(parents=True, exist_ok=True)
     existing = _read_text_or_default(target, "")
     if not existing.strip():

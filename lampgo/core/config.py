@@ -413,8 +413,8 @@ class VoiceConfig(BaseModel):
     wake_word: str = Field(default="", description="Wake word for hands-free activation (empty = disabled)")
     vad_enabled: bool = Field(default=False, description="Enable voice activity detection")
     livekit_url: str = Field(default="ws://127.0.0.1:7880", description="LiveKit server WebSocket URL")
-    livekit_api_key: str = Field(default="devkey", description="LiveKit API key for token signing")
-    livekit_api_secret: str = Field(default="secret", description="LiveKit API secret for token signing")
+    livekit_api_key: str = Field(default="", description="LiveKit API key for token signing")
+    livekit_api_secret: str = Field(default="", description="LiveKit API secret for token signing")
     livekit_room: str = Field(default="lampgo", description="LiveKit room name for voice conversations")
     livekit_agent_name: str = Field(
         default="mimo-agent-lampgo-jarvis",
@@ -538,7 +538,7 @@ class VoiceConfig(BaseModel):
 class WebConfig(BaseModel):
     """Web UI / gateway settings."""
 
-    host: str = Field(default="0.0.0.0", description="Web server bind address")
+    host: str = Field(default="127.0.0.1", description="Web server bind address")
     port: int = Field(default=8420, ge=1, le=65535, description="Web server port")
     status_interval: float = Field(default=2.0, gt=0, description="Seconds between status broadcasts to WS clients")
 
