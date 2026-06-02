@@ -38,6 +38,10 @@ import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CameraServerService extends Service {
+    public static final String EXTRA_FACING = "facing";
+    public static final String FACING_BACK = "back";
+    public static final String FACING_FRONT = "front";
+
     private static final int SERVER_PORT = 8765;
     private static final int NOTIFICATION_ID = 4201;
     private static final String CHANNEL_ID = "lampgo_camera";
@@ -55,6 +59,9 @@ public class CameraServerService extends Service {
     private ImageReader imageReader;
     private byte[] latestJpeg;
     private String lastError = "";
+    private String requestedFacing = FACING_BACK;
+    private String activeFacing = "";
+    private String activeCameraId = "";
 
     @Override
     public void onCreate() {
@@ -66,7 +73,12 @@ public class CameraServerService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NOTIFICATION_ID, buildNotification("Camera server listening on port " + SERVER_PORT));
         startServer();
-        startCamera();
+        String facing = intent == null ? null : normalizeFacing(intent.getStringExtra(EXTRA_FACING));
+        if (facing != null && !facing.equals(requestedFacing)) {
+            switchCamera(facing);
+        } else {
+            startCamera();
+        }
         return START_STICKY;
     }
 
@@ -118,6 +130,9 @@ public class CameraServerService extends Service {
         if (cameraThread != null) {
             return;
         }
+        synchronized (frameLock) {
+            latestJpeg = null;
+        }
         cameraThread = new HandlerThread("LampgoCameraThread");
         cameraThread.start();
         cameraHandler = new Handler(cameraThread.getLooper());
@@ -150,11 +165,13 @@ public class CameraServerService extends Service {
 
         CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
         try {
-            String cameraId = chooseBackCamera(manager);
+            String cameraId = chooseCamera(manager, requestedFacing);
             if (cameraId == null) {
-                lastError = "No camera found";
+                lastError = "No " + requestedFacing + " camera found";
                 return;
             }
+            activeCameraId = cameraId;
+            activeFacing = facingForCamera(manager, cameraId);
             manager.openCamera(cameraId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(CameraDevice camera) {
@@ -181,16 +198,80 @@ public class CameraServerService extends Service {
         }
     }
 
-    private String chooseBackCamera(CameraManager manager) throws CameraAccessException {
+    private boolean switchCamera(String facing) {
+        String normalized = normalizeFacing(facing);
+        if (normalized == null) {
+            lastError = "Unknown camera facing: " + facing;
+            return false;
+        }
+        if (!isFacingAvailable(normalized)) {
+            lastError = "Camera facing unavailable: " + normalized;
+            return false;
+        }
+        requestedFacing = normalized;
+        stopCamera();
+        startCamera();
+        return true;
+    }
+
+    private String chooseCamera(CameraManager manager, String facing) throws CameraAccessException {
+        String requested = cameraIdForFacing(manager, facing);
+        if (requested != null) {
+            return requested;
+        }
+        return firstCameraId(manager);
+    }
+
+    private String cameraIdForFacing(CameraManager manager, String facing) throws CameraAccessException {
+        Integer target = lensFacingConstant(facing);
+        if (target == null) {
+            return null;
+        }
         for (String id : manager.getCameraIdList()) {
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(id);
-            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+            Integer lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING);
+            if (lensFacing != null && lensFacing.equals(target)) {
                 return id;
             }
         }
+        return null;
+    }
+
+    private String firstCameraId(CameraManager manager) throws CameraAccessException {
         String[] ids = manager.getCameraIdList();
         return ids.length > 0 ? ids[0] : null;
+    }
+
+    private String facingForCamera(CameraManager manager, String cameraId) throws CameraAccessException {
+        CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
+        Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+        if (facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT) {
+            return FACING_FRONT;
+        }
+        if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+            return FACING_BACK;
+        }
+        return "external";
+    }
+
+    private boolean isFacingAvailable(String facing) {
+        CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        try {
+            return manager != null && cameraIdForFacing(manager, facing) != null;
+        } catch (CameraAccessException exc) {
+            lastError = "Camera access failed: " + exc.getMessage();
+            return false;
+        }
+    }
+
+    private Integer lensFacingConstant(String facing) {
+        if (FACING_FRONT.equals(facing)) {
+            return CameraCharacteristics.LENS_FACING_FRONT;
+        }
+        if (FACING_BACK.equals(facing)) {
+            return CameraCharacteristics.LENS_FACING_BACK;
+        }
+        return null;
     }
 
     private void createCaptureSession() {
@@ -320,6 +401,8 @@ public class CameraServerService extends Service {
                 sendSnapshot(socket.getOutputStream());
             } else if (path.startsWith("/mjpeg")) {
                 sendMjpeg(socket.getOutputStream());
+            } else if (path.startsWith("/switch") || path.startsWith("/front") || path.startsWith("/back")) {
+                sendSwitch(socket.getOutputStream(), path);
             } else if (path.startsWith("/health")) {
                 sendHealth(socket.getOutputStream());
             } else {
@@ -372,12 +455,52 @@ public class CameraServerService extends Service {
         }
     }
 
+    private void sendSwitch(OutputStream output, String path) throws IOException {
+        String facing = parseFacing(path);
+        if (facing == null) {
+            byte[] body = "{\"ok\":false,\"error\":\"use facing=front or facing=back\"}\n".getBytes();
+            writeHeaders(output, "400 Bad Request", "application/json; charset=utf-8", body.length);
+            output.write(body);
+            return;
+        }
+        boolean ok = switchCamera(facing);
+        String json = String.format(Locale.US,
+                "{\"ok\":%s,\"requested_facing\":\"%s\",\"active_facing\":\"%s\",\"error\":\"%s\"}\n",
+                ok ? "true" : "false",
+                escapeJson(requestedFacing),
+                escapeJson(activeFacing),
+                escapeJson(lastError));
+        byte[] body = json.getBytes();
+        writeHeaders(
+                output,
+                ok ? "200 OK" : "409 Conflict",
+                "application/json; charset=utf-8",
+                body.length
+        );
+        output.write(body);
+    }
+
     private void sendHealth(OutputStream output) throws IOException {
         byte[] jpeg = currentJpeg();
         String json = String.format(Locale.US,
-                "{\"ok\":%s,\"camera_started\":%s,\"latest_jpeg_bytes\":%d,\"error\":\"%s\"}\n",
+                "{"
+                        + "\"ok\":%s,"
+                        + "\"camera_started\":%s,"
+                        + "\"requested_facing\":\"%s\","
+                        + "\"active_facing\":\"%s\","
+                        + "\"active_camera_id\":\"%s\","
+                        + "\"front_available\":%s,"
+                        + "\"back_available\":%s,"
+                        + "\"latest_jpeg_bytes\":%d,"
+                        + "\"error\":\"%s\""
+                        + "}\n",
                 lastError.isEmpty() ? "true" : "false",
                 cameraDevice != null ? "true" : "false",
+                escapeJson(requestedFacing),
+                escapeJson(activeFacing),
+                escapeJson(activeCameraId),
+                isFacingAvailable(FACING_FRONT) ? "true" : "false",
+                isFacingAvailable(FACING_BACK) ? "true" : "false",
                 jpeg == null ? 0 : jpeg.length,
                 escapeJson(lastError));
         byte[] body = json.getBytes();
@@ -389,7 +512,9 @@ public class CameraServerService extends Service {
         byte[] body = ("Lampgo Camera Companion\n\n"
                 + "GET /health\n"
                 + "GET /snapshot.jpg\n"
-                + "GET /mjpeg\n").getBytes();
+                + "GET /mjpeg\n"
+                + "GET /switch?facing=back\n"
+                + "GET /switch?facing=front\n").getBytes();
         writeHeaders(output, "200 OK", "text/plain; charset=utf-8", body.length);
         output.write(body);
     }
@@ -410,6 +535,31 @@ public class CameraServerService extends Service {
 
     private String escapeJson(String value) {
         return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private String normalizeFacing(String facing) {
+        if (facing == null) {
+            return null;
+        }
+        String value = facing.trim().toLowerCase(Locale.US);
+        if (FACING_FRONT.equals(value)) {
+            return FACING_FRONT;
+        }
+        if (FACING_BACK.equals(value)) {
+            return FACING_BACK;
+        }
+        return null;
+    }
+
+    private String parseFacing(String path) {
+        String value = path.toLowerCase(Locale.US);
+        if (value.startsWith("/front") || value.contains("facing=front")) {
+            return FACING_FRONT;
+        }
+        if (value.startsWith("/back") || value.contains("facing=back")) {
+            return FACING_BACK;
+        }
+        return null;
     }
 
     private byte[] yuv420ToJpeg(Image image, int quality) {

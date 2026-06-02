@@ -40,16 +40,18 @@ javac -source 8 -target 8 -bootclasspath "$ANDROID_JAR" -d "$BUILD_DIR/classes" 
 cp "$BUILD_DIR/unsigned-res.apk" "$BUILD_DIR/unsigned.apk"
 (cd "$BUILD_DIR/dex" && zip -qr "$BUILD_DIR/unsigned.apk" classes.dex)
 
-KEYSTORE="$BUILD_DIR/debug.keystore"
-keytool -genkeypair \
-  -keystore "$KEYSTORE" \
-  -storepass android \
-  -keypass android \
-  -alias androiddebugkey \
-  -keyalg RSA \
-  -keysize 2048 \
-  -validity 10000 \
-  -dname "CN=Android Debug,O=Lampgo,C=US" >/dev/null
+KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$ROOT/debug.keystore}"
+if [[ ! -f "$KEYSTORE" ]]; then
+  keytool -genkeypair \
+    -keystore "$KEYSTORE" \
+    -storepass android \
+    -keypass android \
+    -alias androiddebugkey \
+    -keyalg RSA \
+    -keysize 2048 \
+    -validity 10000 \
+    -dname "CN=Android Debug,O=Lampgo,C=US" >/dev/null
+fi
 
 "$BUILD_TOOLS/zipalign" -f -p 4 "$BUILD_DIR/unsigned.apk" "$BUILD_DIR/aligned.apk"
 "$BUILD_TOOLS/apksigner" sign \

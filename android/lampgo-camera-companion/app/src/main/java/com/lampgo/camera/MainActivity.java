@@ -4,10 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.format.Formatter;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -72,7 +70,10 @@ public class MainActivity extends Activity {
                 + "Lampgo camera URL:\n"
                 + "http://127.0.0.1:18765/snapshot.jpg\n\n"
                 + "MJPEG stream:\n"
-                + "http://127.0.0.1:18765/mjpeg");
+                + "http://127.0.0.1:18765/mjpeg\n\n"
+                + "Switch cameras:\n"
+                + "http://127.0.0.1:18765/switch?facing=back\n"
+                + "http://127.0.0.1:18765/switch?facing=front");
         root.addView(body);
 
         Button start = new Button(this);
@@ -88,6 +89,34 @@ public class MainActivity extends Activity {
             }
         });
         root.addView(start);
+
+        Button backCamera = new Button(this);
+        backCamera.setText("Use Back Camera");
+        backCamera.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (hasCameraPermission()) {
+                    startCameraService(CameraServerService.FACING_BACK);
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA);
+                }
+            }
+        });
+        root.addView(backCamera);
+
+        Button frontCamera = new Button(this);
+        frontCamera.setText("Use Front Camera");
+        frontCamera.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (hasCameraPermission()) {
+                    startCameraService(CameraServerService.FACING_FRONT);
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA);
+                }
+            }
+        });
+        root.addView(frontCamera);
 
         Button stop = new Button(this);
         stop.setText("Stop Camera Server");
@@ -115,7 +144,14 @@ public class MainActivity extends Activity {
     }
 
     private void startCameraService() {
+        startCameraService(null);
+    }
+
+    private void startCameraService(String facing) {
         Intent intent = new Intent(this, CameraServerService.class);
+        if (facing != null) {
+            intent.putExtra(CameraServerService.EXTRA_FACING, facing);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent);
         } else {
@@ -133,6 +169,9 @@ public class MainActivity extends Activity {
         text.append("HTTP server port: 8765\n");
         text.append("USB URL after adb forward:\n");
         text.append("http://127.0.0.1:18765/snapshot.jpg\n\n");
+        text.append("Switch by URL:\n");
+        text.append("http://127.0.0.1:18765/switch?facing=front\n");
+        text.append("http://127.0.0.1:18765/switch?facing=back\n\n");
         List<String> urls = localUrls();
         if (!urls.isEmpty()) {
             text.append("Wi-Fi URLs:\n");
