@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 
 from lampgo.core.config import VoiceConfig
+from lampgo.voice.agent_sdk import AgentSDKManager
 from lampgo.voice.tts import (
     DEFAULT_VOLCENGINE_TTS_VOICE,
     VOLCENGINE_BIGTTS_RESOURCE_ID,
@@ -16,7 +17,6 @@ from lampgo.voice.tts import (
     _volcengine_voice_or_default,
     synthesize_for_web,
 )
-from lampgo.voice.agent_sdk import AgentSDKManager
 
 
 def test_volcengine_tts_defaults_to_v3_bidirectional_endpoint() -> None:
@@ -82,11 +82,11 @@ def test_voice_config_migrates_incompatible_builtin_voice_ids() -> None:
     assert cfg.livekit_tts_voice == "zh_male_wennuanahu_uranus_bigtts"
 
 
-def test_agent_sdk_roles_yaml_uses_frontend_tts_voice_for_livekit() -> None:
+def test_agent_sdk_roles_yaml_uses_cloud_auth_and_frontend_tts_voice_for_livekit(monkeypatch) -> None:
+    monkeypatch.delenv("MIMO_RTC_TOKEN_API_KEY", raising=False)
+    monkeypatch.delenv("MIMO_AGENT_REGISTRATION_TOKEN", raising=False)
     cfg = VoiceConfig(
-        livekit_url="ws://127.0.0.1:7880",
-        livekit_api_key="devkey",
-        livekit_api_secret="secret",
+        livekit_url="https://rtc.yhaox.top",
         volcengine_app_id="app",
         volcengine_access_token="token",
         tts_voice="zh_male_liangsangmengzai_uranus_bigtts",
@@ -99,5 +99,12 @@ def test_agent_sdk_roles_yaml_uses_frontend_tts_voice_for_livekit() -> None:
     finally:
         roles_path.unlink(missing_ok=True)
 
-    assert "voice: zh_male_liangsangmengzai_uranus_bigtts" in roles_yaml
+    assert 'url: "wss://rtc.yhaox.top"' in roles_yaml
+    assert 'rtc_token_endpoint: "https://rtc.yhaox.top/rtc/token"' in roles_yaml
+    assert 'agent_token_endpoint: "https://rtc.yhaox.top/agent/token"' in roles_yaml
+    assert 'rtc_token_api_key: "livekit-token"' in roles_yaml
+    assert 'registration_token: "livekit-token"' in roles_yaml
+    assert "\n  api_key:" not in roles_yaml
+    assert "\n  api_secret:" not in roles_yaml
+    assert 'voice: "zh_male_liangsangmengzai_uranus_bigtts"' in roles_yaml
     assert "zh_female_jitangnv_uranus_bigtts" not in roles_yaml

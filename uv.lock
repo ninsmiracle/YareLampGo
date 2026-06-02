@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
@@ -1120,6 +1120,7 @@ perception = [
 ]
 voice = [
     { name = "livekit" },
+    { name = "livekit-agents", extra = ["codecs"] },
     { name = "livekit-api" },
     { name = "lampgo-livekit-agent-sdk" },
 ]
@@ -1137,6 +1138,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lerobot", extras = ["feetech"], specifier = ">=0.5.0" },
     { name = "livekit", marker = "extra == 'voice'", specifier = ">=0.17" },
+    { name = "livekit-agents", extras = ["codecs"], marker = "extra == 'voice'", specifier = "==1.5.5+lampgo.1", index = "https://packages.lampgo.invalid/pypi/simple" },
     { name = "livekit-api", marker = "extra == 'voice'", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-python", marker = "extra == 'perception'", specifier = ">=4.8" },
@@ -1152,7 +1154,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0" },
     { name = "uvicorn", specifier = ">=0.34" },
     { name = "websockets", specifier = ">=14.0" },
-    { name = "lampgo-livekit-agent-sdk", marker = "extra == 'voice'", specifier = ">=0.1.0", index = "https://packages.lampgo.invalid/pypi/simple" },
+    { name = "lampgo-livekit-agent-sdk", marker = "extra == 'voice'", specifier = ">=0.3.0", index = "https://packages.lampgo.invalid/pypi/simple" },
     { name = "zeroconf", specifier = ">=0.131" },
 ]
 provides-extras = ["perception", "voice", "bridge", "dev"]
@@ -1206,7 +1208,7 @@ feetech = [
 
 [[package]]
 name = "livekit"
-version = "1.1.8"
+version = "1.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -1214,19 +1216,19 @@ dependencies = [
     { name = "protobuf" },
     { name = "types-protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/d7/1fde055300c1f8338feec88bac55270ea5c20cac66ed3655cc60fb14f2b6/livekit-1.1.8.tar.gz", hash = "sha256:862100f479dc06b10cd1442d0a687126ac71930d3e003925449bcb8c2531bd53", size = 335048, upload-time = "2026-05-13T17:30:36.446Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/e8/101379a874e8d7ad75659d0165fef4d58cfe58c2799c6e7476787446fcbc/livekit-1.1.5.tar.gz", hash = "sha256:bf2e5154bdcd99f7c32da045bbde8b76592f9ac33902ea62944178d5d278a6c4", size = 330482, upload-time = "2026-04-03T19:21:03.139Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/7c/1f609b57b46988a7696d49a6d3d8c19056950b7dc88552323fbd39403494/livekit-1.1.8-py3-none-macosx_10_15_x86_64.whl", hash = "sha256:e65732bd4e0b3625d8c32676cede90be45e06ab443b5c18127df6e89637d5269", size = 10027840, upload-time = "2026-05-13T17:30:24.853Z" },
-    { url = "https://files.pythonhosted.org/packages/42/1d/2af5a4fc85fe4a49e32432cbf37b1869cdb6e428b4858d0821703742cf01/livekit-1.1.8-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b025e5881ae63674aa0ef193ce42b4cd98258fe098707142888e6a79f448f47d", size = 8860811, upload-time = "2026-05-13T17:30:27.156Z" },
-    { url = "https://files.pythonhosted.org/packages/69/80/919c2f291083f253cf37aafcbd8e727dac3e29a0e60ec63b5249b93ad025/livekit-1.1.8-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:080a3799bcf7075328f2921868646296a18e4ab1c613df6b313d723f99b5557b", size = 9852340, upload-time = "2026-05-13T17:30:29.274Z" },
-    { url = "https://files.pythonhosted.org/packages/50/11/44bebbb16d79c9026200f83c8d9695ea6976a53f1430b0ea3b15a41c4bd4/livekit-1.1.8-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:2746bbe611869994fbc42e3f8387f3a3d4a5f83e3fad8860c076742a4c0d943e", size = 11235966, upload-time = "2026-05-13T17:30:31.522Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/08/9dca90dd3f9c5147ec0b1168d3410db1cc944d546c1d123343f81880b261/livekit-1.1.8-py3-none-win_amd64.whl", hash = "sha256:3942843f0c0072a3d973f3e45b60b1565833785bbe7890d64f7e5555ff61b9e2", size = 10598792, upload-time = "2026-05-13T17:30:34.195Z" },
+    { url = "https://files.pythonhosted.org/packages/46/74/af8c9622d3c5090bd6908f51485466c7d991b31cfd826d58965982a77b17/livekit-1.1.5-py3-none-macosx_10_15_x86_64.whl", hash = "sha256:79f5f56dc1f3e81f738a8260809cfbe90daee3bb174361e7f8f806a87e4380ce", size = 10110595, upload-time = "2026-04-03T19:20:50.935Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/b2/14a76e90d9ceaf8b9a0d6781fef8e2e979a3b23405fcb653dc901f7f85bf/livekit-1.1.5-py3-none-macosx_11_0_arm64.whl", hash = "sha256:75cebfe58aab52e740fd89d342ad3bd3e046adf717827d677b4f89cb10bf4a48", size = 8931838, upload-time = "2026-04-03T19:20:53.375Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/35/b2434dc9bd66c57657900e48acd77c9284cb216875694574b8e0706e57ea/livekit-1.1.5-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:b2ef18f71ad36d9b4a2f66d9ba79b205b9010a3e8c93b91d62157fb4ffbd5865", size = 9936475, upload-time = "2026-04-03T19:20:55.52Z" },
+    { url = "https://files.pythonhosted.org/packages/42/b9/9313bf6ec2ca3dbf572674b2f8fb8d4f75d9093e1c2bd8fbba0cfa652e0f/livekit-1.1.5-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:f1150617c7d41efb83e770b0af04747e3b8881889ff20f08e56cb56c13c1b7d4", size = 11336865, upload-time = "2026-04-03T19:20:58.183Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/11/7f8dd10248e1b064b03223f97cdc4579e6b181a492ffaf3bc52a76c163ea/livekit-1.1.5-py3-none-win_amd64.whl", hash = "sha256:7334aa31107a9556fbb6a6cc73bc3f7b6edfc8cb8932f0552cabbf1c1034ff3f", size = 10682067, upload-time = "2026-04-03T19:21:00.655Z" },
 ]
 
 [[package]]
 name = "livekit-agents"
-version = "1.5.9"
-source = { registry = "https://pypi.org/simple" }
+version = "1.5.5+lampgo.1"
+source = { registry = "https://packages.lampgo.invalid/pypi/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -1257,9 +1259,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/ba/c5e619f2a802e360a1ab8cd41c0896f84fc34c8610085cad99a28da345ba/livekit_agents-1.5.9.tar.gz", hash = "sha256:d87805eee5938b046f98daae5d70a886126256631fe51801d95a72063576e61c", size = 2496552, upload-time = "2026-05-13T19:53:36.185Z" }
+sdist = { url = "https://packages.lampgo.invalid/pypi/livekit-agents/1.5.5+lampgo.1/livekit_agents-1.5.5+lampgo.1.tar.gz", hash = "sha256:40808a3b514b88315532c8b1b78339aec15f970db8dd1d19416de8c44182c08c" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/60/79a550eae08437514832794cd333bf0f1c7ddf1b96e18ff5e65748ad01ca/livekit_agents-1.5.9-py3-none-any.whl", hash = "sha256:dafcb5f0f4a4673e7084c58257734bc4983f4ea7267ad789a030620955897d33", size = 2597230, upload-time = "2026-05-13T19:53:34.187Z" },
+    { url = "https://packages.lampgo.invalid/pypi/livekit-agents/1.5.5+lampgo.1/livekit_agents-1.5.5+lampgo.1-py3-none-any.whl", hash = "sha256:e3fc193c51b315dfe4868623a11773acc3c16c59c9ba56142a755f8764b38239" },
 ]
 
 [package.optional-dependencies]
@@ -1315,29 +1317,29 @@ wheels = [
 
 [[package]]
 name = "livekit-plugins-openai"
-version = "1.5.9"
+version = "1.5.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "livekit-agents", extra = ["codecs", "images"] },
     { name = "openai", extra = ["realtime"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a2/d8/17e0188bf087b3572768e1d8e9e1bb4354d8f752c25f0ba911fcd58586ae/livekit_plugins_openai-1.5.9.tar.gz", hash = "sha256:3e875b1a549ed73a5212f36c763c79f88abbedfbde40afd630c90ce6ef17c28f", size = 42980, upload-time = "2026-05-13T19:55:14.222Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/10/2e/c8a29a8c6f08fe91c47142993a81da4b4a1cac634c2f91c14e181e203516/livekit_plugins_openai-1.5.5.tar.gz", hash = "sha256:fb55baf7096cf2576a2470c91d34a2bb06aa8595f4e8ebf40a90940c81399ad1", size = 43023, upload-time = "2026-04-20T19:11:17.611Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/3e/b1fb1604bafa179bc97c5bcc149271d912a2c75ea335137690498061ed5d/livekit_plugins_openai-1.5.9-py3-none-any.whl", hash = "sha256:a7bb06acbbd8f1c67469c088ecfaff0845ba645027bd9102972e74e38e255373", size = 49744, upload-time = "2026-05-13T19:55:12.545Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/8f/efa00b36373a23c8847b2531f0baf4a576aeb99bca2a977288533b1f06d1/livekit_plugins_openai-1.5.5-py3-none-any.whl", hash = "sha256:1ed03d5456768d1833fb94ec713a6f5c6badddd55ec50f7040bccad794cc722a", size = 49798, upload-time = "2026-04-20T19:11:16.059Z" },
 ]
 
 [[package]]
 name = "livekit-plugins-silero"
-version = "1.5.9"
+version = "1.5.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "livekit-agents" },
     { name = "numpy" },
     { name = "onnxruntime" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a4/55/3656d39592d85828817059767a7f55324ed7387eee6981678dfaea9a7f84/livekit_plugins_silero-1.5.9.tar.gz", hash = "sha256:9c78f4b1f9489c93a63b2675d8d76df5dd0f965442aaa05bebec37dff2a9b1f0", size = 1955609, upload-time = "2026-05-13T19:55:42.907Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/a4/0b240c30ace95d83cee02675af68f1100310f3d04e0d67bbda159c9b5a98/livekit_plugins_silero-1.5.5.tar.gz", hash = "sha256:91eaf84c48fdb7be6969fab2483553a9292fe2d613f0e512358e0ad131617ac9", size = 1955606, upload-time = "2026-04-20T19:11:34.681Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/54/48a70e518e85ce8ffddf7f5fb1ed21a36054b10c4d79fcf19406b7262af8/livekit_plugins_silero-1.5.9-py3-none-any.whl", hash = "sha256:e0beef21b331fc0ea660019aa615f0523b911cc0fe2026be3d45cee04b8f6510", size = 3903689, upload-time = "2026-05-13T19:55:40.774Z" },
+    { url = "https://files.pythonhosted.org/packages/57/d8/1915b60ee7936795739b860e0d771f55c4af2ec6514ed054e8f1277082be/livekit_plugins_silero-1.5.5-py3-none-any.whl", hash = "sha256:b993c49b56ca64723788e093e83eda083259448a4714c1161241e262ee03ecfb", size = 3903690, upload-time = "2026-04-20T19:11:32.892Z" },
 ]
 
 [[package]]
@@ -3492,10 +3494,11 @@ wheels = [
 
 [[package]]
 name = "lampgo-livekit-agent-sdk"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://packages.lampgo.invalid/pypi/simple" }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "livekit-agents", extra = ["codecs"] },
     { name = "livekit-api" },
     { name = "livekit-plugins-openai" },
@@ -3506,9 +3509,9 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://packages.lampgo.invalid/pypi/lampgo-livekit-agent-sdk/0.2.0/lampgo_livekit_agent_sdk-0.2.0.tar.gz", hash = "sha256:ac052d11ba8c6fe2994253b6dee697b409a15643f78f38daae150a0a89775ede" }
+sdist = { url = "https://packages.lampgo.invalid/pypi/lampgo-livekit-agent-sdk/0.3.0/lampgo_livekit_agent_sdk-0.3.0.tar.gz", hash = "sha256:8f78cfe673d21d346710fd2f01cf983586a735701d6e09289215cd1250b7f26c" }
 wheels = [
-    { url = "https://packages.lampgo.invalid/pypi/lampgo-livekit-agent-sdk/0.2.0/lampgo_livekit_agent_sdk-0.2.0-py3-none-any.whl", hash = "sha256:432128c146753315169de26f815b563ad3b69624070efba98ca173ebfe3fdb2f" },
+    { url = "https://packages.lampgo.invalid/pypi/lampgo-livekit-agent-sdk/0.3.0/lampgo_livekit_agent_sdk-0.3.0-py3-none-any.whl", hash = "sha256:f767371baf038d3e1026e5ef75815507922338738c95b8c7e14fd39434104201" },
 ]
 
 [[package]]

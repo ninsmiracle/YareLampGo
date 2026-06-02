@@ -2047,7 +2047,7 @@ class LampgoServer:
         if self.config.web_enabled:
             local_url = await self._start_web_gateway(print_banner=False) or ""
             vc = self.config.voice
-            if vc.wake_word and vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret:
+            if vc.wake_word and vc.livekit_url:
                 await self._start_voice_loop()
             if local_url:
                 self._print_connection_banner(local_url)
@@ -2114,7 +2114,7 @@ class LampgoServer:
             overall_line = ""
 
         vc = self.config.voice
-        livekit_configured = bool(vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret)
+        livekit_configured = bool(vc.livekit_url)
         wake_configured = bool(vc.wake_word)
         agent_running = bool(self._agent_sdk and self._agent_sdk.is_running)
         agent_ready = bool(self._agent_sdk and getattr(self._agent_sdk, "is_ready", False))
@@ -2205,10 +2205,6 @@ class LampgoServer:
         vc = self.config.voice
         if not vc.wake_word or not vc.livekit_url:
             logger.info("server.voice_loop_disabled (wake_word or livekit_url empty)")
-            return
-        missing = [f for f in ("livekit_api_key", "livekit_api_secret") if not getattr(vc, f, "")]
-        if missing:
-            logger.warning("server.voice_loop_incomplete", missing=missing)
             return
         await self._start_voice_loop()
 

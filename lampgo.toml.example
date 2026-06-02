@@ -70,6 +70,7 @@ tts_model = ""                 # 火山 TTS 可选模型；留空使用服务默
 tts_voice = "zh_female_vv_uranus_bigtts"
 volcengine_app_id = ""         # 火山引擎 App ID；TTS 未配置时自动回退 edge-tts
 volcengine_access_token = ""   # 火山引擎 Access Token
+livekit_url = "https://rtc.yhaox.top" # 云端 LiveKit；SDK 内部会用云端鉴权取 token
 livekit_tts_voice = "zh_female_vv_uranus_bigtts"
 wake_word = ""                 # 唤醒词 (留空 = 禁用)
 vad_enabled = false            # 语音活动检测

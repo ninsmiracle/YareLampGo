@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import time
+import uuid
 from collections import deque
 from typing import TYPE_CHECKING
 
@@ -47,6 +48,15 @@ SAMPLES_PER_CHANNEL = 480  # 30ms at 16 kHz — matches ESP32 chunk size
 PLAYBACK_SAMPLE_RATE = 24000
 PLAYBACK_NUM_CHANNELS = 1
 PLAYBACK_PREBUFFER_MS = 120
+
+
+def _rtc_ws_url(value: str) -> str:
+    raw = (value or "").strip()
+    if raw.startswith("https://"):
+        return "wss://" + raw.removeprefix("https://")
+    if raw.startswith("http://"):
+        return "ws://" + raw.removeprefix("http://")
+    return raw
 
 
 class ConversationState(str, enum.Enum):
@@ -128,7 +138,7 @@ class LiveKitBridge:
             from livekit import rtc
 
             voice_agent = "lampgo-jarvis"
-            room_name = self._config.livekit_room or "lampgo"
+            room_name = f"lampgo-{uuid.uuid4().hex[:12]}"
             identity = "lampgo-mic"
 
             token_url = f"http://127.0.0.1:{self._agent_sdk_port}/rtc/token"
@@ -141,7 +151,7 @@ class LiveKitBridge:
                 resp.raise_for_status()
                 token_data = resp.json()
             jwt = token_data["token"]
-            server_url = token_data.get("serverUrl", self._config.livekit_url)
+            server_url = token_data.get("serverUrl") or _rtc_ws_url(self._config.livekit_url)
             logger.info(
                 "livekit.token_acquired",
                 room=token_data.get("roomName", room_name),

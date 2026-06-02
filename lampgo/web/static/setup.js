@@ -368,8 +368,8 @@
 
   if (dom.togglePsk && dom.psk) {
     dom.togglePsk.addEventListener("click", () => {
-      const show = dom.psk.type === "password";
-      dom.psk.type = show ? "text" : "password";
+      const show = dom.psk.classList.contains("esp32-secret-input");
+      dom.psk.classList.toggle("esp32-secret-input", !show);
       dom.togglePsk.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
       dom.togglePsk.title = show ? "隐藏密码" : "显示密码";
       dom.togglePsk.textContent = show ? "🙈" : "👁";

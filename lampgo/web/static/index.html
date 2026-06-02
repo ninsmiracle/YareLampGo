@@ -4,8 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>lampgo 控制台</title>
-  <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="/setup.css">
+  <link rel="icon" href="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg">
+  <link rel="stylesheet" href="/style.css?v=secret-inputs-20260602">
+  <link rel="stylesheet" href="/setup.css?v=secret-inputs-20260602">
 </head>
 <body>
   <div class="app-shell" data-view="chat">
@@ -481,7 +482,7 @@
 
                 <label class="settings-field">
                   <span class="settings-field-label">API Key</span>
-                  <input id="cfg-llm-api-key" class="settings-input" type="password" placeholder="api-key-placeholder" autocomplete="new-password">
+                  <input id="cfg-llm-api-key" class="settings-input settings-secret-input" type="text" placeholder="api-key-placeholder" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
                   <span class="settings-field-hint">密钥保存在 <code>~/.lampgo/credentials.json</code>（权限 0600），不会写进 config。</span>
                 </label>
 
@@ -590,7 +591,7 @@
 
                 <label class="settings-field" data-cfg-field="voice.volcengine_access_token">
                   <span class="settings-field-label">火山引擎 Access Token</span>
-                  <input class="settings-input" type="password" placeholder="your-access-token" data-cfg-input="voice.volcengine_access_token" autocomplete="off">
+                  <input class="settings-input settings-secret-input" type="text" placeholder="your-access-token" data-cfg-input="voice.volcengine_access_token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
                   <span class="settings-field-hint">留空时聊天播报会自动回退到 Edge TTS。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_access_token"></span>
                 </label>
@@ -661,31 +662,6 @@
                       </label>
                       <span class="settings-field-hint">可打断 / ESP32 AEC 模式下，丢弃和刚播报内容高度相似的 ASR 文本，减少自问自答。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.echo_text_filter_enabled"></span>
-                    </label>
-
-                    <label class="settings-field settings-field-wide" data-cfg-field="voice.livekit_url">
-                      <span class="settings-field-label">LiveKit Server URL</span>
-                      <input class="settings-input" type="text" placeholder="ws://127.0.0.1:7880" data-cfg-input="voice.livekit_url" autocomplete="off">
-                      <span class="settings-field-hint">默认本机 LiveKit 开发服务；如需关闭实时通话，可清空此项。</span>
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_url"></span>
-                    </label>
-
-                    <label class="settings-field" data-cfg-field="voice.livekit_api_key">
-                      <span class="settings-field-label">LiveKit API Key</span>
-                      <input class="settings-input" type="text" placeholder="devkey" data-cfg-input="voice.livekit_api_key" autocomplete="off">
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_api_key"></span>
-                    </label>
-
-                    <label class="settings-field" data-cfg-field="voice.livekit_api_secret">
-                      <span class="settings-field-label">LiveKit API Secret</span>
-                      <input class="settings-input" type="password" placeholder="secret" data-cfg-input="voice.livekit_api_secret" autocomplete="off">
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_api_secret"></span>
-                    </label>
-
-                    <label class="settings-field" data-cfg-field="voice.livekit_room">
-                      <span class="settings-field-label">LiveKit 房间名</span>
-                      <input class="settings-input" type="text" placeholder="lampgo" data-cfg-input="voice.livekit_room" autocomplete="off">
-                      <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.livekit_room"></span>
                     </label>
 
                     <label class="settings-field" data-cfg-field="voice.silence_timeout_s">
@@ -1291,7 +1267,7 @@
           <label class="esp32-setup-field">
             <span class="esp32-setup-label">密码</span>
             <div class="esp32-password-row">
-              <input id="esp32-psk" class="esp32-setup-input" type="password" autocomplete="new-password">
+              <input id="esp32-psk" class="esp32-setup-input esp32-secret-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
               <button id="btn-esp32-toggle-psk" class="esp32-password-toggle" type="button" aria-label="显示密码" title="显示密码">👁</button>
             </div>
           </label>
@@ -1328,8 +1304,8 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=livekit-interrupt-20260522"></script>
+  <script src="/app.js?v=livekit-audio-output-20260602"></script>
   <script type="module" src="/pet.js?v=19"></script>
-  <script src="/setup.js"></script>
+  <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>
 </html>

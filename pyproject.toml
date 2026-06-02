@@ -32,7 +32,8 @@ perception = [
 voice = [
     "livekit>=0.17",
     "livekit-api>=0.7",
-    "lampgo-livekit-agent-sdk>=0.1.0",
+    "livekit-agents[codecs]==1.5.5+lampgo.1",
+    "lampgo-livekit-agent-sdk>=0.3.0",
 ]
 bridge = [
     "pyautogui>=0.9",
@@ -60,6 +61,7 @@ explicit = true
 
 [tool.uv.sources]
 lampgo-livekit-agent-sdk = { index = "mimo" }
+livekit-agents = { index = "mimo" }
 
 [build-system]
 requires = ["hatchling"]

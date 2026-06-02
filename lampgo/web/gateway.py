@@ -53,6 +53,7 @@ _AUTH_COOKIE_MAX_AGE = 12 * 60 * 60
 _PROTECTED_HTTP_PREFIXES = ("/api/", "/v1/")
 _SAFE_CORS_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 _SAFE_CORS_HEADERS = ["Authorization", "Content-Type", "X-Lampgo-Plugin-Token", "X-Requested-With"]
+_LOCAL_LLM_COMPAT_TOKEN = "lampgo-local"
 _SENSITIVE_CONFIG_FIELDS = frozenset(
     {
         "voice.livekit_api_key",
@@ -64,6 +65,14 @@ _SAFETY_MAX_VELOCITY_LIMIT = 240.0
 _SAFETY_MAX_ACCELERATION_LIMIT = 1800.0
 _ESP32_PROBE_PATHS = frozenset({"/status", "/scan", "/connect", "/config"})
 _LLM_LOCAL_PROVIDER_ALLOWLIST = frozenset({"ollama"})
+
+
+class LampgoStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: dict[str, Any]) -> Any:
+        response = await super().get_response(path, scope)
+        if path in {"", ".", "index.html"} or path.endswith((".html", ".css", ".js")):
+            response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+        return response
 
 
 def _coerce_value(current: Any, value: Any) -> Any:
@@ -247,7 +256,7 @@ class WebGateway:
             Route("/assets/pet/lampgoGLB.glb", self.api_pet_model, methods=["GET"]),
         ]
         if STATIC_DIR.is_dir():
-            routes.append(Mount("/", app=StaticFiles(directory=str(STATIC_DIR), html=True)))
+            routes.append(Mount("/", app=LampgoStaticFiles(directory=str(STATIC_DIR), html=True)))
 
         @asynccontextmanager
         async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
@@ -391,7 +400,17 @@ class WebGateway:
         client = getattr(request, "client", None)
         return bool(client and self._is_loopback_host(getattr(client, "host", "")))
 
+    def _is_local_llm_compat_request(self, request: Request) -> bool:
+        if request.url.path != "/v1/chat/completions":
+            return False
+        if not self._is_loopback_client(request):
+            return False
+        token = self._bearer_token(request.headers.get("authorization"))
+        return bool(token and hmac.compare_digest(token, _LOCAL_LLM_COMPAT_TOKEN))
+
     def _is_request_authorized(self, request: Request) -> bool:
+        if self._is_local_llm_compat_request(request):
+            return True
         if self._is_test_client(request):
             return True
         try:
@@ -489,7 +508,7 @@ class WebGateway:
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
             "connect-src 'self' http: https: ws: wss:; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://esm.sh; "
             "style-src 'self' 'unsafe-inline'; "
             "worker-src 'self' blob:",
         )
@@ -917,17 +936,21 @@ class WebGateway:
         except Exception:
             body = {}
 
-        room_name = str(body.get("room_name") or self.server.config.voice.livekit_room or "lampgo")
         user_identity = str(body.get("user_identity") or f"lampgo-web-{uuid.uuid4().hex[:8]}")
         voice_agent = str(body.get("voice_agent") or "lampgo-jarvis")
+        requested_room = str(body.get("room_name") or "").strip()
+        if requested_room:
+            logger.info("web.livekit_token_custom_room_ignored", requested_room=requested_room)
         if not body.get("client_call_id"):
             logger.info("web.livekit_token_legacy_client_rejected", user_identity=user_identity)
-            return JSONResponse({"ok": False, "error": "please refresh the web UI before starting a call"}, status_code=409)
+            return JSONResponse(
+                {"ok": False, "error": "please refresh the web UI before starting a call"},
+                status_code=409,
+            )
         client_call_id = str(body.get("client_call_id"))
         reason = str(body.get("reason") or "")
         logger.info(
             "web.livekit_token_requested",
-            room=room_name,
             user_identity=user_identity,
             voice_agent=voice_agent,
             client_call_id=client_call_id,
@@ -947,7 +970,6 @@ class WebGateway:
         try:
             async with self._livekit_room_lock:
                 return await self._issue_livekit_token_locked(
-                    room_name=room_name,
                     user_identity=user_identity,
                     voice_agent=voice_agent,
                     client_call_id=client_call_id,
@@ -964,13 +986,34 @@ class WebGateway:
     async def _issue_livekit_token_locked(
         self,
         *,
-        room_name: str,
         user_identity: str,
         voice_agent: str,
         client_call_id: str,
         reason: str,
     ) -> JSONResponse:
         from lampgo.voice.agent_sdk import AGENT_SDK_PORT
+
+        room_name = ""
+        for active_name, active_room in self._livekit_active_rooms.items():
+            active_owner = str((active_room or {}).get("client_call_id") or "")
+            if active_owner == client_call_id:
+                room_name = active_name
+                break
+            if active_owner:
+                async with self._livekit_token_lock:
+                    if self._livekit_token_gate_owner == client_call_id:
+                        self._livekit_token_gate_until = 0.0
+                        self._livekit_token_gate_owner = ""
+                logger.info(
+                    "web.livekit_token_rejected_active_call",
+                    room=active_name,
+                    owner=active_owner,
+                    requester=client_call_id,
+                    reason=reason,
+                )
+                return JSONResponse({"ok": False, "error": "another call is already active"}, status_code=409)
+        if not room_name:
+            room_name = f"lampgo-{uuid.uuid4().hex[:12]}"
 
         await self._close_existing_livekit_rooms(
             keep_room=room_name,
@@ -1051,7 +1094,7 @@ class WebGateway:
         room = str(room_name or "").strip()
         if not room:
             return False
-        configured = str(self.server.config.voice.livekit_room or "lampgo").strip() or "lampgo"
+        configured = "lampgo"
         return room == configured or room.startswith(f"{configured}-") or room.startswith("lampgo-")
 
     async def _close_existing_livekit_rooms(
@@ -1067,32 +1110,6 @@ class WebGateway:
             for name in self._livekit_active_rooms
             if name and name != keep_room and self._is_managed_livekit_room(name)
         }
-
-        vc = self.server.config.voice
-        if vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret:
-            try:
-                from livekit import api
-
-                lkapi = api.LiveKitAPI(
-                    vc.livekit_url,
-                    vc.livekit_api_key,
-                    vc.livekit_api_secret,
-                )
-                try:
-                    listed = await lkapi.room.list_rooms(api.ListRoomsRequest())
-                    for room in listed.rooms:
-                        name = str(getattr(room, "name", "") or "")
-                        if name != keep_room and self._is_managed_livekit_room(name):
-                            rooms.add(name)
-                finally:
-                    await lkapi.aclose()
-            except Exception as exc:
-                logger.warning(
-                    "web.livekit_room_list_failed",
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    keep_room=keep_room,
-                )
 
         closed = await self._delete_livekit_rooms(
             sorted(rooms),
@@ -1117,7 +1134,6 @@ class WebGateway:
         client_call_id: str = "",
     ) -> list[str]:
         """Delete LiveKit rooms and forget them from the local active-room registry."""
-        vc = self.server.config.voice
         targets = sorted(
             {
                 str(room or "").strip()
@@ -1127,45 +1143,15 @@ class WebGateway:
         )
         if not targets:
             return []
-        if not (vc.livekit_url and vc.livekit_api_key and vc.livekit_api_secret):
-            for room in targets:
-                self._livekit_active_rooms.pop(room, None)
-            logger.warning("web.livekit_room_delete_skipped_no_config", rooms=targets, reason=reason)
-            return []
-
-        from livekit import api
-
-        closed: list[str] = []
-        lkapi = api.LiveKitAPI(
-            vc.livekit_url,
-            vc.livekit_api_key,
-            vc.livekit_api_secret,
+        for room in targets:
+            self._livekit_active_rooms.pop(room, None)
+        logger.info(
+            "web.livekit_room_admin_close_skipped_cloud_auth",
+            rooms=targets,
+            reason=reason,
+            client_call_id=client_call_id,
         )
-        try:
-            for room in targets:
-                try:
-                    await lkapi.room.delete_room(api.DeleteRoomRequest(room=room))
-                    closed.append(room)
-                    logger.info(
-                        "web.livekit_room_deleted",
-                        room=room,
-                        reason=reason,
-                        client_call_id=client_call_id,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "web.livekit_room_delete_failed",
-                        room=room,
-                        reason=reason,
-                        client_call_id=client_call_id,
-                        error=str(exc),
-                        error_type=type(exc).__name__,
-                    )
-                finally:
-                    self._livekit_active_rooms.pop(room, None)
-        finally:
-            await lkapi.aclose()
-        return closed
+        return []
 
     async def api_openclaw_confirm(self, request: Request) -> JSONResponse:
         body = await request.json()
@@ -1328,10 +1314,6 @@ class WebGateway:
             "voice.tts_provider",
             "voice.tts_model",
             "voice.tts_voice",
-            "voice.livekit_url",
-            "voice.livekit_api_key",
-            "voice.livekit_api_secret",
-            "voice.livekit_room",
             "voice.call_mode",
             "voice.livekit_allow_interruptions",
             "voice.echo_gate_hangover_ms",
@@ -1358,10 +1340,6 @@ class WebGateway:
             "voice.mic_device",
             "camera.port",
             "voice.wake_word",
-            "voice.livekit_url",
-            "voice.livekit_api_key",
-            "voice.livekit_api_secret",
-            "voice.livekit_room",
             "voice.call_mode",
             "voice.livekit_allow_interruptions",
             "voice.echo_gate_hangover_ms",

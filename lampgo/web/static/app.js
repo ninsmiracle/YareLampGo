@@ -5519,13 +5519,11 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
       const useEsp32 = selectedMicId === "esp32";
       const callAttemptId = browserCallPendingId || `${browserCallClientId}_${Date.now().toString(36)}`;
       browserCallPendingId = callAttemptId;
-      const roomName = `lampgo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
       const modeLabel = VOICE_CALL_MODE_LABELS[voiceCallMode] || VOICE_CALL_MODE_LABELS.stable;
       let room = null;
       try {
         console.log("[call] starting LiveKit call", {
           reason,
-          roomName,
           mic: useEsp32 ? "esp32" : (selectedMicId || "default"),
           callMode: voiceCallMode,
           echoGateHangoverMs: voiceEchoGateHangoverMs,
@@ -5536,7 +5534,6 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            room_name: roomName,
             user_identity: `lampgo-web-${Date.now().toString(36)}`,
             voice_agent: "lampgo-jarvis",
             client_call_id: callAttemptId,
@@ -5555,25 +5552,47 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           throw new Error(error);
         }
         const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
-        const { token, serverUrl } = body.result;
+        const { token, serverUrl, roomName } = body.result;
         room = new Room({ adaptiveStream: false, dynacast: false });
         room.on("trackSubscribed", (track) => {
           if (track.kind !== Track.Kind.Audio) return;
           remoteAudioTrack = track;
-          addCallSystemNote("收到 Agent 语音轨道，正在转发到 ESP32 扬声器…");
+          console.log("[call] remote audio track subscribed", {
+            sid: track.sid || "",
+            source: track.source || "",
+            muted: !!track.isMuted,
+          });
           if (useEsp32) {
+            addCallSystemNote("收到 Agent 语音轨道，正在转发到 ESP32 扬声器…");
             startEsp32SpeakerRelay(track).catch((err) => {
               console.error("[call] ESP32 speaker relay failed:", err);
               addCallSystemNote(`ESP32 扬声器连接失败：${err.message || err}`);
             });
             return;
           }
+          addCallSystemNote("收到 Agent 语音轨道，正在播放…");
           const el = track.attach();
           el.autoplay = true;
           el.playsInline = true;
+          el.volume = 1;
           el.style.display = "none";
+          el.addEventListener("playing", () => {
+            console.log("[call] remote audio playback started");
+            touchBrowserCallActivity("remote_audio", { audio: true });
+          }, { once: true });
+          el.addEventListener("error", () => {
+            console.warn("[call] remote audio element error", el.error);
+            addCallSystemNote("浏览器播放 Agent 音频失败，请检查页面声音或输出设备");
+          }, { once: true });
           document.body.appendChild(el);
           lkAudioEls.add(el);
+          const playPromise = el.play();
+          if (playPromise && typeof playPromise.catch === "function") {
+            playPromise.catch((err) => {
+              console.warn("[call] remote audio autoplay blocked:", err);
+              addCallSystemNote("浏览器阻止了 Agent 音频播放，请点一下页面后重新开始通话");
+            });
+          }
         });
         room.on("trackUnsubscribed", (track) => {
           if (remoteAudioTrack === track) remoteAudioTrack = null;
@@ -5594,7 +5613,16 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           notifyLiveKitRoomEnded(endedRoomName, "livekit_disconnected", endedClientCallId);
         });
         await room.connect(serverUrl, token);
-        lkRoomName = roomName;
+        if (typeof room.startAudio === "function") {
+          try {
+            await room.startAudio();
+            console.log("[call] LiveKit audio output unlocked");
+          } catch (err) {
+            console.warn("[call] LiveKit audio output unlock failed:", err);
+            addCallSystemNote("浏览器音频输出未解锁，请点一下页面后重试通话");
+          }
+        }
+        lkRoomName = roomName || room.name || "";
         lkClientCallId = callAttemptId;
         browserCallPendingId = "";
         addCallSystemNote("LiveKit 房间已连接，正在发布麦克风…");
@@ -5618,7 +5646,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
         }
 
         await room.localParticipant.publishTrack(lkLocalTrack, { source: Track.Source.Microphone });
-        console.log("[call] local microphone track published", { reason, roomName, mic: useEsp32 ? "esp32" : (selectedMicId || "default") });
+        console.log("[call] local microphone track published", { reason, roomName: lkRoomName, mic: useEsp32 ? "esp32" : (selectedMicId || "default") });
         lkRoom = room;
         setBrowserCallState("active");
         touchBrowserCallActivity("room_connected");

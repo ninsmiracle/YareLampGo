@@ -37,6 +37,36 @@ def test_remote_api_accepts_bearer_token(monkeypatch, tmp_path):
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_local_llm_compat_accepts_livekit_agent_token(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app, client=("127.0.0.1", 50000)) as client:
+        rejected = client.post("/v1/chat/completions", json={})
+        accepted = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer lampgo-local"},
+            json={},
+        )
+
+    assert rejected.status_code == 401
+    assert accepted.status_code == 400
+    assert "no user message found" in accepted.text
+
+
+def test_remote_llm_compat_rejects_livekit_agent_token(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app, client=("203.0.113.10", 50000)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer lampgo-local"},
+            json={},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "authentication required"
+
+
 def test_loopback_ui_bootstrap_cookie_allows_api(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
 
@@ -105,16 +135,109 @@ def test_memory_daily_rejects_path_traversal(monkeypatch, tmp_path):
     assert response.json()["ok"] is False
 
 
-def test_config_response_masks_voice_credentials(monkeypatch, tmp_path):
+def test_config_response_omits_livekit_frontend_fields(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
+    gateway.server.config.voice.livekit_url = "https://rtc.yhaox.top"
+    gateway.server.config.voice.livekit_api_key = "root-key"
     gateway.server.config.voice.livekit_api_secret = "super-secret-value"
+    gateway.server.config.voice.livekit_room = "secret-room"
 
     with TestClient(gateway.app) as client:
         response = client.get("/api/config")
 
-    value = response.json()["result"]["sections"]["voice"]["voice.livekit_api_secret"]["value"]
-    assert value != "super-secret-value"
-    assert value.startswith("supe")
+    voice_section = response.json()["result"]["sections"]["voice"]
+    assert "voice.livekit_url" not in voice_section
+    assert "voice.livekit_api_key" not in voice_section
+    assert "voice.livekit_api_secret" not in voice_section
+    assert "voice.livekit_room" not in voice_section
+
+
+def test_livekit_token_allows_only_one_active_call(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    issued_payloads: list[dict[str, object]] = []
+
+    async def fake_ready(*, timeout_s: float = 10.0) -> tuple[bool, str]:
+        return True, ""
+
+    gateway.server.ensure_agent_sdk_ready = fake_ready  # type: ignore[method-assign]
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "token": "token",
+                "serverUrl": "wss://rtc.yhaox.top",
+                "roomName": self._payload["room_name"],
+                "identity": self._payload["user_identity"],
+                "role": self._payload["voice_agent"],
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, json: dict[str, object]):
+            issued_payloads.append(json)
+            return FakeResponse(json)
+
+    monkeypatch.setattr("lampgo.web.gateway.httpx_module.AsyncClient", FakeAsyncClient)
+
+    with TestClient(gateway.app) as client:
+        first = client.post(
+            "/api/livekit/token",
+            json={
+                "room_name": "custom-room-a",
+                "user_identity": "user-a",
+                "voice_agent": "lampgo-jarvis",
+                "client_call_id": "call-a",
+            },
+        )
+        first_room = first.json()["result"]["roomName"]
+        gateway._livekit_token_gate_until = 0.0
+        second = client.post(
+            "/api/livekit/token",
+            json={
+                "room_name": "custom-room-b",
+                "user_identity": "user-b",
+                "voice_agent": "lampgo-jarvis",
+                "client_call_id": "call-b",
+            },
+        )
+        ended = client.post(
+            "/api/livekit/room/end",
+            json={"room_name": first_room, "reason": "test_end", "client_call_id": "call-a"},
+        )
+        gateway._livekit_token_gate_until = 0.0
+        third = client.post(
+            "/api/livekit/token",
+            json={
+                "user_identity": "user-b",
+                "voice_agent": "lampgo-jarvis",
+                "client_call_id": "call-b",
+            },
+        )
+
+    assert first.status_code == 200
+    assert str(first_room).startswith("lampgo-")
+    assert second.status_code == 409
+    assert second.json()["error"] == "another call is already active"
+    assert ended.status_code == 200
+    assert third.status_code == 200
+    third_room = third.json()["result"]["roomName"]
+    assert str(third_room).startswith("lampgo-")
+    assert third_room != first_room
+    assert [payload["room_name"] for payload in issued_payloads] == [first_room, third_room]
 
 
 def test_sessionstore_drops_unsafe_activity_html(monkeypatch, tmp_path):

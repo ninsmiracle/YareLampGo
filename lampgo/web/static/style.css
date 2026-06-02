@@ -3586,6 +3586,10 @@ section.view[data-view="settings"] .view-header {
   box-shadow: 0 0 0 3px rgba(222, 147, 136, 0.15);
 }
 
+.settings-secret-input {
+  -webkit-text-security: disc;
+}
+
 .settings-segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

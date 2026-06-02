@@ -412,10 +412,13 @@ class VoiceConfig(BaseModel):
     mic_device: str = Field(default="", description="Microphone device index or name (empty = system default)")
     wake_word: str = Field(default="", description="Wake word for hands-free activation (empty = disabled)")
     vad_enabled: bool = Field(default=False, description="Enable voice activity detection")
-    livekit_url: str = Field(default="ws://127.0.0.1:7880", description="LiveKit server WebSocket URL")
-    livekit_api_key: str = Field(default="", description="LiveKit API key for token signing")
-    livekit_api_secret: str = Field(default="", description="LiveKit API secret for token signing")
-    livekit_room: str = Field(default="lampgo", description="LiveKit room name for voice conversations")
+    livekit_url: str = Field(default="https://rtc.yhaox.top", description="Lampgo LiveKit server URL")
+    livekit_api_key: str = Field(default="", description="Deprecated: cloud auth no longer needs a LiveKit API key")
+    livekit_api_secret: str = Field(
+        default="",
+        description="Deprecated: cloud auth no longer needs a LiveKit API secret",
+    )
+    livekit_room: str = Field(default="lampgo", description="Deprecated: LiveKit room name is built in")
     livekit_agent_name: str = Field(
         default="mimo-agent-lampgo-jarvis",
         description="Agent name dispatched in the LiveKit room (must match roles.yaml name_prefix + voice_agent).",
@@ -727,6 +730,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_VOICE_CHAT_MODEL": ("voice", "chat_model"),
         "LAMPGO_VOICE_MIC_DEVICE": ("voice", "mic_device"),
         "LAMPGO_VOICE_WAKE_WORD": ("voice", "wake_word"),
+        "LIVEKIT_URL": ("voice", "livekit_url"),
         "LAMPGO_VOICE_LIVEKIT_URL": ("voice", "livekit_url"),
         "LAMPGO_VOICE_LIVEKIT_API_KEY": ("voice", "livekit_api_key"),
         "LAMPGO_VOICE_LIVEKIT_API_SECRET": ("voice", "livekit_api_secret"),

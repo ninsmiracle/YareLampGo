@@ -415,6 +415,10 @@
   border-color: #0d6efd;
 }
 
+.esp32-secret-input {
+  -webkit-text-security: disc;
+}
+
 .esp32-password-row {
   position: relative;
   display: flex;

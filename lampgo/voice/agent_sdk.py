@@ -10,6 +10,7 @@ audio in the room, runs ASR/TTS via Volcengine, and calls lampgo's
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import signal
@@ -32,14 +33,15 @@ version: 1
 
 livekit:
   url: {livekit_url}
-  api_key: {livekit_api_key}
-  api_secret: {livekit_api_secret}
 
-token_api:
-  shared_secret: ""
+platform:
+  rtc_token_endpoint: {rtc_token_endpoint}
+  agent_token_endpoint: {agent_token_endpoint}
+  rtc_token_api_key: {rtc_token_api_key}
 
 agent:
   name_prefix: mimo-agent
+  registration_token: {agent_registration_token}
 
 providers:
   lampgo_llm:
@@ -49,7 +51,7 @@ providers:
 
   volc_main:
     type: volcengine
-    app_id: "{volcengine_app_id}"
+    app_id: {volcengine_app_id}
     access_token: {volcengine_access_token}
 
 defaults:
@@ -79,11 +81,17 @@ voice_agents:
   - name: lampgo-jarvis
     display_name: "desk lamp voice assistant"
     llm:
-      system_prompt: "You are the desk lamp's voice interface. Preserve the backend persona identity and reply in the same language as the user. Keep answers short, no Markdown or emoji."
+      system_prompt: >-
+        You are the desk lamp's voice interface. Preserve the backend persona
+        identity and reply in the same language as the user. Keep answers short,
+        no Markdown or emoji.
 """
 
 
 AGENT_SDK_PORT = 18790
+DEFAULT_MIMO_LIVEKIT_URL = "https://rtc.yhaox.top"
+DEFAULT_MIMO_RTC_TOKEN_API_KEY = "livekit-token"
+DEFAULT_MIMO_AGENT_REGISTRATION_TOKEN = "livekit-token"
 
 _LOCAL_NO_PROXY_HOSTS = (
     "127.0.0.1",
@@ -95,6 +103,28 @@ _LOCAL_NO_PROXY_HOSTS = (
     "10.0.0.0/8",
     "172.16.0.0/12",
 )
+
+
+def _yaml_string(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _livekit_ws_url(value: str) -> str:
+    raw = (value or DEFAULT_MIMO_LIVEKIT_URL).strip()
+    if raw.startswith("https://"):
+        return "wss://" + raw.removeprefix("https://")
+    if raw.startswith("http://"):
+        return "ws://" + raw.removeprefix("http://")
+    return raw
+
+
+def _livekit_http_url(value: str) -> str:
+    raw = (value or DEFAULT_MIMO_LIVEKIT_URL).strip()
+    if raw.startswith("wss://"):
+        return "https://" + raw.removeprefix("wss://")
+    if raw.startswith("ws://"):
+        return "http://" + raw.removeprefix("ws://")
+    return raw
 
 # ``sitecustomize.py`` is auto-imported by every Python interpreter that has
 # the containing directory on ``sys.path``.  By staging this file in a
@@ -557,7 +587,7 @@ class AgentSDKManager:
         host = parsed.hostname or ""
         if host not in {"127.0.0.1", "localhost", "::1"}:
             return True
-        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        port = parsed.port or (443 if parsed.scheme in {"wss", "https"} else 80)
         try:
             with socket.create_connection((host, port), timeout=0.5):
                 return True
@@ -579,10 +609,6 @@ class AgentSDKManager:
         missing = []
         if not v.livekit_url:
             missing.append("livekit_url")
-        if not v.livekit_api_key:
-            missing.append("livekit_api_key")
-        if not v.livekit_api_secret:
-            missing.append("livekit_api_secret")
         if not v.volcengine_app_id:
             missing.append("volcengine_app_id")
         if not v.volcengine_access_token:
@@ -606,15 +632,26 @@ class AgentSDKManager:
 
     def _generate_roles_yaml(self) -> Path:
         """Write a temporary roles.yaml from current config values."""
+        livekit_http_url = _livekit_http_url(self._voice.livekit_url)
         tts_voice = self._voice.tts_voice or "zh_female_vv_uranus_bigtts"
         content = ROLES_YAML_TEMPLATE.format(
-            livekit_url=self._voice.livekit_url,
-            livekit_api_key=self._voice.livekit_api_key,
-            livekit_api_secret=self._voice.livekit_api_secret,
+            livekit_url=_yaml_string(_livekit_ws_url(self._voice.livekit_url)),
+            rtc_token_endpoint=_yaml_string(f"{livekit_http_url.rstrip('/')}/rtc/token"),
+            agent_token_endpoint=_yaml_string(f"{livekit_http_url.rstrip('/')}/agent/token"),
+            rtc_token_api_key=_yaml_string(
+                os.environ.get("MIMO_RTC_TOKEN_API_KEY")
+                or os.environ.get("LAMPGO_MIMO_RTC_TOKEN_API_KEY")
+                or DEFAULT_MIMO_RTC_TOKEN_API_KEY
+            ),
+            agent_registration_token=_yaml_string(
+                os.environ.get("MIMO_AGENT_REGISTRATION_TOKEN")
+                or os.environ.get("LAMPGO_MIMO_AGENT_REGISTRATION_TOKEN")
+                or DEFAULT_MIMO_AGENT_REGISTRATION_TOKEN
+            ),
             web_port=self._web_port,
-            volcengine_app_id=self._voice.volcengine_app_id,
-            volcengine_access_token=self._voice.volcengine_access_token,
-            tts_voice=tts_voice,
+            volcengine_app_id=_yaml_string(self._voice.volcengine_app_id),
+            volcengine_access_token=_yaml_string(self._voice.volcengine_access_token),
+            tts_voice=_yaml_string(tts_voice),
         )
         tmp = Path(tempfile.mktemp(suffix=".yaml", prefix="lampgo-roles-"))
         tmp.write_text(content, encoding="utf-8")
