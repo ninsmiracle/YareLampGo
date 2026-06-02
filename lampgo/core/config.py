@@ -420,7 +420,7 @@ class VoiceConfig(BaseModel):
     )
     livekit_room: str = Field(default="lampgo", description="Deprecated: LiveKit room name is built in")
     livekit_agent_name: str = Field(
-        default="mimo-agent-lampgo-jarvis",
+        default="lampgo-agent-lampgo-jarvis",
         description="Agent name dispatched in the LiveKit room (must match roles.yaml name_prefix + voice_agent).",
     )
     call_mode: Literal["stable", "interruptible", "esp32_aec"] = Field(

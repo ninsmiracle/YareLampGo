@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Desktop embodied intelligent lamp robot runtime — clean, safe, OpenClaw-ready."
 readme = "README.md"
 authors = [
-    { name = "guoningshen", email = "guoningshen@mimo.com" },
+    { name = "lampgo contributors", email = "noreply@lampgo.local" },
 ]
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
@@ -55,13 +55,13 @@ dev = [
 ]
 
 [[tool.uv.index]]
-name = "mimo"
+name = "lampgo"
 url = "https://packages.lampgo.invalid/pypi/simple"
 explicit = true
 
 [tool.uv.sources]
-lampgo-livekit-agent-sdk = { index = "mimo" }
-livekit-agents = { index = "mimo" }
+lampgo-livekit-agent-sdk = { index = "lampgo" }
+livekit-agents = { index = "lampgo" }
 
 [build-system]
 requires = ["hatchling"]

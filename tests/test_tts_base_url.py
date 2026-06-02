@@ -83,8 +83,8 @@ def test_voice_config_migrates_incompatible_builtin_voice_ids() -> None:
 
 
 def test_agent_sdk_roles_yaml_uses_cloud_auth_and_frontend_tts_voice_for_livekit(monkeypatch) -> None:
-    monkeypatch.delenv("MIMO_RTC_TOKEN_API_KEY", raising=False)
-    monkeypatch.delenv("MIMO_AGENT_REGISTRATION_TOKEN", raising=False)
+    monkeypatch.delenv("LAMPGO_RTC_TOKEN_API_KEY", raising=False)
+    monkeypatch.delenv("LAMPGO_AGENT_REGISTRATION_TOKEN", raising=False)
     cfg = VoiceConfig(
         livekit_url="https://rtc.yhaox.top",
         volcengine_app_id="app",

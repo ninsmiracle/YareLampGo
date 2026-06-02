@@ -40,7 +40,7 @@ platform:
   rtc_token_api_key: {rtc_token_api_key}
 
 agent:
-  name_prefix: mimo-agent
+  name_prefix: lampgo-agent
   registration_token: {agent_registration_token}
 
 providers:
@@ -89,9 +89,9 @@ voice_agents:
 
 
 AGENT_SDK_PORT = 18790
-DEFAULT_MIMO_LIVEKIT_URL = "https://rtc.yhaox.top"
-DEFAULT_MIMO_RTC_TOKEN_API_KEY = "livekit-token"
-DEFAULT_MIMO_AGENT_REGISTRATION_TOKEN = "livekit-token"
+DEFAULT_LAMPGO_LIVEKIT_URL = "https://rtc.yhaox.top"
+DEFAULT_LAMPGO_RTC_TOKEN_API_KEY = "livekit-token"
+DEFAULT_LAMPGO_AGENT_REGISTRATION_TOKEN = "livekit-token"
 
 _LOCAL_NO_PROXY_HOSTS = (
     "127.0.0.1",
@@ -110,7 +110,7 @@ def _yaml_string(value: str) -> str:
 
 
 def _livekit_ws_url(value: str) -> str:
-    raw = (value or DEFAULT_MIMO_LIVEKIT_URL).strip()
+    raw = (value or DEFAULT_LAMPGO_LIVEKIT_URL).strip()
     if raw.startswith("https://"):
         return "wss://" + raw.removeprefix("https://")
     if raw.startswith("http://"):
@@ -119,7 +119,7 @@ def _livekit_ws_url(value: str) -> str:
 
 
 def _livekit_http_url(value: str) -> str:
-    raw = (value or DEFAULT_MIMO_LIVEKIT_URL).strip()
+    raw = (value or DEFAULT_LAMPGO_LIVEKIT_URL).strip()
     if raw.startswith("wss://"):
         return "https://" + raw.removeprefix("wss://")
     if raw.startswith("ws://"):
@@ -639,14 +639,12 @@ class AgentSDKManager:
             rtc_token_endpoint=_yaml_string(f"{livekit_http_url.rstrip('/')}/rtc/token"),
             agent_token_endpoint=_yaml_string(f"{livekit_http_url.rstrip('/')}/agent/token"),
             rtc_token_api_key=_yaml_string(
-                os.environ.get("MIMO_RTC_TOKEN_API_KEY")
-                or os.environ.get("LAMPGO_MIMO_RTC_TOKEN_API_KEY")
-                or DEFAULT_MIMO_RTC_TOKEN_API_KEY
+                os.environ.get("LAMPGO_RTC_TOKEN_API_KEY")
+                or DEFAULT_LAMPGO_RTC_TOKEN_API_KEY
             ),
             agent_registration_token=_yaml_string(
-                os.environ.get("MIMO_AGENT_REGISTRATION_TOKEN")
-                or os.environ.get("LAMPGO_MIMO_AGENT_REGISTRATION_TOKEN")
-                or DEFAULT_MIMO_AGENT_REGISTRATION_TOKEN
+                os.environ.get("LAMPGO_AGENT_REGISTRATION_TOKEN")
+                or DEFAULT_LAMPGO_AGENT_REGISTRATION_TOKEN
             ),
             web_port=self._web_port,
             volcengine_app_id=_yaml_string(self._voice.volcengine_app_id),
