@@ -196,6 +196,30 @@ def _normalize_spoken_text(text: str) -> str:
     return re.sub(r"[\s,，。.!！?？~～、：:；;“”\"'‘’（）()\[\]【】《》<>-]+", "", text)
 
 
+def _dedupe_spoken_texts(spoken_texts: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for text in spoken_texts:
+        clean = _strip_think_tags(str(text or "")).strip()
+        key = _normalize_spoken_text(clean)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(clean)
+    return deduped
+
+
+def _append_spoken_text(spoken_texts: list[str], text: str) -> bool:
+    clean = _strip_think_tags(str(text or "")).strip()
+    key = _normalize_spoken_text(clean)
+    if not key:
+        return False
+    if key in {_normalize_spoken_text(existing) for existing in spoken_texts}:
+        return False
+    spoken_texts.append(clean)
+    return True
+
+
 def _bigram_set(text: str) -> set[str]:
     normalized = _normalize_spoken_text(text)
     if len(normalized) < 2:
@@ -653,14 +677,14 @@ class LLMClient:
                         tts_task = await on_progress("llm_narration", content, "llm")
                         if isinstance(tts_task, asyncio.Task):
                             await asyncio.gather(tts_task, return_exceptions=True)
-                        spoken_texts.append(content)
+                        _append_spoken_text(spoken_texts, content)
                         return AgentLoopResult(
                             intent_type="chat" if not tool_records else "agent",
                             response="",
                             detail="LLM 直接返回文本，已转为 say narration",
                             stop_reason="content_response",
                             tool_calls=tool_records,
-                            spoken_texts=spoken_texts[:],
+                            spoken_texts=_dedupe_spoken_texts(spoken_texts),
                             suppress_final_tts=True,
                         )
                     return AgentLoopResult(
@@ -722,8 +746,7 @@ class LLMClient:
             )
             if assistant_content and not is_terminal_turn and on_progress is not None:
                 narration = _strip_think_tags(assistant_content).strip()
-                if narration:
-                    spoken_texts.append(narration)
+                if narration and _append_spoken_text(spoken_texts, narration):
                     await on_progress("llm_narration", narration, "llm")
 
             pending_tts: list[asyncio.Task] = []
@@ -741,11 +764,11 @@ class LLMClient:
                     say_args = {}
                 narration = _strip_think_tags(str(say_args.get("text", ""))).strip()
                 if narration and on_progress is not None:
-                    has_say = True
-                    spoken_texts.append(narration)
-                    tts_task = await on_progress("llm_narration", narration, "llm")
-                    if isinstance(tts_task, asyncio.Task):
-                        pending_tts.append(tts_task)
+                    if _append_spoken_text(spoken_texts, narration):
+                        has_say = True
+                        tts_task = await on_progress("llm_narration", narration, "llm")
+                        if isinstance(tts_task, asyncio.Task):
+                            pending_tts.append(tts_task)
 
             if has_say:
                 await asyncio.sleep(1.5)
@@ -793,7 +816,7 @@ class LLMClient:
                         tts_task = await on_progress("llm_narration", message_text, "llm")
                         if isinstance(tts_task, asyncio.Task):
                             await asyncio.gather(tts_task, return_exceptions=True)
-                        spoken_texts.append(message_text)
+                        _append_spoken_text(spoken_texts, message_text)
                         message_text = _compact_finish_response("", spoken_texts)
                         suppress_final_tts = True
                     if not message_text and tool_records and not suppress_final_tts:
@@ -804,7 +827,7 @@ class LLMClient:
                         detail=summary,
                         stop_reason="finish_response",
                         tool_calls=tool_records,
-                        spoken_texts=spoken_texts[:],
+                        spoken_texts=_dedupe_spoken_texts(spoken_texts),
                         suppress_final_tts=suppress_final_tts,
                     )
 
@@ -924,7 +947,7 @@ class LLMClient:
                         detail="用户打断，旧轮次已停止",
                         stop_reason="user_cancelled",
                         tool_calls=tool_records,
-                        spoken_texts=spoken_texts[:],
+                        spoken_texts=_dedupe_spoken_texts(spoken_texts),
                         suppress_final_tts=True,
                     )
                 messages.append(
@@ -960,7 +983,7 @@ class LLMClient:
                     detail=f"连续 {consecutive_errors} 次工具调用失败，提前结束",
                     stop_reason="consecutive_errors",
                     tool_calls=tool_records,
-                    spoken_texts=spoken_texts[:],
+                    spoken_texts=_dedupe_spoken_texts(spoken_texts),
                     suppress_final_tts=bool(last_say),
                 )
 

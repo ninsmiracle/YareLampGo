@@ -4242,10 +4242,29 @@
     return (finalEl.textContent || "").trim();
   }
 
+  function normalizeAssistantTextForDedupe(text) {
+    return String(text || "")
+      .toLowerCase()
+      .replace(/[\s,，。.!！?？~～、：:；;“”"'‘’（）()[\]【】《》<>-]+/g, "");
+  }
+
+  function uniqueAssistantTexts(items) {
+    const seen = new Set();
+    const out = [];
+    (items || []).forEach((item) => {
+      const text = String(item || "").trim();
+      const key = normalizeAssistantTextForDedupe(text);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      out.push(text);
+    });
+    return out;
+  }
+
   function assistantDisplayTextFromResult(result, { preferSpoken = false } = {}) {
     const primary = String((result && (result.response || result.chat_response)) || "").trim();
     const spoken = Array.isArray(result && result.spoken_texts)
-      ? result.spoken_texts.map((t) => String(t || "").trim()).filter(Boolean)
+      ? uniqueAssistantTexts(result.spoken_texts)
       : [];
     const spokenText = spoken.join("\n");
     if (!spokenText) return primary;
@@ -4835,6 +4854,15 @@
   function addNarrationPill(log, text) {
     if (!log || !text) return;
     const area = getNarrationsArea(log);
+    const key = normalizeAssistantTextForDedupe(text);
+    if (key) {
+      const existing = area.querySelectorAll(".narration-pill .narration-text");
+      for (let i = 0; i < existing.length; i += 1) {
+        if (normalizeAssistantTextForDedupe(existing[i].textContent || "") === key) {
+          return;
+        }
+      }
+    }
     const pill = document.createElement("div");
     pill.className = "narration-pill";
     pill.innerHTML = `<span class="narration-icon" aria-hidden="true">💬</span><span class="narration-text">${esc(text)}</span>`;

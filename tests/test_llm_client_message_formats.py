@@ -32,6 +32,7 @@ from lampgo.perception.llm_client import (
     MIMO_WEB_SEARCH_MODEL,
     LLMClient,
     _build_agent_tools,
+    _dedupe_spoken_texts,
     _is_phone_camera_switch_result,
     _resolve_web_search_api_key,
 )
@@ -78,6 +79,19 @@ def test_phone_camera_switch_tool_result_detection() -> None:
     )
     assert not _is_phone_camera_switch_result({"status": "error", "result": {"action": "phone_camera_switch"}})
     assert not _is_phone_camera_switch_result({"status": "ok", "result": {"action": "phone_ui_task"}})
+
+
+def test_dedupe_spoken_texts_ignores_spacing_and_punctuation() -> None:
+    assert _dedupe_spoken_texts(
+        [
+            "我看到天花板啦！有一个绿色的安全出口标志～",
+            "我看到天花板啦，有一个绿色的安全出口标志",
+            "好啦～",
+        ]
+    ) == [
+        "我看到天花板啦！有一个绿色的安全出口标志～",
+        "好啦～",
+    ]
 
 
 @pytest.mark.asyncio
