@@ -6,8 +6,8 @@ import asyncio
 import json
 import os
 import re
-from copy import deepcopy
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -287,7 +287,15 @@ def _build_skill_tools_from_skills(skills: list[dict]) -> list[dict]:
             props[pname] = {"type": json_type, "description": pspec.get("description", "")}
             if pspec.get("required", False):
                 required.append(pname)
-        tools.append(_build_function_tool(skill["skill_id"], skill["description"], props, required))
+        description = str(skill["description"])
+        if skill.get("skill_id") == "phone_task":
+            description += (
+                " For Android companion camera requests, use camera_facing=front/back or a task such as "
+                "'切换到前置摄像头'. After this tool returns action=phone_camera_switch, the next message will "
+                "include the fresh Lampgo camera image; describe that image directly and do not open the phone's "
+                "system camera app unless the user explicitly asks to operate the app UI."
+            )
+        tools.append(_build_function_tool(skill["skill_id"], description, props, required))
     return tools
 
 
@@ -402,6 +410,13 @@ def _build_agent_tools(
             )
         )
     return tools
+
+
+def _is_phone_camera_switch_result(tool_result: dict[str, Any]) -> bool:
+    if tool_result.get("status") != "ok":
+        return False
+    result = tool_result.get("result")
+    return isinstance(result, dict) and result.get("action") == "phone_camera_switch"
 
 
 def _build_agent_system_prompt(
@@ -886,6 +901,9 @@ class LLMClient:
                 else:
                     tool_result = await execute_tool(tool_name, arguments, turn_index, tool_index)
 
+                if await self._maybe_append_phone_camera_update(messages, tool_result):
+                    logger.info("llm_client.phone_camera_update_attached")
+
                 record = AgentToolCall(
                     turn_index=turn_index,
                     tool_index=tool_index,
@@ -1076,6 +1094,52 @@ class LLMClient:
             }
         )
         return {"ok": True, "status": "ok", "result": {"captured": True}, "error": None}
+
+    async def _maybe_append_phone_camera_update(
+        self,
+        messages: list[dict[str, Any]],
+        tool_result: dict[str, Any],
+    ) -> bool:
+        if not self._camera.enabled:
+            return False
+        if not _is_phone_camera_switch_result(tool_result):
+            return False
+        await asyncio.sleep(1.0)
+        image_url = self._camera.capture_data_url()
+        if not image_url:
+            logger.warning("llm_client.phone_camera_update_capture_failed")
+            return False
+
+        result = tool_result.get("result")
+        result_data = result if isinstance(result, dict) else {}
+        requested_facing = str(result_data.get("requested_facing") or "").strip()
+        health = result_data.get("health")
+        active_facing = requested_facing
+        if isinstance(health, dict):
+            active_facing = str(health.get("active_facing") or active_facing).strip()
+        label = "front" if active_facing == "front" else "back" if active_facing == "back" else active_facing
+        facing_text = {
+            "front": "front-facing phone camera / 手机前置摄像头",
+            "back": "rear phone camera / 手机后置摄像头",
+        }.get(label, "phone camera / 手机摄像头")
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "[phone camera update] The Android companion camera has switched successfully. "
+                            f"The attached image is the fresh view from the {facing_text}. "
+                            "Use this image to answer what you see. Do not open the phone's system camera app "
+                            "or call phone_task again unless the user asks for app UI control."
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        )
+        return True
 
     async def _handle_scan_and_capture(
         self,
