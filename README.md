@@ -2,7 +2,7 @@
 
 > 把机械臂台灯变成普通人也能玩起来的桌面小伙伴：能听你说话，能看见环境，能自己动起来，还会用动作和表情回应你。
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Powered by uv](https://img.shields.io/badge/powered%20by-uv-blueviolet)](https://github.com/astral-sh/uv)
 
@@ -183,7 +183,10 @@ uv run pytest
 - 不提交 `~/.lampgo/credentials.json`、`.env`、私有 token 或内部服务地址。
 - 将内部说明、商业素材和未授权图片留在非公开分支或私有文档中。
 - 确认硬件校准文件、录制动作和第三方依赖的授权边界。
+- 确认硬件、外观、3D 打印和供应商生产资料的公开范围；生产 CAD 和供应商图纸不默认随软件仓库发布。
 
 ## License
 
-本项目基于 [Apache License 2.0](LICENSE) 开源。
+本仓库的软件代码基于 [GNU General Public License v3.0 only](LICENSE) 开源。作者与归属信息见 [AUTHORS.md](AUTHORS.md)、[COPYRIGHT](COPYRIGHT) 和 [NOTICE](NOTICE)。
+
+硬件、外观和 3D 打印资料不默认跟随主软件许可证；若发布社区可打印文件，应在对应目录单独声明许可证，默认建议使用 CERN-OHL-W-2.0。运行时 3D 模型仅用于 Web 可视化，不作为生产制造图纸发布。

@@ -3,11 +3,9 @@
   "draco": {
     "decoderPath": "https://www.gstatic.com/draco/versioned/decoders/1.5.6/"
   },
-  "source": {
-    "primary_pack_go": "/assets/lamp_pack_Go.rar",
-    "fallback_step": "/assets/lampgo.STEP",
-    "primary_assembly": "台灯装配图 2026.4.25 .SLDASM",
-    "secondary_assembly": "台灯外观专利图档.SLDASM"
+  "assetScope": {
+    "kind": "runtime_visualization",
+    "manufacturingSourceIncluded": false
   },
   "joints": {
     "base_yaw": { "node": "base_yaw", "axis": "y", "direction": 0.55, "offset": 0 },
@@ -46,7 +44,7 @@
     ]
   },
   "notes": [
-    "v1 uses SolidWorks-exported lampgoGLB.glb with a soft Three.js link rig.",
-    "The link grouping is manually inferred from SolidWorks node names and current pose; it targets visual motion trend, not exact physical kinematics."
+    "v1 uses lampgoGLB.glb as a runtime visualization model with a soft Three.js link rig.",
+    "The link grouping is manually inferred from mesh node names and current pose; it targets visual motion trend, not exact physical kinematics."
   ]
 }

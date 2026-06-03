@@ -251,7 +251,7 @@ class WebGateway:
             WebSocketRoute("/ws", self.ws_endpoint),
             # ---- OpenAI-compatible LLM endpoint (for LiveKit Agent SDK) ----
             Route("/v1/chat/completions", self._llm_compat_handler, methods=["POST"]),
-            # ---- pet model asset from repo-level CAD/export assets ----
+            # ---- pet model runtime visualization asset ----
             Route("/assets/pet/lampgo.glb", self.api_pet_model, methods=["GET"]),
             Route("/assets/pet/lampgoGLB.glb", self.api_pet_model, methods=["GET"]),
         ]
@@ -521,7 +521,7 @@ class WebGateway:
         return await handle_chat_completions(request)
 
     async def api_pet_model(self, request: Request) -> FileResponse | JSONResponse:
-        """Serve the exported pet GLB from repo-level assets if present."""
+        """Serve the pet visualization GLB from repo-level assets if present."""
         asset_name = Path(request.url.path).name
         if asset_name not in {"lampgo.glb", "lampgoGLB.glb"}:
             return JSONResponse({"ok": False, "error": "pet model not allowed"}, status_code=404)

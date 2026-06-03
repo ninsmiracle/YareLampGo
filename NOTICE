@@ -1,0 +1,25 @@
+LampGo
+
+Copyright (C) 2026 @ninsmiracle, @shelly-tang, and LampGo contributors.
+
+Unless a file says otherwise, LampGo software source code is distributed under
+GPL-3.0-only. See LICENSE for the full license text.
+
+Attribution and third-party notices:
+
+- A small portion of LampGo's motor hardware-abstraction layer is inspired by
+  LeLamp's LeLampFollower runtime from humancomputerlab/LeLamp, which is
+  licensed under GPL-3.0. This notice is limited to that HAL integration work.
+- LampGo depends on lerobot's Feetech motor APIs through the `lerobot[feetech]`
+  package. lerobot is licensed under Apache-2.0 by its upstream contributors.
+
+Hardware, manufacturing, and visual assets:
+
+- Production CAD, supplier manufacturing drawings, quotation files, and factory
+  process documents are not part of this software distribution.
+- Runtime 3D models included in this repository are visualization assets for the
+  Web pet experience, not manufacturing drawings.
+- Community printable hardware files, if published, should carry their own
+  explicit license. The intended default for such files is CERN-OHL-W-2.0.
+- LampGo names, logos, and other brand identifiers are not licensed for
+  trademark use by the software license.

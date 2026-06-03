@@ -25,6 +25,7 @@
 | [系统架构](architecture.md) | 理解 IntentRouter、SkillExecutor、MotionRuntime、SafetyKernel 和 HAL 分层。 |
 | [项目说明](project_description.md) | 阅读更完整的项目背景、能力边界和技术路线。 |
 | [组合技能](composed_skills.md) | 查看用户技能/组合技能的数据结构和执行规则。 |
+| [硬件与资产开源范围](hardware-and-assets-scope.md) | 明确软件、固件、3D 可视化资产、社区打印件和供应商生产资料的许可证边界。 |
 
 ## 示例与参考
 
@@ -41,3 +42,4 @@
 - 内部介绍、商业 briefing 和未公开规划不随开源仓库发布。
 - 不提交 `.env`、`~/.lampgo/credentials.json`、私有模型 key、内部服务地址或未授权媒体素材。
 - 确认 `pyproject.toml` 中的私有包源和可选依赖是否需要替换为公开可安装方案。
+- 确认硬件、外观、3D 打印、运行时 3D 模型和供应商生产资料的公开边界。

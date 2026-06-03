@@ -7,7 +7,7 @@
 - Python 3.12+
 - `uv`
 - macOS、Linux 或 Windows
-- 可选硬件：LeLamp 5-DOF 机械臂台灯、Feetech 电机总线、ESP32 LED 控制器、摄像头、麦克风
+- 可选硬件：兼容的 5-DOF Feetech 机械臂台灯、ESP32 LED 控制器、摄像头、麦克风
 
 Python 由 `uv` 自动管理，通常不需要手工创建虚拟环境。
 

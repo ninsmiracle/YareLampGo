@@ -54,7 +54,7 @@ def test_llm_config_post_persists_canonical_provider_alias(monkeypatch, tmp_path
     assert server.config.llm.provider == "mimo"
     config_text = (tmp_path / "config.toml").read_text(encoding="utf-8")
     assert 'provider = "mimo"' in config_text
-    assert 'provider = "mimo"' not in config_text
+    assert 'provider = "mimo-anthropic"' not in config_text
 
 
 def test_mimo_provider_post_enables_web_search_by_default(monkeypatch, tmp_path):

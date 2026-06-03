@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 @ninsmiracle, @shelly-tang, and LampGo contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Hardware Abstraction Layer for the LampGo Feetech motor bus.
 
 The motor-bus lifecycle and calibration flow are inspired by LeLamp's

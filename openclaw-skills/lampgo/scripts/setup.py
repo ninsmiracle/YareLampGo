@@ -49,7 +49,6 @@ def detect_ports() -> dict:
 def check_calibration(lamp_id: str = "AL02") -> dict:
     paths = [
         Path(f"assets/calibration/{lamp_id}.json"),
-        Path.home() / f".cache/huggingface/lerobot/calibration/robots/lelamp_follower/{lamp_id}.json",
     ]
     for p in paths:
         if p.exists():
