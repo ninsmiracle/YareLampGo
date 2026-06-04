@@ -1,6 +1,6 @@
 # 配置说明
 
-`lampgo` 的运行配置以 `~/.lampgo/config.toml` 为主，推荐通过 `uv run lampgo onboard` 和 Web 设置页维护。仓库中的 `lampgo.toml.example` 只是字段参考，不会被运行时自动读取。
+YareLampGo 的运行配置以 `~/.lampgo/config.toml` 为主，推荐通过 `uv run lampgo onboard` 和 Web 设置页维护。仓库中的 `lampgo.toml.example` 只是字段参考，不会被运行时自动读取。
 
 ## 配置优先级
 

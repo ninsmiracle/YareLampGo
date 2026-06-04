@@ -1,4 +1,4 @@
-# lampgo
+# YareLampGo
 
 > 把机械臂台灯变成普通人也能玩起来的桌面小伙伴：能听你说话，能看见环境，能自己动起来，还会用动作和表情回应你。
 
@@ -6,7 +6,9 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Powered by uv](https://img.shields.io/badge/powered%20by-uv-blueviolet)](https://github.com/astral-sh/uv)
 
-`lampgo` 的目标很简单：降低机械臂和具身智能的使用门槛。过去这种 5 自由度机械臂更像实验室设备，普通人很难上手；`lampgo` 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 Agent 快速做出有趣的桌面互动。
+YareLampGo 的目标很简单：降低机械臂和具身智能的使用门槛。过去这种 5 自由度机械臂更像实验室设备，普通人很难上手；YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 Agent 快速做出有趣的桌面互动。
+
+对外项目名称使用 **YareLampGo**。仓库内的 `lampgo` 仍作为内部简称、Python 包名、CLI 命令、配置目录和 OpenClaw 插件标识使用。
 
 项目默认提供本地 Web 控制台、CLI、HTTP / WebSocket 接口和 OpenClaw 插件，也支持无硬件模式。你可以先把软件玩法跑通，再接真实设备。
 
@@ -54,8 +56,8 @@ brew install uv
 ### 2. 获取源码并安装依赖
 
 ```bash
-git clone https://github.com/ninsmiracle/lampgo.git
-cd lampgo
+git clone https://github.com/ninsmiracle/YareLampGo.git
+cd YareLampGo
 uv sync
 ```
 
@@ -83,7 +85,7 @@ uv run lampgo run --web --no-hw
 
 ### macOS 音乐律动权限
 
-`uv run lampgo onboard` 会自动准备音乐律动需要的系统音频组件。首次使用“音乐律动”时，macOS 会请求“屏幕录制/屏幕与系统音频录制”权限；允许后请重启 LampGo 再进入音乐律动。
+`uv run lampgo onboard` 会自动准备音乐律动需要的系统音频组件。首次使用“音乐律动”时，macOS 会请求“屏幕录制/屏幕与系统音频录制”权限；允许后请重启 YareLampGo 再进入音乐律动。
 
 ## 常用命令
 
@@ -157,7 +159,7 @@ HAL            -- Feetech motor bus + ESP32 LED
 
 ## OpenClaw 集成
 
-`lampgo` 可以作为 OpenClaw 的硬件配件运行，让 Agent 读取台灯状态、控制关节、播放动作、切换 LED 表情、抓取摄像头画面、写入记忆或向用户发起确认。
+YareLampGo 可以作为 OpenClaw 的硬件配件运行，让 Agent 读取台灯状态、控制关节、播放动作、切换 LED 表情、抓取摄像头画面、写入记忆或向用户发起确认。
 
 ```bash
 uv run lampgo run --web
@@ -189,4 +191,4 @@ uv run pytest
 
 本仓库的软件代码基于 [GNU General Public License v3.0 only](LICENSE) 开源。作者与归属信息见 [AUTHORS.md](AUTHORS.md)、[COPYRIGHT](COPYRIGHT) 和 [NOTICE](NOTICE)。
 
-硬件、外观和 3D 打印资料不默认跟随主软件许可证；若发布社区可打印文件，应在对应目录单独声明许可证，默认建议使用 CERN-OHL-W-2.0。运行时 3D 模型仅用于 Web 可视化，不作为生产制造图纸发布。
+硬件、外观、运行时 3D 模型和 3D 打印资料不默认跟随主软件许可证；资产授权见 [ASSET_LICENSES.md](ASSET_LICENSES.md)。当前 GLB 作为 Web 可视化资产使用 CC-BY-NC-SA-4.0，允许非商用展示、分享和改造；后续发布的社区可打印 STL/3MF 默认使用 CERN-OHL-W-2.0。

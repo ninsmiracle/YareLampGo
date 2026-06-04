@@ -1,6 +1,8 @@
-# lampgo 文档中心
+# YareLampGo 文档中心
 
-这里整理面向开源用户的中文文档。`lampgo` 想做的事很直接：把机械臂台灯从“实验室硬件”变成普通人也能玩起来的桌面小伙伴，让软件开发者、创作者和玩家都能更容易做出会听、会看、会动、会表达的桌面互动。
+这里整理面向开源用户的中文文档。YareLampGo 想做的事很直接：把机械臂台灯从“实验室硬件”变成普通人也能玩起来的桌面小伙伴，让软件开发者、创作者和玩家都能更容易做出会听、会看、会动、会表达的桌面互动。
+
+对外项目名称使用 **YareLampGo**；文档中的 `lampgo` 是内部简称、CLI 命令、包名、配置目录或 OpenClaw 插件标识。
 
 根目录 `README.md` 负责快速说明项目价值和启动方式；更长的安装、配置、动作、OpenClaw 和开发说明放在 `docs/` 下维护。
 
@@ -16,7 +18,7 @@
 | 文档 | 适合场景 |
 | --- | --- |
 | [动作与表情](guides/motion-and-expression.md) | 调用内置动作、录制回放 CSV、控制 LED 表情、制作组合技能。 |
-| [OpenClaw 集成](guides/openclaw-integration.md) | 将 lampgo 注册为 OpenClaw 插件，让 Agent 调用台灯能力。 |
+| [OpenClaw 集成](guides/openclaw-integration.md) | 将 YareLampGo 接入 OpenClaw，让 Agent 调用台灯能力。 |
 
 ## 架构与背景
 

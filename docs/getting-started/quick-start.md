@@ -1,6 +1,6 @@
 # 快速上手
 
-本文面向第一次运行 `lampgo` 的用户，目标是在几分钟内启动本地 Web 控制台，并确认软件链路或真实硬件链路可用。
+本文面向第一次运行 YareLampGo 的用户，目标是在几分钟内启动本地 Web 控制台，并确认软件链路或真实硬件链路可用。命令行入口仍使用 `lampgo`。
 
 ## 环境要求
 
@@ -34,8 +34,8 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ## 获取代码
 
 ```bash
-git clone https://github.com/ninsmiracle/lampgo.git
-cd lampgo
+git clone https://github.com/ninsmiracle/YareLampGo.git
+cd YareLampGo
 uv sync
 ```
 
@@ -55,7 +55,7 @@ uv run lampgo onboard
 | `hardware` | 配置电机串口、摄像头、麦克风和 ESP32 无线设备，支持自动探测。 |
 | `llm` | 配置 LLM provider、模型、Base URL 和 API key。 |
 | `persona_memory` | 导入默认或自定义人设与记忆文件。 |
-| `openclaw_plugin` | 检测到 OpenClaw 时提示安装 lampgo 插件和 AgentSkill。 |
+| `openclaw_plugin` | 检测到 OpenClaw 时提示安装 `lampgo` 插件和 AgentSkill。 |
 
 配置默认写入：
 

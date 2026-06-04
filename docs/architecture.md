@@ -1,6 +1,6 @@
-# lampgo 架构
+# YareLampGo 架构
 
-`lampgo` 是一个运行在 PC 上的单进程机器人运行时。它负责把 Web UI、CLI、语音、Agent 和真实硬件接到一起，并保证所有机械臂动作都先经过技能系统和安全内核。
+YareLampGo 是一个运行在 PC 上的单进程机器人运行时。它负责把 Web UI、CLI、语音、Agent 和真实硬件接到一起，并保证所有机械臂动作都先经过技能系统和安全内核。仓库内的 `lampgo` 仍作为 CLI、Python 包名、配置目录和插件标识使用。
 
 ## 总览
 
