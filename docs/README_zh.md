@@ -19,6 +19,7 @@
 | --- | --- |
 | [动作与表情](guides/motion-and-expression.md) | 调用内置动作、录制回放 CSV、控制 LED 表情、制作组合技能。 |
 | [OpenClaw 集成](guides/openclaw-integration.md) | 将 YareLampGo 接入 OpenClaw，让 Agent 调用台灯能力。 |
+| [硬件公开资料](hardware/README.md) | 查看公开组件图、接线图、接线表和社区复刻结构件入口。 |
 
 ## 架构与背景
 
@@ -28,6 +29,7 @@
 | [项目说明](project_description.md) | 阅读更完整的项目背景、能力边界和技术路线。 |
 | [组合技能](composed_skills.md) | 查看用户技能/组合技能的数据结构和执行规则。 |
 | [硬件与资产开源范围](hardware-and-assets-scope.md) | 明确软件、固件、3D 可视化资产、社区打印件和供应商生产资料的许可证边界。 |
+| [结构件文件](../assets/printable/README.md) | 查看 V1.0 STEP/STP 外观结构件、预览图和打印摆盘图。 |
 
 ## 示例与参考
 

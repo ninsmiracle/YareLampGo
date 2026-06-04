@@ -23,10 +23,10 @@ grant patent or trademark rights.
 
 ## Printable Hardware Assets
 
-Future community-printable YareLampGo hardware files, including published STL or
-3MF files, should be placed under `assets/printable/` and licensed under the
-CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`)
-unless a local notice says otherwise.
+Community-printable YareLampGo hardware files, including published STL, 3MF,
+STEP, and STP files, should be placed under `assets/printable/` and licensed
+under the CERN Open Hardware Licence Version 2 - Weakly Reciprocal
+(`CERN-OHL-W-2.0`) unless a local notice says otherwise.
 
 If a future printable file is intentionally limited to non-commercial use, list
 that file separately with a non-commercial asset license instead of using this
@@ -34,8 +34,14 @@ default open-hardware license.
 
 | File pattern | License | Notes |
 | --- | --- | --- |
-| `assets/printable/*.stl` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Community-printable hardware design files. |
-| `assets/printable/*.3mf` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Community-printable hardware design files. |
+| `assets/printable/**/*.stl` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Community-printable hardware design files. |
+| `assets/printable/**/*.3mf` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Community-printable hardware design files. |
+| `assets/printable/**/*.STEP` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
+| `assets/printable/**/*.step` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
+| `assets/printable/**/*.STP` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
+| `assets/printable/**/*.stp` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
+| `assets/printable/structure-*.jpeg` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Preview images for the public printable structure package. |
+| `assets/printable/print-plate-*.png` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Print plate / layout preview images for the public printable structure package. |
 
 License URL: <https://opensource.org/license/CERN-OHL-W-2.0>
 
