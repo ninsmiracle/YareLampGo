@@ -6,8 +6,8 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -196,30 +196,6 @@ def _normalize_spoken_text(text: str) -> str:
     return re.sub(r"[\s,，。.!！?？~～、：:；;“”\"'‘’（）()\[\]【】《》<>-]+", "", text)
 
 
-def _dedupe_spoken_texts(spoken_texts: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for text in spoken_texts:
-        clean = _strip_think_tags(str(text or "")).strip()
-        key = _normalize_spoken_text(clean)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(clean)
-    return deduped
-
-
-def _append_spoken_text(spoken_texts: list[str], text: str) -> bool:
-    clean = _strip_think_tags(str(text or "")).strip()
-    key = _normalize_spoken_text(clean)
-    if not key:
-        return False
-    if key in {_normalize_spoken_text(existing) for existing in spoken_texts}:
-        return False
-    spoken_texts.append(clean)
-    return True
-
-
 def _bigram_set(text: str) -> set[str]:
     normalized = _normalize_spoken_text(text)
     if len(normalized) < 2:
@@ -311,15 +287,7 @@ def _build_skill_tools_from_skills(skills: list[dict]) -> list[dict]:
             props[pname] = {"type": json_type, "description": pspec.get("description", "")}
             if pspec.get("required", False):
                 required.append(pname)
-        description = str(skill["description"])
-        if skill.get("skill_id") == "phone_task":
-            description += (
-                " For Android companion camera requests, use camera_facing=front/back or a task such as "
-                "'切换到前置摄像头'. After this tool returns action=phone_camera_switch, the next message will "
-                "include the fresh Lampgo camera image; describe that image directly and do not open the phone's "
-                "system camera app unless the user explicitly asks to operate the app UI."
-            )
-        tools.append(_build_function_tool(skill["skill_id"], description, props, required))
+        tools.append(_build_function_tool(skill["skill_id"], skill["description"], props, required))
     return tools
 
 
@@ -434,13 +402,6 @@ def _build_agent_tools(
             )
         )
     return tools
-
-
-def _is_phone_camera_switch_result(tool_result: dict[str, Any]) -> bool:
-    if tool_result.get("status") != "ok":
-        return False
-    result = tool_result.get("result")
-    return isinstance(result, dict) and result.get("action") == "phone_camera_switch"
 
 
 def _build_agent_system_prompt(
@@ -677,14 +638,14 @@ class LLMClient:
                         tts_task = await on_progress("llm_narration", content, "llm")
                         if isinstance(tts_task, asyncio.Task):
                             await asyncio.gather(tts_task, return_exceptions=True)
-                        _append_spoken_text(spoken_texts, content)
+                        spoken_texts.append(content)
                         return AgentLoopResult(
                             intent_type="chat" if not tool_records else "agent",
                             response="",
                             detail="LLM 直接返回文本，已转为 say narration",
                             stop_reason="content_response",
                             tool_calls=tool_records,
-                            spoken_texts=_dedupe_spoken_texts(spoken_texts),
+                            spoken_texts=spoken_texts[:],
                             suppress_final_tts=True,
                         )
                     return AgentLoopResult(
@@ -746,7 +707,8 @@ class LLMClient:
             )
             if assistant_content and not is_terminal_turn and on_progress is not None:
                 narration = _strip_think_tags(assistant_content).strip()
-                if narration and _append_spoken_text(spoken_texts, narration):
+                if narration:
+                    spoken_texts.append(narration)
                     await on_progress("llm_narration", narration, "llm")
 
             pending_tts: list[asyncio.Task] = []
@@ -764,11 +726,11 @@ class LLMClient:
                     say_args = {}
                 narration = _strip_think_tags(str(say_args.get("text", ""))).strip()
                 if narration and on_progress is not None:
-                    if _append_spoken_text(spoken_texts, narration):
-                        has_say = True
-                        tts_task = await on_progress("llm_narration", narration, "llm")
-                        if isinstance(tts_task, asyncio.Task):
-                            pending_tts.append(tts_task)
+                    has_say = True
+                    spoken_texts.append(narration)
+                    tts_task = await on_progress("llm_narration", narration, "llm")
+                    if isinstance(tts_task, asyncio.Task):
+                        pending_tts.append(tts_task)
 
             if has_say:
                 await asyncio.sleep(1.5)
@@ -816,7 +778,7 @@ class LLMClient:
                         tts_task = await on_progress("llm_narration", message_text, "llm")
                         if isinstance(tts_task, asyncio.Task):
                             await asyncio.gather(tts_task, return_exceptions=True)
-                        _append_spoken_text(spoken_texts, message_text)
+                        spoken_texts.append(message_text)
                         message_text = _compact_finish_response("", spoken_texts)
                         suppress_final_tts = True
                     if not message_text and tool_records and not suppress_final_tts:
@@ -827,7 +789,7 @@ class LLMClient:
                         detail=summary,
                         stop_reason="finish_response",
                         tool_calls=tool_records,
-                        spoken_texts=_dedupe_spoken_texts(spoken_texts),
+                        spoken_texts=spoken_texts[:],
                         suppress_final_tts=suppress_final_tts,
                     )
 
@@ -924,9 +886,6 @@ class LLMClient:
                 else:
                     tool_result = await execute_tool(tool_name, arguments, turn_index, tool_index)
 
-                if await self._maybe_append_phone_camera_update(messages, tool_result):
-                    logger.info("llm_client.phone_camera_update_attached")
-
                 record = AgentToolCall(
                     turn_index=turn_index,
                     tool_index=tool_index,
@@ -947,7 +906,7 @@ class LLMClient:
                         detail="用户打断，旧轮次已停止",
                         stop_reason="user_cancelled",
                         tool_calls=tool_records,
-                        spoken_texts=_dedupe_spoken_texts(spoken_texts),
+                        spoken_texts=spoken_texts[:],
                         suppress_final_tts=True,
                     )
                 messages.append(
@@ -983,7 +942,7 @@ class LLMClient:
                     detail=f"连续 {consecutive_errors} 次工具调用失败，提前结束",
                     stop_reason="consecutive_errors",
                     tool_calls=tool_records,
-                    spoken_texts=_dedupe_spoken_texts(spoken_texts),
+                    spoken_texts=spoken_texts[:],
                     suppress_final_tts=bool(last_say),
                 )
 
@@ -1117,52 +1076,6 @@ class LLMClient:
             }
         )
         return {"ok": True, "status": "ok", "result": {"captured": True}, "error": None}
-
-    async def _maybe_append_phone_camera_update(
-        self,
-        messages: list[dict[str, Any]],
-        tool_result: dict[str, Any],
-    ) -> bool:
-        if not self._camera.enabled:
-            return False
-        if not _is_phone_camera_switch_result(tool_result):
-            return False
-        await asyncio.sleep(1.0)
-        image_url = self._camera.capture_data_url()
-        if not image_url:
-            logger.warning("llm_client.phone_camera_update_capture_failed")
-            return False
-
-        result = tool_result.get("result")
-        result_data = result if isinstance(result, dict) else {}
-        requested_facing = str(result_data.get("requested_facing") or "").strip()
-        health = result_data.get("health")
-        active_facing = requested_facing
-        if isinstance(health, dict):
-            active_facing = str(health.get("active_facing") or active_facing).strip()
-        label = "front" if active_facing == "front" else "back" if active_facing == "back" else active_facing
-        facing_text = {
-            "front": "front-facing phone camera / 手机前置摄像头",
-            "back": "rear phone camera / 手机后置摄像头",
-        }.get(label, "phone camera / 手机摄像头")
-        messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "[phone camera update] The Android companion camera has switched successfully. "
-                            f"The attached image is the fresh view from the {facing_text}. "
-                            "Use this image to answer what you see. Do not open the phone's system camera app "
-                            "or call phone_task again unless the user asks for app UI control."
-                        ),
-                    },
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            }
-        )
-        return True
 
     async def _handle_scan_and_capture(
         self,

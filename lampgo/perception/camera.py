@@ -19,7 +19,6 @@ from __future__ import annotations
 import base64
 import sys
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 import structlog
 
@@ -38,7 +37,6 @@ class CameraCapture:
     HEIGHT = 480
     JPEG_QUALITY = 60
     ESP32_HTTP_TIMEOUT_S = 8.0
-    HTTP_CAMERA_TIMEOUT_S = 8.0
 
     def __init__(
         self,
@@ -93,11 +91,8 @@ class CameraCapture:
             logger.info("camera.esp32_offline_midsession", reason="returning_none_so_llm_sees_gap")
             return None
 
-        configured_port = self._config.port.strip()
-        if not configured_port:
+        if not self._config.port.strip():
             return None
-        if self._looks_like_http_snapshot_url(configured_port):
-            return self._capture_via_http_snapshot(configured_port)
         return self._capture_via_local_cv2()
 
     def _capture_via_esp32(self, base_url: str) -> str | None:
@@ -132,51 +127,6 @@ class CameraCapture:
             return None
         except Exception:
             logger.exception("camera.esp32_capture_exception", url=base_url)
-            return None
-
-    def _capture_via_http_snapshot(self, url: str) -> str | None:
-        try:
-            import httpx
-        except ImportError:
-            logger.warning("camera.http_snapshot_httpx_missing")
-            return None
-        try:
-            with httpx.Client(timeout=self.HTTP_CAMERA_TIMEOUT_S, trust_env=False, follow_redirects=True) as client:
-                resp = client.get(url, headers={"Accept": "image/jpeg,image/png,*/*"})
-            if resp.status_code != 200:
-                logger.warning("camera.http_snapshot_error", url=url, status=resp.status_code)
-                return None
-            if not resp.content:
-                logger.warning("camera.http_snapshot_empty", url=url)
-                return None
-            media_type = self._image_media_type(resp.headers.get("content-type", ""))
-            if media_type is None:
-                logger.warning(
-                    "camera.http_snapshot_unexpected_type",
-                    url=url,
-                    content_type=resp.headers.get("content-type"),
-                )
-                return None
-            payload = base64.b64encode(resp.content).decode("ascii")
-            return f"data:{media_type};base64,{payload}"
-        except httpx.TimeoutException as exc:
-            logger.warning(
-                "camera.http_snapshot_timeout",
-                url=url,
-                timeout_s=self.HTTP_CAMERA_TIMEOUT_S,
-                error_type=type(exc).__name__,
-            )
-            return None
-        except httpx.RequestError as exc:
-            logger.warning(
-                "camera.http_snapshot_request_failed",
-                url=url,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return None
-        except Exception:
-            logger.exception("camera.http_snapshot_exception", url=url)
             return None
 
     def _capture_via_local_cv2(self) -> str | None:
@@ -244,24 +194,3 @@ class CameraCapture:
         elif isinstance(device, (int, str)) and sys.platform.startswith("linux") and hasattr(cv2, "CAP_V4L2"):
             backends.insert(0, cv2.CAP_V4L2)
         return backends
-
-    @staticmethod
-    def _looks_like_http_snapshot_url(raw: str) -> bool:
-        parsed = urlparse(raw.strip())
-        if parsed.scheme not in {"http", "https"}:
-            return False
-        path = parsed.path.lower()
-        if path.endswith(".mjpeg") or path.endswith(".mjpg") or "/mjpeg" in path or "/stream" in path:
-            return False
-        return True
-
-    @staticmethod
-    def _image_media_type(content_type: str) -> str | None:
-        media_type = content_type.split(";", 1)[0].strip().lower()
-        if media_type in {"image/jpeg", "image/jpg"}:
-            return "image/jpeg"
-        if media_type == "image/png":
-            return "image/png"
-        if media_type in {"", "application/octet-stream"}:
-            return "image/jpeg"
-        return None

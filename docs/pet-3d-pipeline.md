@@ -1,20 +1,23 @@
-# lampgo Pet 3D Pipeline
+# YareLampGo Pet 3D Pipeline
 
 This document records the v1 asset workflow for the Web pet. The pet is a visual
-companion for lampgo motion state; it is not a promise of exact physical
+companion for YareLampGo motion state; it is not a promise of exact physical
 kinematic equivalence.
 
 ## Source Assets
 
-The public repository keeps only the runtime visualization asset used by the Web
-pet. Production CAD, supplier drawings, STEP/SLDASM/SLDPRT files, and other
+The public repository keeps the runtime visualization asset used by the Web pet
+and the separately approved community printable appearance/structure package.
+Production CAD, supplier drawings, STEP/SLDASM/SLDPRT files, and other
 manufacturing sources stay outside the public repository unless separately
-approved for release.
+approved for release. The approved public V1.0 STEP/STP package lives under
+`assets/printable/YareLampGo_V1.0/`.
 
 Current public Web runtime source:
 
 - `assets/lampgoGLB.glb`
 - Served as `/assets/pet/lampgoGLB.glb`
+- Licensed as a runtime visualization asset in `ASSET_LICENSES.md`
 - Uses `KHR_draco_mesh_compression`, so the browser loader must configure a
   Draco decoder.
 
@@ -31,7 +34,7 @@ Current public Web runtime source:
    - set each moving link origin at its intended joint pivot;
    - simplify materials for Web rendering.
 4. Serve the chosen GLB from repo-level `assets/` via the Web gateway.
-5. Update `lampgo/web/static/assets/pet/rig.json` so each lampgo joint points to
+5. Update `lampgo/web/static/assets/pet/rig.json` so each YareLampGo joint points to
    either a real GLB node or a virtual Three.js link group.
 
 ## Runtime Contract
@@ -61,21 +64,23 @@ soft rig for rigid mechanical links, not a skeleton/skin rig.
 ## Current GLB Status
 
 `assets/lampgoGLB.glb` is the current runtime model for Web visualization. It is
-not a printable model, supplier production drawing, or manufacturing source.
+not the preferred printable model, supplier production drawing, or manufacturing
+source.
 
 The file does not contain GLB animation clips, skeletons, or a CAD mate solver.
-That is acceptable for Lampgo v1 because the Web pet already receives five
+That is acceptable for YareLampGo v1 because the Web pet already receives five
 joint angles from `pet_pose`. The Web layer builds virtual rigid-link groups and
 drives those groups directly, similar in spirit to the 2D pet from commit
 `81c25a6`.
 
 If the public visualization model is replaced, keep the same runtime contract:
 it should be safe to serve in the open repository and should not expose
-production CAD details.
+restricted supplier production details.
 
 ## Blender And FreeCAD
 
-Blender is not a lampgo runtime dependency. Users do not need it to run lampgo.
+Blender is not a YareLampGo runtime dependency. Users do not need it to run
+`lampgo`.
 
 Blender is strongly recommended for development because it is the practical
 place to inspect model hierarchy, fix pivots, reduce geometry, tune materials,

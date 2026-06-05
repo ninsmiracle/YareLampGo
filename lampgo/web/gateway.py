@@ -107,8 +107,6 @@ def _coerce_value(current: Any, value: Any) -> Any:
         return current
     if isinstance(current, str):
         return "" if value is None else str(value)
-    if isinstance(current, Path):
-        return Path("" if value is None else str(value))
     return value
 
 
@@ -214,7 +212,6 @@ class WebGateway:
             Route("/api/config/safety", self.api_config_safety, methods=["POST"]),
             Route("/api/config/web", self.api_config_web, methods=["POST"]),
             Route("/api/config/device_esp32", self.api_config_device_esp32, methods=["POST"]),
-            Route("/api/config/phone_agent", self.api_config_phone_agent, methods=["POST"]),
             Route("/api/config/detect", self.api_config_detect, methods=["POST"]),
             Route("/api/config/restart", self.api_config_restart, methods=["POST"]),
             Route("/api/config/llm", self.api_config_llm, methods=["GET", "POST"]),
@@ -1308,7 +1305,6 @@ class WebGateway:
             "web.host",
             "web.port",
             "socket_path",
-            "phone_agent.enabled",
         }
     )
 
@@ -1383,21 +1379,6 @@ class WebGateway:
             "device_esp32.mic_enabled",
             "device_esp32.http_timeout_s",
         ),
-        "phone_agent": (
-            "phone_agent.enabled",
-            "phone_agent.python_executable",
-            "phone_agent.adb_path",
-            "phone_agent.device_type",
-            "phone_agent.device_id",
-            "phone_agent.wda_url",
-            "phone_agent.lang",
-            "phone_agent.skip_model_check",
-            "phone_agent.verify_result",
-            "phone_agent.artifact_dir",
-            "phone_agent.auto_install_adb_keyboard",
-            "phone_agent.default_max_steps",
-            "phone_agent.timeout_s",
-        ),
     }
 
     def _dump_section(self, section_fields: tuple[str, ...], provenance: dict[str, str]) -> dict[str, Any]:
@@ -1411,8 +1392,6 @@ class WebGateway:
                 value = obj
             else:
                 value = getattr(obj, tail, None) if obj is not None else None
-            if isinstance(value, Path):
-                value = str(value)
             if dotted in _SENSITIVE_CONFIG_FIELDS and value:
                 from lampgo import personastore
 
@@ -1672,9 +1651,6 @@ class WebGateway:
         except Exception:
             logger.exception("web.device_esp32_toggle_failed")
         return response
-
-    async def api_config_phone_agent(self, request: Request) -> JSONResponse:
-        return await self._save_section(request, "phone_agent")
 
     async def api_config_detect(self, request: Request) -> JSONResponse:
         """Run hardware autodetect on demand (used by the 硬件 tab button)."""

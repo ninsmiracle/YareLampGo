@@ -104,6 +104,9 @@ button {
 }
 
 .pet-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text);
   font-size: 12px;
   font-weight: 700;
@@ -361,8 +364,16 @@ button {
   display: block;
 }
 
+.brand-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .brand-title {
-  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
   font-weight: 700;
   color: var(--text);
   line-height: 1.1;

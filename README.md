@@ -1,4 +1,4 @@
-# lampgo
+# YareLampGo
 
 > 把机械臂台灯变成普通人也能玩起来的桌面小伙伴：能听你说话，能看见环境，能自己动起来，还会用动作和表情回应你。
 
@@ -6,9 +6,13 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Powered by uv](https://img.shields.io/badge/powered%20by-uv-blueviolet)](https://github.com/astral-sh/uv)
 
-`lampgo` 的目标很简单：降低机械臂和具身智能的使用门槛。过去这种 5 自由度机械臂更像实验室设备，普通人很难上手；`lampgo` 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 Agent 快速做出有趣的桌面互动。
+YareLampGo 的目标很简单：降低机械臂和具身智能的使用门槛，让没有技术背景的普通人也可以玩起来。
+过去这种 5 自由度机械臂更像实验室设备，普通人很难上手；
+YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 Agent 快速做出有趣的桌面互动。
 
-项目默认提供本地 Web 控制台、CLI、HTTP / WebSocket 接口和 OpenClaw 插件，也支持无硬件模式。你可以先把软件玩法跑通，再接真实设备。
+仓库内的 `lampgo` 仍作为 **YareLampGo** 项目的内部简称，用于简化 Python 包名、CLI 命令、配置目录和 OpenClaw 插件标识使用。
+
+项目默认提供本地 Web 控制台、CLI、HTTP / WebSocket 接口和 OpenClaw 插件，也支持无硬件模式。可以让使用者先把软件玩法跑通，再接真实设备。
 
 ## 用户价值
 
@@ -54,8 +58,8 @@ brew install uv
 ### 2. 获取源码并安装依赖
 
 ```bash
-git clone https://github.com/ninsmiracle/lampgo.git
-cd lampgo
+git clone https://github.com/ninsmiracle/YareLampGo.git
+cd YareLampGo
 uv sync
 ```
 
@@ -83,7 +87,7 @@ uv run lampgo run --web --no-hw
 
 ### macOS 音乐律动权限
 
-`uv run lampgo onboard` 会自动准备音乐律动需要的系统音频组件。首次使用“音乐律动”时，macOS 会请求“屏幕录制/屏幕与系统音频录制”权限；允许后请重启 LampGo 再进入音乐律动。
+`uv run lampgo onboard` 会自动准备音乐律动需要的系统音频组件。首次使用“音乐律动”时，macOS 会请求“屏幕录制/屏幕与系统音频录制”权限；允许后请重启 YareLampGo 再进入音乐律动。
 
 ## 常用命令
 
@@ -152,12 +156,13 @@ HAL            -- Feetech motor bus + ESP32 LED
 | --- | --- |
 | 入门 | [文档中心](docs/README_zh.md)、[快速上手](docs/getting-started/quick-start.md)、[配置说明](docs/getting-started/configuration.md) |
 | 使用指南 | [动作与表情](docs/guides/motion-and-expression.md)、[OpenClaw 集成](docs/guides/openclaw-integration.md) |
+| 硬件 | [硬件公开资料](docs/hardware/README.md)、[接线表](docs/hardware/wiring.md)、[结构件文件](assets/printable/README.md) |
 | 架构 | [系统架构](docs/architecture.md)、[项目说明](docs/project_description.md) |
 | 开发 | [贡献指南](docs/development/contributing.md)、[示例代码](examples/) |
 
 ## OpenClaw 集成
 
-`lampgo` 可以作为 OpenClaw 的硬件配件运行，让 Agent 读取台灯状态、控制关节、播放动作、切换 LED 表情、抓取摄像头画面、写入记忆或向用户发起确认。
+YareLampGo 可以作为 OpenClaw 的硬件配件运行，让 Agent 读取台灯状态、控制关节、播放动作、切换 LED 表情、抓取摄像头画面、写入记忆或向用户发起确认。
 
 ```bash
 uv run lampgo run --web
@@ -166,7 +171,15 @@ uv run lampgo install-openclaw --yes
 
 集成细节见 [OpenClaw 集成指南](docs/guides/openclaw-integration.md)。
 
-## 开发
+## 参与贡献
+
+欢迎把你做出的动作、桌面互动 case、组合 skill 场景、OpenClaw 玩法、硬件适配和文档经验共享回本仓库。可以从这些入口开始：
+
+- 动作资产：录制后整理为 `assets/recordings/` 下的 CSV，并补一份简短说明。
+- 使用案例和脚本：放到 `examples/` 或文档中，说明适合什么场景。
+- 组合 skill 场景：参考 `docs/examples/` 和 [组合技能](docs/composed_skills.md)，尽量写清触发方式、动作步骤和安全边界。
+
+最简贡献流程：
 
 ```bash
 uv sync --group dev
@@ -174,19 +187,12 @@ uv run ruff check lampgo tests
 uv run pytest
 ```
 
-提交 PR 前请确保文档、示例和相关测试同步更新。硬件相关改动建议同时说明测试设备、串口、校准文件和是否覆盖 `--no-hw` 模式。
-
-## 开源状态
-
-项目仍处于早期阶段，API、配置字段和硬件适配可能继续变化。开源前建议检查：
-
-- 不提交 `~/.lampgo/credentials.json`、`.env`、私有 token 或内部服务地址。
-- 将内部说明、商业素材和未授权图片留在非公开分支或私有文档中。
-- 确认硬件校准文件、录制动作和第三方依赖的授权边界。
-- 确认硬件、外观、3D 打印和供应商生产资料的公开范围；生产 CAD 和供应商图纸不默认随软件仓库发布。
+一个 PR 聚焦一个主题。涉及硬件或动作时，请说明测试设备、串口、校准文件、动作效果和是否覆盖 `--no-hw` 模式。更多细节见 [贡献指南](docs/development/contributing.md)。
 
 ## License
 
 本仓库的软件代码基于 [GNU General Public License v3.0 only](LICENSE) 开源。作者与归属信息见 [AUTHORS.md](AUTHORS.md)、[COPYRIGHT](COPYRIGHT) 和 [NOTICE](NOTICE)。
 
-硬件、外观和 3D 打印资料不默认跟随主软件许可证；若发布社区可打印文件，应在对应目录单独声明许可证，默认建议使用 CERN-OHL-W-2.0。运行时 3D 模型仅用于 Web 可视化，不作为生产制造图纸发布。
+硬件、外观、运行时 3D 模型和 3D 打印资料不默认跟随主软件许可证；资产授权见 [ASSET_LICENSES.md](ASSET_LICENSES.md)。
+当前 GLB 作为 Web 可视化资产使用 CC-BY-NC-SA-4.0，允许非商用展示、分享和改造；公开的社区复刻/可打印外观结构件位于 [assets/printable/](assets/printable/README.md)，包括 V1.0 STEP/STP 文件和预览图，默认使用 CERN-OHL-W-2.0。
+生产 CAD、供应商生产图纸、报价和工艺文件不包含在公开仓库中，除非文件被明确列入资产授权表或本地许可说明。

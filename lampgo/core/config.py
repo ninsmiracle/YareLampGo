@@ -393,46 +393,6 @@ class DeviceEsp32Config(BaseModel):
     )
 
 
-class PhoneAgentConfig(BaseModel):
-    """External phone-control agent bridge settings."""
-
-    enabled: bool = Field(default=False, description="Expose phone_task skill backed by built-in Open-AutoGLM.")
-    agent_dir: Path = Field(
-        default=Path(""),
-        description="Deprecated. External Open-AutoGLM path is no longer required.",
-    )
-    python_executable: str = Field(
-        default="",
-        description="Python executable for the built-in phone agent subprocess. Empty = current Python.",
-    )
-    adb_path: str = Field(
-        default="",
-        description="Optional adb executable path. Empty = search PATH, Android SDK env vars, and common install paths.",
-    )
-    device_type: str = Field(default="adb", description="Phone control backend: adb, hdc, or ios.")
-    device_id: str = Field(default="", description="ADB device id for the mounted Android phone.")
-    wda_url: str = Field(default="http://localhost:8100", description="WebDriverAgent URL for iOS control.")
-    lang: str = Field(default="cn", description="Prompt/UI language for Open-AutoGLM: cn or en.")
-    skip_model_check: bool = Field(
-        default=True,
-        description="Skip Open-AutoGLM's per-task model API health check.",
-    )
-    verify_result: bool = Field(
-        default=True,
-        description="Capture a final phone screenshot and run lightweight result checks after each task.",
-    )
-    artifact_dir: Path = Field(
-        default=Path(".lampgo/phone-artifacts"),
-        description="Directory for phone screenshots and UIAutomator dumps captured after tasks.",
-    )
-    auto_install_adb_keyboard: bool = Field(
-        default=True,
-        description="Best-effort install/enable bundled ADBKeyboard.apk before ADB tasks.",
-    )
-    default_max_steps: int = Field(default=10, ge=1, le=200)
-    timeout_s: float = Field(default=300.0, gt=0, le=1800.0)
-
-
 class VoiceConfig(BaseModel):
     """Voice / TTS / STT configuration."""
 
@@ -596,7 +556,6 @@ class LampgoConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     camera: CameraConfig = Field(default_factory=CameraConfig)
     device_esp32: DeviceEsp32Config = Field(default_factory=DeviceEsp32Config)
-    phone_agent: PhoneAgentConfig = Field(default_factory=PhoneAgentConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
@@ -747,7 +706,6 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_API_KEY": ("llm", "api_key"),
         "LAMPGO_LLM_API_BASE": ("llm", "api_base"),
         "LAMPGO_LLM_PROVIDER": ("llm", "provider"),
-        "LAMPGO_LLM_MESSAGE_TYPE": ("llm", "message_type"),
         "LAMPGO_LLM_MODEL": ("llm", "model"),
         "LAMPGO_LLM_FAST_MODEL": ("llm", "fast_model"),
         "LAMPGO_LLM_ENABLE_THINKING": ("llm", "enable_thinking"),
@@ -763,20 +721,6 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_MAX_AGENT_TURNS": ("llm", "max_agent_turns"),
         "LAMPGO_LLM_MAX_AGENT_TOOL_CALLS": ("llm", "max_agent_tool_calls"),
         "LAMPGO_CAMERA_PORT": ("camera", "port"),
-        "LAMPGO_PHONE_ENABLED": ("phone_agent", "enabled"),
-        "LAMPGO_PHONE_AGENT_DIR": ("phone_agent", "agent_dir"),
-        "LAMPGO_PHONE_PYTHON": ("phone_agent", "python_executable"),
-        "LAMPGO_PHONE_ADB": ("phone_agent", "adb_path"),
-        "LAMPGO_PHONE_DEVICE_TYPE": ("phone_agent", "device_type"),
-        "LAMPGO_PHONE_DEVICE_ID": ("phone_agent", "device_id"),
-        "LAMPGO_PHONE_WDA_URL": ("phone_agent", "wda_url"),
-        "LAMPGO_PHONE_LANG": ("phone_agent", "lang"),
-        "LAMPGO_PHONE_SKIP_MODEL_CHECK": ("phone_agent", "skip_model_check"),
-        "LAMPGO_PHONE_VERIFY_RESULT": ("phone_agent", "verify_result"),
-        "LAMPGO_PHONE_ARTIFACT_DIR": ("phone_agent", "artifact_dir"),
-        "LAMPGO_PHONE_AUTO_INSTALL_ADB_KEYBOARD": ("phone_agent", "auto_install_adb_keyboard"),
-        "LAMPGO_PHONE_MAX_STEPS": ("phone_agent", "default_max_steps"),
-        "LAMPGO_PHONE_TIMEOUT_S": ("phone_agent", "timeout_s"),
         "LAMPGO_VOICE_STT_PROVIDER": ("voice", "stt_provider"),
         "LAMPGO_VOICE_STT_MODEL": ("voice", "stt_model"),
         "LAMPGO_VOICE_TTS_PROVIDER": ("voice", "tts_provider"),

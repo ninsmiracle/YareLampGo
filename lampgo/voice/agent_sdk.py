@@ -1,7 +1,7 @@
 """Lampgo LiveKit Agent SDK subprocess manager.
 
 Generates ``roles.yaml`` from lampgo's VoiceConfig at runtime and
-manages the ``lampgo-livekit-agent`` child process lifecycle.
+manages the ``lampgo-livekit-agent-sdk`` child process lifecycle.
 The Agent SDK process connects to the LiveKit server, subscribes to
 audio in the room, runs ASR/TTS via Volcengine, and calls lampgo's
 ``/v1/chat/completions`` endpoint for LLM responses.
@@ -10,6 +10,7 @@ audio in the room, runs ASR/TTS via Volcengine, and calls lampgo's
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import shutil
@@ -89,6 +90,9 @@ voice_agents:
 
 
 AGENT_SDK_PORT = 18790
+AGENT_SDK_PACKAGE = "lampgo-livekit-agent-sdk"
+AGENT_SDK_MODULE = "lampgo_livekit_agent"
+AGENT_SDK_BINARIES = ("lampgo-livekit-agent",)
 DEFAULT_LAMPGO_LIVEKIT_URL = "https://rtc.yhaox.top"
 DEFAULT_LAMPGO_RTC_TOKEN_API_KEY = "livekit-token"
 DEFAULT_LAMPGO_AGENT_REGISTRATION_TOKEN = "livekit-token"
@@ -133,7 +137,7 @@ def _livekit_http_url(value: str) -> str:
 #   1. The SDK's main process (token API).
 #   2. Every multiprocessing-spawned worker process (LiveKit agent worker).
 #
-# This is essential because lampgo-livekit-agent uses ``multiprocessing.spawn``
+# This is essential because the LiveKit Agent SDK uses ``multiprocessing.spawn``
 # to fork workers, and a ``python -c`` launcher's monkey-patches do NOT
 # propagate to those workers (the child interpreter starts fresh and reimports
 # everything).  ``sitecustomize.py`` does propagate.
@@ -619,12 +623,12 @@ class AgentSDKManager:
             return False
         if not self._local_livekit_server_reachable():
             return False
-        try:
-            import lampgo_livekit_agent  # noqa: F401
-        except ImportError:
-            self._set_last_error("lampgo-livekit-agent package is not installed")
+        if importlib.util.find_spec(AGENT_SDK_MODULE) is None:
+            self._set_last_error(f"{AGENT_SDK_PACKAGE} package is not installed")
             logger.warning(
                 "agent_sdk.package_not_found",
+                package=AGENT_SDK_PACKAGE,
+                module=AGENT_SDK_MODULE,
                 hint="Install voice extras: uv pip install lampgo[voice]",
             )
             return False
@@ -664,16 +668,21 @@ class AgentSDKManager:
         return tmp
 
     def _resolve_sdk_binary(self) -> str | None:
-        """Return path to the ``lampgo-livekit-agent`` CLI binary, or None.
+        """Return path to the Agent SDK CLI binary, or None.
 
         Prefer the binary inside the active ``.venv`` so the right Python
         interpreter (with all our voice extras) is used.
         """
-        venv_bin = Path(sys.executable).parent / "lampgo-livekit-agent"
-        if venv_bin.exists():
-            return str(venv_bin)
-        which = shutil.which("lampgo-livekit-agent")
-        return which
+        bin_dir = Path(sys.executable).parent
+        for binary in AGENT_SDK_BINARIES:
+            venv_bin = bin_dir / binary
+            if venv_bin.exists():
+                return str(venv_bin)
+        for binary in AGENT_SDK_BINARIES:
+            which = shutil.which(binary)
+            if which:
+                return which
+        return None
 
     @staticmethod
     def _merge_no_proxy(value: str | None) -> str:
@@ -696,10 +705,12 @@ class AgentSDKManager:
 
         sdk_binary = self._resolve_sdk_binary()
         if sdk_binary is None:
-            self._set_last_error("lampgo-livekit-agent CLI is missing from PATH and venv/bin")
+            binaries = ", ".join(AGENT_SDK_BINARIES)
+            self._set_last_error(f"Agent SDK CLI is missing from PATH and venv/bin: {binaries}")
             logger.warning(
                 "agent_sdk.binary_not_found",
-                hint="lampgo-livekit-agent CLI is missing from PATH and venv/bin",
+                binaries=AGENT_SDK_BINARIES,
+                hint=f"Agent SDK CLI is missing from PATH and venv/bin: {binaries}",
             )
             return False
 
@@ -762,7 +773,7 @@ class AgentSDKManager:
             )
             return True
         except Exception:
-            self._set_last_error("failed to start lampgo-livekit-agent")
+            self._set_last_error(f"failed to start {AGENT_SDK_PACKAGE}")
             logger.exception("agent_sdk.start_failed")
             self._cleanup_roles()
             self._cleanup_patch_dir()

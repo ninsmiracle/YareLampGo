@@ -56,7 +56,6 @@ from lampgo.skills.builtin.parametric_skills import (
     LookAtSkill,
     NodSkill,
 )
-from lampgo.skills.builtin.phone_skills import PhoneTaskSkill
 from lampgo.skills.builtin.playback_skills import PlayRecordingSkill
 from lampgo.skills.composed import ComposedSkill
 from lampgo.skills.executor import SkillExecutor
@@ -162,8 +161,6 @@ class LampgoServer:
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
         self.registry.register(DanceToMusicSkill())
-        if self.config.phone_agent.enabled:
-            self.registry.register(PhoneTaskSkill(self.config.phone_agent, self.config.llm, self.config.camera))
 
     # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
 

@@ -1,25 +1,31 @@
-LampGo
+YareLampGo
 
-Copyright (C) 2026 @ninsmiracle, @shelly-tang, and LampGo contributors.
+Copyright (C) 2026 @ninsmiracle, @shelly-tang, @Yue-Xiaolong,
+@mnw852173-star, @tian135, @majiachao, and YareLampGo contributors.
 
-Unless a file says otherwise, LampGo software source code is distributed under
-GPL-3.0-only. See LICENSE for the full license text.
+Unless a file says otherwise, YareLampGo software source code is distributed
+under GPL-3.0-only. See LICENSE for the full license text. The `lampgo` name is
+kept as an internal package, command, configuration, and plugin identifier.
 
 Attribution and third-party notices:
 
-- A small portion of LampGo's motor hardware-abstraction layer is inspired by
+- A small portion of YareLampGo's motor hardware-abstraction layer is inspired by
   LeLamp's LeLampFollower runtime from humancomputerlab/LeLamp, which is
   licensed under GPL-3.0. This notice is limited to that HAL integration work.
-- LampGo depends on lerobot's Feetech motor APIs through the `lerobot[feetech]`
-  package. lerobot is licensed under Apache-2.0 by its upstream contributors.
+- YareLampGo depends on lerobot's Feetech motor APIs through the
+  `lerobot[feetech]` package. lerobot is licensed under Apache-2.0 by its
+  upstream contributors.
 
 Hardware, manufacturing, and visual assets:
 
+- Hardware, industrial design (ID), and mechanical/structural contributions
+  include work from @Yue-Xiaolong, @mnw852173-star, @tian135, and @majiachao.
 - Production CAD, supplier manufacturing drawings, quotation files, and factory
-  process documents are not part of this software distribution.
-- Runtime 3D models included in this repository are visualization assets for the
-  Web pet experience, not manufacturing drawings.
-- Community printable hardware files, if published, should carry their own
-  explicit license. The intended default for such files is CERN-OHL-W-2.0.
-- LampGo names, logos, and other brand identifiers are not licensed for
+  process documents are not part of this software distribution unless explicitly
+  published with their own license notice.
+- Asset licensing is listed in ASSET_LICENSES.md. The current runtime GLB is
+  licensed under CC-BY-NC-SA-4.0 for non-commercial Web visualization,
+  redistribution, and adaptation. Community-printable STL/3MF files, if
+  published, should use CERN-OHL-W-2.0 unless a local notice says otherwise.
+- YareLampGo names, logos, and other brand identifiers are not licensed for
   trademark use by the software license.

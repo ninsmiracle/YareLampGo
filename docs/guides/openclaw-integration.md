@@ -1,18 +1,18 @@
 # OpenClaw 集成
 
-`lampgo` 可以作为 OpenClaw 的硬件插件运行，让 Agent 通过工具调用控制台灯动作、LED 表情、摄像头、记忆和用户确认流程。
+YareLampGo 可以作为 OpenClaw 的硬件插件运行，让 Agent 通过工具调用控制台灯动作、LED 表情、摄像头、记忆和用户确认流程。
 
 ## 能力分层
 
 | 层 | 作用 |
 | --- | --- |
-| `lampgo` 守护进程 | 连接硬件，提供安全运动、技能执行、Web Gateway 和本地状态。 |
+| `lampgo` 守护进程 | YareLampGo 的本地运行时入口，连接硬件，提供安全运动、技能执行、Web Gateway 和本地状态。 |
 | `openclaw-plugin-lampgo/` | OpenClaw 插件，把 Agent 工具请求转发到 lampgo HTTP API。 |
 | `openclaw-skills/lampgo/` | AgentSkill，告诉 Agent 如何使用动作、关节、LED、记忆和问询工具。 |
 
 ## 安装
 
-先启动 lampgo：
+先启动 `lampgo` 守护进程：
 
 ```bash
 uv run lampgo run --web
@@ -95,9 +95,9 @@ openclaw-plugin-lampgo/openclaw.plugin.json
 
 ## 排障
 
-### OpenClaw 找不到 lampgo
+### OpenClaw 找不到 `lampgo`
 
-确认 lampgo 已启动：
+确认 `lampgo` 已启动：
 
 ```bash
 uv run lampgo status
