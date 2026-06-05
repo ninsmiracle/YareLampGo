@@ -33,7 +33,6 @@ perception = [
 voice = [
     "livekit>=0.17",
     "livekit-api>=0.7",
-    "livekit-agents[codecs]==1.5.5+lampgo.1",
     "lampgo-livekit-agent-sdk>=0.3.0",
 ]
 bridge = [
@@ -54,15 +53,6 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
 ]
-
-[[tool.uv.index]]
-name = "lampgo"
-url = "https://packages.lampgo.invalid/pypi/simple"
-explicit = true
-
-[tool.uv.sources]
-lampgo-livekit-agent-sdk = { index = "lampgo" }
-livekit-agents = { index = "lampgo" }
 
 [build-system]
 requires = ["hatchling"]
