@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 from lampgo.core.config import CameraConfig, LLMConfig, PhoneAgentConfig
 from lampgo.core.types import SkillResult
 from lampgo.device.phone_agent import PhoneAgentRunner
+from lampgo.device.phone_direct import run_direct_phone_task
 from lampgo.device.phone_observer import capture_phone_observation, verify_phone_task_result
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
@@ -64,6 +65,13 @@ class PhoneTaskSkill(Skill):
             default=False,
             description="True only after explicit user approval for sensitive phone actions.",
         ),
+        "direct": ParameterSpec(
+            name="direct",
+            type="bool",
+            required=False,
+            default=True,
+            description="Try deterministic ADB controls for simple Android tasks before using the GUI agent.",
+        ),
         "verify_result": ParameterSpec(
             name="verify_result",
             type="bool",
@@ -94,8 +102,40 @@ class PhoneTaskSkill(Skill):
 
         device_id = str(params.get("device_id") or "").strip() or self._config.device_id
         original_task = task
+        allow_sensitive = bool(params.get("allow_sensitive", False))
+        direct_enabled = bool(params.get("direct", True)) and bool(self._config.direct_control_enabled)
 
-        if not bool(params.get("allow_sensitive", False)):
+        if not self._config.enabled:
+            return SkillResult(status="error", message="phone agent is disabled; set LAMPGO_PHONE_ENABLED=true")
+
+        if direct_enabled:
+            direct_result = await asyncio.to_thread(
+                run_direct_phone_task,
+                original_task,
+                self._config,
+                device_id=device_id,
+                allow_sensitive=allow_sensitive,
+            )
+            if direct_result is not None and direct_result.ok:
+                data = {
+                    "backend": "direct_adb",
+                    "direct": direct_result.to_dict(),
+                    "status": direct_result.status,
+                    "duration_s": direct_result.duration_s,
+                    "returncode": None,
+                    "diagnostics": {
+                        "direct_control": True,
+                        "fallback_to_open_autoglm": False,
+                    },
+                    "stdout_tail": "",
+                    "stderr_tail": "",
+                }
+                verified = self._maybe_capture_verification(params, original_task, device_id, data)
+                if verified is not None:
+                    return verified
+                return SkillResult(status="ok", message=direct_result.message, data=data)
+
+        if not allow_sensitive:
             task = (
                 f"{task}\n\n"
                 "安全约束：不要付款、下单、删除内容、发送消息、提交表单或确认敏感操作；"
@@ -111,10 +151,11 @@ class PhoneTaskSkill(Skill):
             max_steps=int(max_steps) if max_steps is not None else None,
             device_id=device_id or None,
             timeout_s=float(timeout_s) if timeout_s is not None else None,
-            allow_sensitive=bool(params.get("allow_sensitive", False)),
+            allow_sensitive=allow_sensitive,
         )
 
         data = {
+            "backend": "open_autoglm",
             "status": result.status,
             "duration_s": result.duration_s,
             "returncode": result.returncode,
@@ -122,28 +163,43 @@ class PhoneTaskSkill(Skill):
             "stdout_tail": _tail(result.stdout),
             "stderr_tail": _tail(result.stderr),
         }
-        should_verify = bool(params.get("verify_result", self._config.verify_result)) and self._config.verify_result
-        if should_verify:
-            observation = capture_phone_observation(
-                task=original_task,
-                device_id=device_id,
-                device_type=self._config.device_type,
-                adb_path=self._config.adb_path,
-                artifact_dir=self._config.artifact_dir,
-            )
-            verification = verify_phone_task_result(original_task, observation)
-            data["observation"] = observation.to_dict()
-            data["verification"] = verification
-            if result.ok and not verification.get("ok", False):
-                return SkillResult(
-                    status="error",
-                    message=f"phone task finished but result verification failed: {verification.get('reasons')}",
-                    data=data,
-                )
+        verified = self._maybe_capture_verification(params, original_task, device_id, data, require_ok=result.ok)
+        if verified is not None:
+            return verified
 
         if result.ok:
             return SkillResult(status="ok", data=data)
         return SkillResult(status="error", message=result.error or result.status, data=data)
+
+    def _maybe_capture_verification(
+        self,
+        params: dict[str, Any],
+        original_task: str,
+        device_id: str,
+        data: dict[str, Any],
+        *,
+        require_ok: bool = True,
+    ) -> SkillResult | None:
+        should_verify = bool(params.get("verify_result", self._config.verify_result)) and self._config.verify_result
+        if not should_verify:
+            return None
+        observation = capture_phone_observation(
+            task=original_task,
+            device_id=device_id,
+            device_type=self._config.device_type,
+            adb_path=self._config.adb_path,
+            artifact_dir=self._config.artifact_dir,
+        )
+        verification = verify_phone_task_result(original_task, observation)
+        data["observation"] = observation.to_dict()
+        data["verification"] = verification
+        if require_ok and not verification.get("ok", False):
+            return SkillResult(
+                status="error",
+                message=f"phone task finished but result verification failed: {verification.get('reasons')}",
+                data=data,
+            )
+        return None
 
     def _switch_companion_camera(self, facing: str) -> SkillResult:
         base_url = _companion_base_url(self._camera_config.port)

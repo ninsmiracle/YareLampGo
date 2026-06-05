@@ -72,7 +72,7 @@ def test_mimo_provider_post_enables_web_search_by_default(monkeypatch, tmp_path)
                 "validate": False,
                 "provider": "mimo",
                 "api_base": "https://api.mimomimo.com/v1",
-                "model": "mimo-v2.5",
+                "model": "mimo-v2.5-pro",
                 "fast_model": "mimo-v2.5",
                 "message_type": "openai",
             },
@@ -171,7 +171,7 @@ def test_web_search_subset_post_preserves_main_llm_fields(monkeypatch, tmp_path)
     server.config.llm.provider = "mimo"
     server.config.llm.message_type = "anthropic"
     server.config.llm.api_base = "https://api.mimomimo.com/anthropic/v1"
-    server.config.llm.model = "mimo-v2.5"
+    server.config.llm.model = "mimo-v2.5-pro"
     server.config.llm.fast_model = "mimo-v2.5"
     server.config.llm.api_key = "existing-test-key"
     monkeypatch.setattr(server, "reload_llm_client", lambda: None)
@@ -200,7 +200,7 @@ def test_web_search_subset_post_preserves_main_llm_fields(monkeypatch, tmp_path)
     assert server.config.llm.provider == "mimo"
     assert server.config.llm.message_type == "anthropic"
     assert server.config.llm.api_base == "https://api.mimomimo.com/anthropic/v1"
-    assert server.config.llm.model == "mimo-v2.5"
+    assert server.config.llm.model == "mimo-v2.5-pro"
     assert server.config.llm.fast_model == "mimo-v2.5"
     assert server.config.llm.api_key == "existing-test-key"
 

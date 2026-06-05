@@ -107,6 +107,8 @@ def _coerce_value(current: Any, value: Any) -> Any:
         return current
     if isinstance(current, str):
         return "" if value is None else str(value)
+    if isinstance(current, Path):
+        return Path("" if value is None else str(value))
     return value
 
 
@@ -212,6 +214,7 @@ class WebGateway:
             Route("/api/config/safety", self.api_config_safety, methods=["POST"]),
             Route("/api/config/web", self.api_config_web, methods=["POST"]),
             Route("/api/config/device_esp32", self.api_config_device_esp32, methods=["POST"]),
+            Route("/api/config/phone_agent", self.api_config_phone_agent, methods=["POST"]),
             Route("/api/config/detect", self.api_config_detect, methods=["POST"]),
             Route("/api/config/restart", self.api_config_restart, methods=["POST"]),
             Route("/api/config/llm", self.api_config_llm, methods=["GET", "POST"]),
@@ -1184,7 +1187,7 @@ class WebGateway:
             # MiMo 在两个独立端点上分别暴露两种协议：
             #   OpenAI   : https://api.mimomimo.com/v1/chat/completions
             #   Anthropic: https://api.mimomimo.com/anthropic/v1/messages
-            # 鉴权：官方 curl 用 `api-key` 头；社区 SDK 文档里又有 `Bearer`。
+            # 鉴权：官方 curl 用 `api-key` 头，也支持 OpenAI-compatible Bearer。
             # 我们在 Anthropic 路径上把 x-api-key / api-key / Bearer 三个
             # 一起发，所以同一把 key 两个端点都能通。
             "api_urls": {
@@ -1192,10 +1195,9 @@ class WebGateway:
                 "anthropic": "https://api.mimomimo.com/anthropic/v1",
             },
             "default_message_type": "openai",
-            # mimo-v2.5：通用新一代模型，同时作为 agent 主模型和 fast_model（摘要/意图）。
-            # 如需分工：主模型可选 mimo-v2-omni（强推理），fast_model 建议保持非推理模型
-            # （mimo-v2.5 / mimo-v2-pro），避免推理模型把预算花在思考链上导致空返。
-            "default_model": "mimo-v2.5",
+            # mimo-v2.5-pro：官方 OpenAI-compatible 文档示例模型，适合 agent / tool calling。
+            # fast_model 使用 mimo-v2.5，兼顾快速摘要/意图判断和多模态能力。
+            "default_model": "mimo-v2.5-pro",
             "default_fast_model": "mimo-v2.5",
             # legacy mirrors (see comment above)
             "base_url": "https://api.mimomimo.com/v1",
@@ -1305,6 +1307,7 @@ class WebGateway:
             "web.host",
             "web.port",
             "socket_path",
+            "phone_agent.enabled",
         }
     )
 
@@ -1379,6 +1382,22 @@ class WebGateway:
             "device_esp32.mic_enabled",
             "device_esp32.http_timeout_s",
         ),
+        "phone_agent": (
+            "phone_agent.enabled",
+            "phone_agent.python_executable",
+            "phone_agent.adb_path",
+            "phone_agent.device_type",
+            "phone_agent.device_id",
+            "phone_agent.wda_url",
+            "phone_agent.lang",
+            "phone_agent.skip_model_check",
+            "phone_agent.verify_result",
+            "phone_agent.artifact_dir",
+            "phone_agent.auto_install_adb_keyboard",
+            "phone_agent.direct_control_enabled",
+            "phone_agent.default_max_steps",
+            "phone_agent.timeout_s",
+        ),
     }
 
     def _dump_section(self, section_fields: tuple[str, ...], provenance: dict[str, str]) -> dict[str, Any]:
@@ -1392,6 +1411,8 @@ class WebGateway:
                 value = obj
             else:
                 value = getattr(obj, tail, None) if obj is not None else None
+            if isinstance(value, Path):
+                value = str(value)
             if dotted in _SENSITIVE_CONFIG_FIELDS and value:
                 from lampgo import personastore
 
@@ -1651,6 +1672,9 @@ class WebGateway:
         except Exception:
             logger.exception("web.device_esp32_toggle_failed")
         return response
+
+    async def api_config_phone_agent(self, request: Request) -> JSONResponse:
+        return await self._save_section(request, "phone_agent")
 
     async def api_config_detect(self, request: Request) -> JSONResponse:
         """Run hardware autodetect on demand (used by the 硬件 tab button)."""

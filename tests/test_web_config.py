@@ -4,7 +4,7 @@ from __future__ import annotations
 from starlette.testclient import TestClient
 
 from lampgo import personastore
-from lampgo.core.config import DeviceConfig, LampgoConfig
+from lampgo.core.config import DeviceConfig, LampgoConfig, PhoneAgentConfig, load_config_with_provenance
 from lampgo.server import LampgoServer
 from lampgo.web.gateway import WebGateway
 
@@ -45,7 +45,15 @@ def test_api_config_get_returns_sections_and_provenance(monkeypatch, tmp_path):
     body = response.json()
     assert body["ok"] is True
     result = body["result"]
-    assert set(result["sections"].keys()) == {"device", "voice", "motion", "safety", "web", "device_esp32"}
+    assert set(result["sections"].keys()) == {
+        "device",
+        "voice",
+        "motion",
+        "safety",
+        "web",
+        "device_esp32",
+        "phone_agent",
+    }
     device = result["sections"]["device"]
     assert "device.motor_port" in device
     cell = device["device.motor_port"]
@@ -56,6 +64,7 @@ def test_api_config_get_returns_sections_and_provenance(monkeypatch, tmp_path):
     assert "cold_restart_fields" in result
     assert "device.motor_port" not in result["cold_restart_fields"]
     assert "device.led_port" not in device
+    assert result["sections"]["phone_agent"]["phone_agent.enabled"]["value"] is False
 
 
 def test_api_config_post_motion_writes_overrides_and_hot_applies(monkeypatch, tmp_path):
@@ -148,6 +157,37 @@ def test_api_config_post_device_bare_field_name_is_accepted(monkeypatch, tmp_pat
     assert gateway.server.config.device.lamp_id == "AL42"
 
 
+def test_api_config_post_phone_agent_writes_overrides(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/config/phone_agent",
+            json={
+                "enabled": True,
+                "device_id": "usb-device-1",
+                "direct_control_enabled": False,
+                "default_max_steps": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    result = body["result"]
+    assert result["saved"] == [
+        "phone_agent.default_max_steps",
+        "phone_agent.device_id",
+        "phone_agent.direct_control_enabled",
+        "phone_agent.enabled",
+    ]
+    assert result["needs_restart"] == ["phone_agent.enabled"]
+    assert gateway.server.config.phone_agent.enabled is True
+    assert gateway.server.config.phone_agent.device_id == "usb-device-1"
+    assert gateway.server.config.phone_agent.direct_control_enabled is False
+    assert gateway.server.config.phone_agent.default_max_steps == 4
+
+
 def test_api_config_post_rejects_unknown_fields(monkeypatch, tmp_path):
     gateway = _make_gateway(monkeypatch, tmp_path)
 
@@ -187,3 +227,37 @@ def test_api_config_env_override_reported_in_provenance(monkeypatch, tmp_path):
     safety = body["result"]["sections"]["safety"]
     assert safety["safety.max_velocity"]["source"] == "env"
     assert "safety.max_velocity" in body["result"]["env_overrides"]
+
+
+def test_phone_agent_env_overrides_are_loaded(monkeypatch, tmp_path):
+    _isolate_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAMPGO_PHONE_ENABLED", "true")
+    monkeypatch.setenv("LAMPGO_PHONE_ADB", "/tmp/fake-adb")
+    monkeypatch.setenv("LAMPGO_PHONE_DEVICE_ID", "usb-device-1")
+    monkeypatch.setenv("LAMPGO_PHONE_DIRECT_CONTROL_ENABLED", "false")
+    monkeypatch.setenv("LAMPGO_PHONE_MAX_STEPS", "3")
+
+    config, provenance = load_config_with_provenance()
+
+    assert config.phone_agent.enabled is True
+    assert config.phone_agent.adb_path == "/tmp/fake-adb"
+    assert config.phone_agent.device_id == "usb-device-1"
+    assert config.phone_agent.direct_control_enabled is False
+    assert config.phone_agent.default_max_steps == 3
+    assert provenance["phone_agent.enabled"] == "env"
+    assert provenance["phone_agent.adb_path"] == "env"
+    assert provenance["phone_agent.device_id"] == "env"
+    assert provenance["phone_agent.direct_control_enabled"] == "env"
+
+
+def test_phone_task_is_registered_when_enabled():
+    server = LampgoServer(
+        LampgoConfig(
+            device=DeviceConfig(motor_port="/dev/null"),
+            phone_agent=PhoneAgentConfig(enabled=True),
+        )
+    )
+
+    server._register_builtin_skills()
+
+    assert "phone_task" in server.registry.list_ids()

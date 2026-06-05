@@ -62,6 +62,23 @@ web_search_city = ""
 [camera]
 port = ""                      # USB 摄像头索引（0 / 1）；留空 = 不附带图像给 LLM
 
+[phone_agent]
+enabled = false                # true = 注册 phone_task 技能，通过内置 Open-AutoGLM 控制手机
+python_executable = ""         # 留空时使用当前 lampgo Python；高级用法可指定其它 Python
+adb_path = ""                  # adb 可执行文件路径；留空时自动从 PATH / Android SDK 常见目录查找
+device_type = "adb"            # adb / hdc / ios
+device_id = ""                 # adb devices -l / hdc list targets / iOS UDID 中看到的设备 ID
+wda_url = "http://localhost:8100"  # iOS WebDriverAgent URL，仅 device_type=ios 时使用
+lang = "cn"                    # Open-AutoGLM 提示语言：cn / en
+# 模型地址、模型名和 API key 统一使用 [llm].api_base / [llm].model / credentials 中的 llm_api_key
+skip_model_check = true        # true = 跳过 Open-AutoGLM 每次任务前的模型 API 健康检查
+verify_result = true           # true = 每次 phone_task 结束后截图并做轻量结果校验
+artifact_dir = ".lampgo/phone-artifacts"  # 最终截图与 UIAutomator XML 保存目录
+auto_install_adb_keyboard = true  # adb 模式下自动安装/启用随 lampgo 打包的 ADBKeyboard.apk
+direct_control_enabled = true  # true = 简单任务先走 adb 直控（打开 App/返回/Home/点击文本/输入等），再回退 GUI agent
+default_max_steps = 10
+timeout_s = 300
+
 [voice]
 stt_provider = "volcengine"    # 语音转文字: volcengine
 stt_model = "bigmodel"

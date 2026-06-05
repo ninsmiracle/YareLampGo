@@ -23,12 +23,17 @@ from __future__ import annotations
 
 import json
 
-from lampgo.core.config import LLMConfig
+import pytest
+
+from lampgo.core.config import CameraConfig, LLMConfig
 from lampgo.perception import anthropic_adapter as A
 from lampgo.perception.llm_client import (
     MIMO_WEB_SEARCH_BASE_URL,
     MIMO_WEB_SEARCH_MODEL,
+    LLMClient,
     _build_agent_tools,
+    _dedupe_spoken_texts,
+    _is_phone_camera_switch_result,
     _resolve_web_search_api_key,
 )
 
@@ -60,6 +65,71 @@ def _tool_names(tools: list[dict]) -> list[str]:
 
 def _anthropic_tool_names(tools: list[dict]) -> list[str]:
     return [t["name"] for t in tools]
+
+
+def test_phone_camera_switch_tool_result_detection() -> None:
+    assert _is_phone_camera_switch_result(
+        {
+            "status": "ok",
+            "result": {
+                "action": "phone_camera_switch",
+                "requested_facing": "front",
+            },
+        }
+    )
+    assert not _is_phone_camera_switch_result({"status": "error", "result": {"action": "phone_camera_switch"}})
+    assert not _is_phone_camera_switch_result({"status": "ok", "result": {"action": "phone_ui_task"}})
+
+
+def test_dedupe_spoken_texts_ignores_spacing_and_punctuation() -> None:
+    assert _dedupe_spoken_texts(
+        [
+            "我看到天花板啦！有一个绿色的安全出口标志～",
+            "我看到天花板啦，有一个绿色的安全出口标志",
+            "好啦～",
+        ]
+    ) == [
+        "我看到天花板啦！有一个绿色的安全出口标志～",
+        "好啦～",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_phone_camera_switch_appends_fresh_camera_message(monkeypatch) -> None:
+    async def fake_sleep(delay: float) -> None:
+        assert delay == 1.0
+
+    class FakeCamera:
+        enabled = True
+
+        def capture_data_url(self) -> str:
+            return "data:image/jpeg;base64,abc123"
+
+    monkeypatch.setattr("lampgo.perception.llm_client.asyncio.sleep", fake_sleep)
+    client = LLMClient(_base_cfg(), [], CameraConfig(port="http://127.0.0.1:18765/snapshot.jpg"))
+    client._camera = FakeCamera()
+    messages: list[dict] = []
+
+    appended = await client._maybe_append_phone_camera_update(
+        messages,
+        {
+            "status": "ok",
+            "result": {
+                "action": "phone_camera_switch",
+                "requested_facing": "front",
+                "health": {"active_facing": "front"},
+            },
+        },
+    )
+
+    assert appended is True
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"][0]["type"] == "text"
+    assert "front-facing phone camera" in messages[0]["content"][0]["text"]
+    assert messages[0]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,abc123"},
+    }
 
 
 def _build_conversation_messages() -> list[dict]:

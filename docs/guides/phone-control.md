@@ -13,7 +13,8 @@ cd <lampgo 仓库目录>
 
 $env:PYTHONIOENCODING="utf-8"
 $env:LAMPGO_LLM_API_BASE="https://api.mimomimo.com/v1"
-$env:LAMPGO_LLM_MODEL="mimo-v2.5"
+$env:LAMPGO_LLM_MODEL="mimo-v2.5-pro"
+$env:LAMPGO_LLM_FAST_MODEL="mimo-v2.5"
 $env:LAMPGO_LLM_PROVIDER="mimo"
 $env:LAMPGO_LLM_MESSAGE_TYPE="openai"
 $env:LAMPGO_LLM_API_KEY="sk-..."
@@ -25,6 +26,7 @@ $env:LAMPGO_PHONE_SKIP_MODEL_CHECK="true"
 $env:LAMPGO_PHONE_VERIFY_RESULT="true"
 $env:LAMPGO_PHONE_ARTIFACT_DIR=".lampgo\phone-artifacts"
 $env:LAMPGO_PHONE_AUTO_INSTALL_ADB_KEYBOARD="true"
+$env:LAMPGO_PHONE_DIRECT_CONTROL_ENABLED="true"
 
 uv run lampgo run --web
 ```
@@ -37,7 +39,20 @@ uv run lampgo run --web
 ## 直接调用
 
 ```powershell
-uv run lampgo invoke phone_task task="请打开系统设置应用。优先使用 Launch 操作，app 参数使用 Settings。如果已经打开设置，请 finish。" max_steps=2
+uv run lampgo invoke phone_task task="请打开系统设置应用" max_steps=2
+```
+
+ADB 模式默认启用“直接控制优先”：简单任务会绕过模型和 GUI 视觉推理，直接调用系统底层工具完成，例如：
+
+- 打开 App：`adb shell monkey -p <package> ...`
+- 返回 / Home / 回车：`adb shell input keyevent ...`
+- 点击坐标或可访问性树中的文本：`adb shell input tap ...`
+- 输入文本：优先用随包携带的 ADBKeyboard 广播，失败时可关闭自动键盘后使用 `adb shell input text`
+
+因此“打开设置”“回到桌面”“点击确定”“输入 xxx”这类单步动作会明显更快。复杂任务（例如打开 App 后继续搜索、浏览、判断页面内容）不会被直接控制误吞，会自动回退到 Open-AutoGLM GUI Agent。需要禁用快速路径时设置：
+
+```powershell
+$env:LAMPGO_PHONE_DIRECT_CONTROL_ENABLED="false"
 ```
 
 `phone_task` 会默认追加安全约束：不要付款、下单、删除、发送消息或提交敏感表单。确实需要做敏感动作时，必须显式传 `allow_sensitive=true`，并且建议在外层先向用户确认。
