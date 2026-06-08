@@ -31,6 +31,7 @@ Translation is being added gradually. Chinese is the default documentation langu
 | --- | --- |
 | [Architecture](architecture.md) | IntentRouter, SkillExecutor, MotionRuntime, SafetyKernel, and HAL layering. |
 | [Project Description](project_description.md) | Project background, capability boundary, and technical direction. |
+| [Roadmap](roadmap.en.md) | Replaceable head modules, algorithm extension points, and future community work. |
 | [Composed Skills](composed_skills.md) | User skill / composed skill data format and execution rules. |
 | [Hardware And Asset Scope](hardware-and-assets-scope.md) | License boundary for software, firmware, 3D visualization assets, community printable files, and supplier production materials. |
 | [Printable Structure Files](../assets/printable/README.en.md) | V1.0 STEP/STP appearance and structural files, preview images, and print plate images. |

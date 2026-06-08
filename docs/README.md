@@ -35,6 +35,7 @@
 | --- | --- |
 | [系统架构](architecture.md) | 理解 IntentRouter、SkillExecutor、MotionRuntime、SafetyKernel 和 HAL 分层。 |
 | [项目说明](project_description.md) | 阅读更完整的项目背景、能力边界和技术路线。 |
+| [未来方向](roadmap.md) | 了解可替换头部组件、算法扩展和后续社区共创方向。 |
 | [组合技能](composed_skills.md) | 查看用户技能/组合技能的数据结构和执行规则。 |
 | [硬件与资产开源范围](hardware-and-assets-scope.md) | 明确软件、固件、3D 可视化资产、社区打印件和供应商生产资料的许可证边界。 |
 | [结构件文件](../assets/printable/README.md) | 查看 V1.0 STEP/STP 外观结构件、预览图和打印摆盘图。 |

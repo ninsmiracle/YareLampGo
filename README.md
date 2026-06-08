@@ -12,9 +12,10 @@
   <img src="docs/images/readme/lampgo_dance.gif" alt="YareLampGo dance demo" width="360">
 </p>
 
-YareLampGo 的目标很简单：降低机械臂和具身智能的使用门槛，让没有技术背景的普通人也可以玩起来。
-过去这种 5 自由度机械臂更像实验室设备，普通人很难上手；
-YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 Agent 快速做出有趣的桌面互动。
+YareLampGo 的目标：
+降低机械臂和具身智能的使用门槛，让没有技术背景的普通人也可以玩起来。
+过去这种机械臂更像实验室设备，非技术背景的普通人很难上手；
+YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 AI Agent 快速做出有趣的桌面互动。
 
 仓库内的 `lampgo` 仍作为 **YareLampGo** 项目的内部简称，用于简化 Python 包名、CLI 命令、配置目录和 OpenClaw 插件标识使用。
 
@@ -171,6 +172,14 @@ flowchart LR
 
 所有动作最终都会经过 `MotionRuntime` 和 `SafetyKernel`，再写入真实硬件。更完整的模块说明见 [系统架构](docs/architecture.md)。
 
+<a id="positioning-and-boundary"></a>
+
+## 项目定位与边界
+
+YareLampGo 现在先做一件事：把桌面机械臂台灯变成一个好启动、好调试、好扩展的硬件入口。它不是 VLA / RL 论文复现仓库，也没有内置复杂训练流程。我们欢迎社区把数据采集、模仿学习、VLA、RL 或更严肃的机器人算法接进来；现有 Web、CLI、动作录制和硬件接口，就是给这些扩展留的。
+YareLampGo 是独立项目。电机控制链路用到 `lerobot[feetech]`，少量 HAL 集成工作受 LeLamp 启发；更具体的归属和许可边界见 [NOTICE](NOTICE)。
+后面我们也想把“灯头”做得更像可替换组件：磁吸或卡扣结构，头部不一定只能是灯，也可以是手机支架、小音箱，或者更多有意思的模块。更完整的想法放在 [未来方向](docs/roadmap.md)，也欢迎大家来一起玩儿，提供更多有意思的想法。
+
 <a id="documentation"></a>
 
 ## 文档
@@ -180,7 +189,7 @@ flowchart LR
 | 入门 | [文档中心](docs/README.md)、[快速上手](docs/getting-started/quick-start.md)、[配置说明](docs/getting-started/configuration.md) |
 | 使用指南 | [动作与表情](docs/guides/motion-and-expression.md)、[OpenClaw 集成](docs/guides/openclaw-integration.md) |
 | 硬件 | [硬件公开资料](docs/hardware/README.md)、[接线表](docs/hardware/wiring.md)、[结构件文件](assets/printable/README.md) |
-| 架构 | [系统架构](docs/architecture.md)、[项目说明](docs/project_description.md) |
+| 架构 | [系统架构](docs/architecture.md)、[项目说明](docs/project_description.md)、[未来方向](docs/roadmap.md) |
 | 开发 | [贡献指南](docs/development/contributing.md)、[示例代码](examples/) |
 
 <a id="openclaw-integration"></a>

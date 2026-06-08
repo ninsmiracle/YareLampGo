@@ -147,6 +147,14 @@ flowchart LR
 
 Every motion goes through `MotionRuntime` and `SafetyKernel` before it reaches physical hardware. See [Architecture](docs/architecture.md) for the detailed module guide.
 
+## Positioning And Boundaries
+
+YareLampGo is trying to do one thing first: make a desktop robotic lamp easy to start, debug, and extend. It is not a VLA / RL paper-reproduction repo, and it does not ship a complex training stack today. Contributions in data collection, imitation learning, VLA, RL, or more serious robotics algorithms are welcome; the Web UI, CLI, motion recording flow, and hardware APIs are meant to give those experiments somewhere practical to land.
+
+YareLampGo is an independent project. Its motor path uses `lerobot[feetech]`, and a small part of the HAL integration work is inspired by LeLamp. See [NOTICE](NOTICE) for the exact attribution and license boundary.
+
+We also want the lamp head to become more like a replaceable module over time: magnetic or snap-on, not only a lamp, but potentially a phone holder, small speaker, or airflow module that would need extra safety review. See [Roadmap](docs/roadmap.en.md) for the longer version.
+
 ## Documentation
 
 | Category | Docs |
@@ -154,7 +162,7 @@ Every motion goes through `MotionRuntime` and `SafetyKernel` before it reaches p
 | Start | [Docs index](docs/README.en.md), [Quick Start](docs/getting-started/quick-start.md), [Configuration](docs/getting-started/configuration.md) |
 | Guides | [Motion and Expression](docs/guides/motion-and-expression.md), [OpenClaw Integration](docs/guides/openclaw-integration.md) |
 | Hardware | [Public Hardware Docs](docs/hardware/README.en.md), [Wiring Table](docs/hardware/wiring.md), [Printable Structure Files](assets/printable/README.en.md) |
-| Architecture | [Architecture](docs/architecture.md), [Project Description](docs/project_description.md) |
+| Architecture | [Architecture](docs/architecture.md), [Project Description](docs/project_description.md), [Roadmap](docs/roadmap.en.md) |
 | Development | [Contributing](docs/development/contributing.md), [Examples](examples/) |
 
 ## OpenClaw Integration
