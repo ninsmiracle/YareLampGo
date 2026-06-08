@@ -4,9 +4,8 @@
 # Web UI 配置页自动写入/维护。本文件仅作为字段参考（可看字段名、默认值、注释）。
 #
 # 配置优先级（高 → 低）：
-#   CLI 参数  >  环境变量 (LAMPGO_*, 可写在 ./.env 里)
-#             >  ~/.lampgo/config.toml
-#             >  内置默认值
+#   CLI 参数 > Shell 环境变量 > 项目 .env > ~/.lampgo/credentials.json
+#            > ~/.lampgo/config.toml > 内置默认值
 #
 # 首次安装/迁移旧配置：`uv run lampgo onboard`
 
@@ -18,6 +17,8 @@ use_degrees = true             # true = 角度模式, false = 归一化 -100~100
 [motion]
 tick_rate_hz = 50.0            # 控制循环频率 (Hz)
 default_max_velocity = 120.0   # 默认最大速度 (度/秒)；仅作为弹簧频率的速度预算上限
+default_style = "gentle"       # 默认动作风格：gentle/confident/curious/bouncy/hesitant/linear
+default_playback_mode = "cleaned" # 默认回放模式：raw/cleaned/expressive
 idle_sway_enabled = true       # 空闲后是否自动触发出厂技能 idle_sway
 idle_sway_idle_after_s = 600.0 # 空闲多久后开始触发（默认 10 分钟）
 idle_sway_interval_s = 30.0    # 空闲后触发间隔基准
@@ -29,27 +30,29 @@ idle_sway_period_s = 4.5       # 摆动周期（秒）
 #     真正的硬加速度上限在下面的 [safety].max_acceleration。
 
 [safety]
-max_velocity = 180.0           # 安全速度硬上限 (度/秒)
+max_velocity = 120.0           # 安全速度硬上限 (度/秒)
 max_acceleration = 900.0       # 安全加速度硬上限 (度/秒²)
 
 [llm]
-provider = "openai"            # LLM 提供商: openai, anthropic, gemini, local
-model = "gpt-4o-mini"          # 复杂推理任务模型
-fast_model = "gpt-4o-mini"     # 快速意图分类模型
+provider = "mimo"              # LLM 提供商: mimo, openrouter, anthropic, openai, deepseek, google, ollama, custom
+message_type = "openai"        # 消息格式: openai(chat.completions) 或 anthropic(messages)
+api_base = "https://api.xiaomimimo.com/v1" # 自定义 API 地址；Web 内置 Provider 会自动填
+model = "mimo-v2.5"            # 主模型
+fast_model = "mimo-v2.5"       # 快速/摘要模型
 enable_thinking = false        # 默认是否开启思考模式（聊天界面不再单独选择）
-# api_key 不要写在这里！请用 .env 文件或环境变量 LAMPGO_LLM_API_KEY
-api_base = ""                  # 自定义 API 地址 (本地/代理模型)
+# api_key 不要写在这里！请用 Web 设置页写入 ~/.lampgo/credentials.json
 temperature = 0.3
 # 单轮 LLM 回复 token 上限（OpenAI: max_tokens；MiMo: max_completion_tokens）
-# 多轮工具调用建议 ≥ 2048；复杂长回复可到 8192
-max_tokens = 4096
+# 多轮工具调用建议 ≥ 2048；复杂长回复或推理模型需要更高预算
+max_tokens = 20000
 # 每日记忆 / 会话摘要任务专用预算。推理模型（mimo-v2-omni / o-系列 / deepseek-r1）
 # 会把预算花在思考链上，至少给 4096 才能稳定产出 bullet
-summary_max_tokens = 8192
+summary_max_tokens = 20000
 # 模型输入上下文窗口；目前仅作信息记录，将来用于历史消息自动裁剪
-# mimo-v2-pro/omni ≈ 128000、Claude Sonnet ≈ 200000、gpt-4o-mini ≈ 128000
-context_window = 128000
-timeout_s = 15.0
+# mimo-v2.5 ≈ 200000、Claude Sonnet ≈ 200000、gpt-4o-mini ≈ 128000
+context_window = 200000
+history_turns = 30             # 每次 LLM 请求附带的短期历史轮数；0 = 关闭
+timeout_s = 300.0
 web_search_enabled = true      # MiMo 支持时启用内置联网搜索
 web_search_force = false       # false = 模型自行判断是否联网
 web_search_limit = 3
@@ -60,7 +63,15 @@ web_search_region = ""
 web_search_city = ""
 
 [camera]
-port = ""                      # USB 摄像头索引（0 / 1）；留空 = 不附带图像给 LLM
+port = ""                      # USB 摄像头索引（0 / 1）；使用 ESP32 摄像头时通常留空
+
+[device_esp32]
+enabled = false                # 是否优先使用 ESP32 摄像头/麦克风/LED Wi-Fi 设备
+preferred_host = ""            # 留空自动发现；也可填 lampgo-cam-XXXX.local 或设备 IP
+jpeg_quality = 10              # ESP32 JPEG 画质，4=最高，63=最低
+framesize = 8                  # ESP32 分辨率枚举；8 = SVGA 800x600
+mic_enabled = false            # 是否启用 ESP32 麦克风音频流
+http_timeout_s = 5.0
 
 [voice]
 stt_provider = "volcengine"    # 语音转文字: volcengine
@@ -71,6 +82,8 @@ tts_voice = "zh_female_vv_uranus_bigtts"
 volcengine_app_id = ""         # 火山引擎 App ID；TTS 未配置时自动回退 edge-tts
 volcengine_access_token = ""   # 火山引擎 Access Token
 livekit_url = "https://rtc.yhaox.top" # 云端 LiveKit；SDK 内部会用云端鉴权取 token
-livekit_tts_voice = "zh_female_vv_uranus_bigtts"
 wake_word = ""                 # 唤醒词 (留空 = 禁用)
-vad_enabled = false            # 语音活动检测
+call_mode = "stable"           # stable / interruptible / esp32_aec
+echo_gate_hangover_ms = 1000
+echo_text_filter_enabled = true
+silence_timeout_s = 60

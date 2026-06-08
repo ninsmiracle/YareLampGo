@@ -2,10 +2,11 @@
 
 Config loading priority (highest wins):
   1. CLI arguments
-  2. Environment variables (LAMPGO_MOTOR_PORT, etc.)
-  3. .env file in project root (optional, advanced override only)
-  4. ~/.lampgo/config.toml (written by `lampgo onboard` + Web UI)
-  5. Built-in defaults
+  2. Shell environment variables (LAMPGO_MOTOR_PORT, etc.)
+  3. .env file in project root (loaded as environment variables)
+  4. ~/.lampgo/credentials.json (LLM API keys)
+  5. ~/.lampgo/config.toml (written by `lampgo onboard` + Web UI)
+  6. Built-in defaults
 
 Note: the legacy ``./lampgo.toml`` in the repo root is no longer read.
 Run ``lampgo onboard`` to migrate any values in it to ``~/.lampgo/config.toml``.
@@ -583,7 +584,7 @@ def load_config(
     env_file: str | Path | None = None,
     cli_overrides: dict | None = None,
 ) -> LampgoConfig:
-    """Load configuration with the priority chain: CLI > env > .env > user toml > defaults.
+    """Load configuration with the priority chain: CLI > env/.env > credentials > user toml > defaults.
 
     Args:
         config_path: Deprecated. Accepted for backwards compatibility but ignored;

@@ -105,9 +105,24 @@ uv run lampgo text "点个头"
 
 ## 连接真实硬件
 
-1. 接入电机总线和 LED 控制器。
-2. 执行 `uv run lampgo detect` 查看候选串口。
-3. 执行 `uv run lampgo onboard` 或在 Web 设置页写入串口。
+### 硬件配网
+
+首次使用 ESP32 LED 控制器、摄像头或麦克风时，需要先把硬件接入和电脑相同的局域网。设备暂不支持 5GHz Wi-Fi，建议准备 2.4GHz Wi-Fi，并确认电脑和硬件在配网过程中距离路由器较近。
+
+1. 给硬件通电，等待设备进入配网模式。如果是干净烧录或已清空旧 Wi-Fi，串口日志会出现 `SSID: Lampgo-Setup-XXXX`。
+2. 在电脑的 Wi-Fi 列表中找到 `Lampgo-Setup-XXXX` 设备热点，输入热点密码 `lampgo123` 并保持连接。系统如果提示“无互联网连接”，选择继续连接即可。
+3. 打开 YareLampGo Web 控制台，进入设置页的 ESP32 / 无线设备配网向导，点击“我已连上设备热点”。
+4. 在配网向导中选择要让台灯连接的 2.4GHz Wi-Fi，输入该 Wi-Fi 的密码，然后点击发送。
+5. 发送成功后等待设备重启。设备会关闭临时热点并连接目标 Wi-Fi，此时把电脑切回同一个 2.4GHz Wi-Fi。
+6. 等待 Web 控制台重新发现 `lampgo-cam-XXXX.local` 或设备 IP 后，再继续执行下面的软件配置步骤。
+
+> 配网页面截图、Wi-Fi 选择截图和连接成功截图可以后续补充到上述步骤之间。自动扫描失败时，可检查高级设置里的设备配网页地址是否为 `http://192.168.4.1`。
+
+### 接入 YareLampGo
+
+1. 接入电机总线。
+2. 执行 `uv run lampgo detect` 查看候选串口和网络设备。
+3. 执行 `uv run lampgo onboard` 或在 Web 设置页写入串口和 ESP32 设备信息。
 4. 首次使用新设备时执行 `uv run lampgo calibrate`。
 5. 启动 `uv run lampgo run --web`。
 
