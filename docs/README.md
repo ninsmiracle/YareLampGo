@@ -1,49 +1,61 @@
-# YareLampGo Docs
+# YareLampGo 文档中心
 
-English | [简体中文](README_zh.md)
+简体中文 | [English](README.en.md)
 
-This index collects public docs for open-source users. YareLampGo turns a robotic desk lamp from lab-style hardware into a desktop companion that developers, creators, and hobbyists can make listen, see, move, and respond.
+这里整理面向开源用户的中文文档。YareLampGo 想做的事很直接：把机械臂台灯从“实验室硬件”变成普通人也能玩起来的桌面小伙伴，让软件开发者、创作者和玩家都能更容易做出会听、会看、会动、会表达的桌面互动。
 
-The public project name is **YareLampGo**. The `lampgo` name remains the internal short name for the CLI command, Python package, config directory, and OpenClaw plugin identifiers.
+对外项目名称使用 **YareLampGo**；文档中的 `lampgo` 是内部简称、CLI 命令、包名、配置目录或 OpenClaw 插件标识。
 
-The root [README.md](../README.md) is the quick landing page. Longer setup, configuration, motion, OpenClaw, and development notes live under `docs/`.
+根目录 `README.md` / `README.en.md` 负责快速说明项目价值和启动方式；更长的安装、配置、动作、OpenClaw 和开发说明放在 `docs/` 下维护。
 
-Translation is being added gradually. The root README is bilingual now; deeper docs may still be Chinese until they are high enough priority to translate.
+<a id="getting-started"></a>
 
-## Getting Started
+## 入门
 
-| Doc | Use it for |
+| 文档 | 适合场景 |
 | --- | --- |
-| [Quick Start](getting-started/quick-start.md) | First install, Web UI launch, no-hardware mode, and real hardware startup. |
-| [Configuration](getting-started/configuration.md) | `~/.lampgo/config.toml`, environment variables, credentials, and common config fields. |
+| [快速上手](getting-started/quick-start.md) | 第一次安装、运行 Web UI、验证无硬件模式或连接真实台灯。 |
+| [配置说明](getting-started/configuration.md) | 理解 `~/.lampgo/config.toml`、环境变量、凭证和常见配置项。 |
 
-## Guides
+<a id="guides"></a>
 
-| Doc | Use it for |
+## 使用指南
+
+| 文档 | 适合场景 |
 | --- | --- |
-| [Motion and Expression](guides/motion-and-expression.md) | Built-in motions, CSV recording/playback, LED expressions, and composed skills. |
-| [OpenClaw Integration](guides/openclaw-integration.md) | Connect YareLampGo to OpenClaw so Agents can call lamp capabilities. |
-| [Public Hardware Docs](hardware/README.md) | Public component photos, wiring diagram, wiring table, and printable structure entry points. |
+| [动作与表情](guides/motion-and-expression.md) | 调用内置动作、录制回放 CSV、控制 LED 表情、制作组合技能。 |
+| [OpenClaw 集成](guides/openclaw-integration.md) | 将 YareLampGo 接入 OpenClaw，让 Agent 调用台灯能力。 |
+| [硬件公开资料](hardware/README.md) | 查看公开组件图、接线图、接线表和社区复刻结构件入口。 |
 
-## Architecture And Background
+<a id="architecture-and-background"></a>
 
-| Doc | Use it for |
+## 架构与背景
+
+| 文档 | 适合场景 |
 | --- | --- |
-| [Architecture](architecture.md) | IntentRouter, SkillExecutor, MotionRuntime, SafetyKernel, and HAL layering. |
-| [Project Description](project_description.md) | Project background, capability boundary, and technical direction. |
-| [Composed Skills](composed_skills.md) | User skill / composed skill data format and execution rules. |
-| [Hardware And Asset Scope](hardware-and-assets-scope.md) | License boundary for software, firmware, 3D visualization assets, community printable files, and supplier production materials. |
-| [Printable Structure Files](../assets/printable/README.md) | V1.0 STEP/STP appearance and structural files, preview images, and print plate images. |
+| [系统架构](architecture.md) | 理解 IntentRouter、SkillExecutor、MotionRuntime、SafetyKernel 和 HAL 分层。 |
+| [项目说明](project_description.md) | 阅读更完整的项目背景、能力边界和技术路线。 |
+| [组合技能](composed_skills.md) | 查看用户技能/组合技能的数据结构和执行规则。 |
+| [硬件与资产开源范围](hardware-and-assets-scope.md) | 明确软件、固件、3D 可视化资产、社区打印件和供应商生产资料的许可证边界。 |
+| [结构件文件](../assets/printable/README.md) | 查看 V1.0 STEP/STP 外观结构件、预览图和打印摆盘图。 |
 
-## Examples And References
+<a id="examples-and-references"></a>
 
-| Path | Contents |
+## 示例与参考
+
+| 路径 | 内容 |
 | --- | --- |
-| [`examples/basic_motion.py`](../examples/basic_motion.py) | Basic motion control example. |
-| [`examples/custom_skill.py`](../examples/custom_skill.py) | Custom skill example. |
-| [`examples/openclaw_integration.py`](../examples/openclaw_integration.py) | OpenClaw integration example. |
-| [`openclaw-skills/lampgo/references/`](../openclaw-skills/lampgo/references/) | Agent-readable joint, motion, LED, and API references. |
+| [`examples/basic_motion.py`](../examples/basic_motion.py) | 基础运动控制示例。 |
+| [`examples/custom_skill.py`](../examples/custom_skill.py) | 自定义技能示例。 |
+| [`examples/openclaw_integration.py`](../examples/openclaw_integration.py) | OpenClaw 集成示例。 |
+| [`openclaw-skills/lampgo/references/`](../openclaw-skills/lampgo/references/) | Agent 可读的关节、动作、LED 和 API 参考。 |
 
-## Translation Policy
+<a id="translation-policy"></a>
 
-The root README is maintained in English and Chinese. Key onboarding docs should be kept bilingual when possible; deeper design notes can stay in one language until there is enough demand. When changing a bilingual doc, mention in the PR whether the matching translation was updated or is pending.
+## 双语维护
+
+- 默认 `README.md` 使用中文。
+- 英文入口使用同目录的 `README.en.md`。
+- 关键上手文档优先逐步补齐双语；更深的架构、硬件边界和开发记录可以先单语维护。
+- 修改双语文档时，请在 PR 中说明另一语言是否已同步；如果暂未同步，明确标记为待补。
+- 内部材料、商业 briefing、未公开规划、私有 token、内部服务地址和未授权素材不要从公开文档链接。

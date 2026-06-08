@@ -53,5 +53,5 @@ uv run lampgo run --web --no-hw
 - 根 README 保持短、清晰、适合第一次访问仓库的人阅读。
 - 长教程放入 `docs/getting-started/` 或 `docs/guides/`。
 - 架构细节放入 `docs/architecture.md` 或独立架构文档。
-- 根 README 需要同步维护英文 `README.md` 和中文 `README.zh-CN.md`；修改双语文档时，请在 PR 中说明另一语言是否已同步。
+- 默认 `README.md` 使用中文，英文入口使用同目录的 `README.en.md`；修改双语文档时，请在 PR 中说明另一语言是否已同步。
 - 内部材料、商业 briefing 和未公开规划不要从公开文档链接。

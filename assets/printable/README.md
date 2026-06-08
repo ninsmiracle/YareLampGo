@@ -1,43 +1,37 @@
-# Printable Appearance And Structural Files
+# 可打印外观和结构件
 
-This folder contains the public YareLampGo V1.0 appearance and structural files
-for community review, remixing, and reproduction.
+简体中文 | [English](README.en.md)
 
-## Preview Images
+本目录包含 YareLampGo V1.0 面向社区公开的外观和结构件文件，方便社区查看、改造和复刻。
 
-| File | Purpose |
+## 预览图
+
+| 文件 | 说明 |
 | --- | --- |
-| `structure-front.jpeg` | Front structural preview. |
-| `structure-side.jpeg` | Side structural preview. |
-| `print-plate-01.png` | Print plate / layout preview. |
-| `print-plate-02.png` | Print plate / layout preview. |
+| `structure-front.jpeg` | 正面结构预览。 |
+| `structure-side.jpeg` | 侧面结构预览。 |
+| `print-plate-01.png` | 打印摆盘 / 布局预览。 |
+| `print-plate-02.png` | 打印摆盘 / 布局预览。 |
 
-## V1.0 STEP/STP Package
+## V1.0 STEP/STP 文件包
 
-The public V1.0 appearance and structural source package is in
-`YareLampGo_V1.0/`:
+公开的 V1.0 外观和结构源文件位于 `YareLampGo_V1.0/`：
 
-| File | Purpose |
+| 文件 | 说明 |
 | --- | --- |
-| `YareLampGo_V1.0/lampgo-0527.stp` | Public assembly/reference source file. |
-| `YareLampGo_V1.0/卡口1.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/卡口2.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/底座.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/底座盖板.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/灯头.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/灯罩.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/盖板.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/连杆1.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/连杆2.STEP` | Printable structural part. |
+| `YareLampGo_V1.0/lampgo-0527.stp` | 公开装配 / 参考源文件。 |
+| `YareLampGo_V1.0/卡口1.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/卡口2.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/底座.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/底座盖板.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/灯头.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/灯罩.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/盖板.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/连杆1.STEP` | 可打印结构件。 |
+| `YareLampGo_V1.0/连杆2.STEP` | 可打印结构件。 |
 
-## License And Boundary
+## 许可和边界
 
-These public STEP/STP files and preview images are published as the community
-printable/open-hardware appearance and structural package under
-`CERN-OHL-W-2.0`, unless a local notice says otherwise. See
-`../../ASSET_LICENSES.md` for the repository-level asset license table.
+除非本地文件另有说明，这些公开 STEP/STP 文件和预览图作为社区可打印 / 开源硬件外观结构件包发布，默认使用 `CERN-OHL-W-2.0`。仓库级资产授权表见 [ASSET_LICENSES.md](../../ASSET_LICENSES.md)。
 
-This package is not a supplier production drawing set and does not include
-private manufacturing process files, quotations, tooling documents, or factory
-part numbers. Confirm dimensions, units, tolerances, print orientation, and
-material choice before manufacturing or printing.
+本文件包不是供应商量产图纸集，不包含私有工艺文件、报价、模具文件或工厂料号。制造或打印前，请自行确认尺寸、单位、公差、打印方向和材料选择。
