@@ -71,7 +71,7 @@ def test_mimo_provider_post_enables_web_search_by_default(monkeypatch, tmp_path)
             json={
                 "validate": False,
                 "provider": "mimo",
-                "api_base": "https://api.mimomimo.com/v1",
+                "api_base": "https://api.xiaomimimo.com/v1",
                 "model": "mimo-v2.5",
                 "fast_model": "mimo-v2.5",
                 "message_type": "openai",
@@ -124,8 +124,8 @@ def test_provider_presets_expose_per_format_base_urls(monkeypatch, tmp_path):
 
     mimo = presets["mimo"]
     # Both endpoints are listed (this is the whole point of the schema).
-    assert mimo["api_urls"]["openai"] == "https://api.mimomimo.com/v1"
-    assert mimo["api_urls"]["anthropic"] == "https://api.mimomimo.com/anthropic/v1"
+    assert mimo["api_urls"]["openai"] == "https://api.xiaomimimo.com/v1"
+    assert mimo["api_urls"]["anthropic"] == "https://api.xiaomimimo.com/anthropic/v1"
     assert mimo["default_message_type"] == "openai"
     # Legacy mirror kept for older callers that still read base_url.
     assert mimo["base_url"] == mimo["api_urls"]["openai"]
@@ -170,7 +170,7 @@ def test_web_search_subset_post_preserves_main_llm_fields(monkeypatch, tmp_path)
     # Simulate a user already on MiMo Anthropic.
     server.config.llm.provider = "mimo"
     server.config.llm.message_type = "anthropic"
-    server.config.llm.api_base = "https://api.mimomimo.com/anthropic/v1"
+    server.config.llm.api_base = "https://api.xiaomimimo.com/anthropic/v1"
     server.config.llm.model = "mimo-v2.5"
     server.config.llm.fast_model = "mimo-v2.5"
     server.config.llm.api_key = "existing-test-key"
@@ -199,7 +199,7 @@ def test_web_search_subset_post_preserves_main_llm_fields(monkeypatch, tmp_path)
     # Main LLM fields must be untouched.
     assert server.config.llm.provider == "mimo"
     assert server.config.llm.message_type == "anthropic"
-    assert server.config.llm.api_base == "https://api.mimomimo.com/anthropic/v1"
+    assert server.config.llm.api_base == "https://api.xiaomimimo.com/anthropic/v1"
     assert server.config.llm.model == "mimo-v2.5"
     assert server.config.llm.fast_model == "mimo-v2.5"
     assert server.config.llm.api_key == "existing-test-key"

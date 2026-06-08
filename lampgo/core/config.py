@@ -307,7 +307,7 @@ class LLMConfig(BaseModel):
     #   is already known to be a MiMo key).  For any other provider the
     #   user must supply a dedicated MiMo key or the feature stays off.
     # * The base URL and model are deliberately **not** user-configurable:
-    #   the endpoint is fixed at ``https://api.mimomimo.com/v1`` and the
+    #   the endpoint is fixed at ``https://api.xiaomimimo.com/v1`` and the
     #   model at ``mimo-v2.5-pro`` (see ``MIMO_WEB_SEARCH_BASE_URL`` /
     #   ``MIMO_WEB_SEARCH_MODEL`` in :mod:`lampgo.perception.llm_client`).
     #   Exposing them as settings would invite users to break the feature

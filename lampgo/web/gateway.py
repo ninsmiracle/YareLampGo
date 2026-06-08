@@ -1182,14 +1182,14 @@ class WebGateway:
         "mimo": {
             "label": "MiMo",
             # MiMo 在两个独立端点上分别暴露两种协议：
-            #   OpenAI   : https://api.mimomimo.com/v1/chat/completions
-            #   Anthropic: https://api.mimomimo.com/anthropic/v1/messages
+            #   OpenAI   : https://api.xiaomimimo.com/v1/chat/completions
+            #   Anthropic: https://api.xiaomimimo.com/anthropic/v1/messages
             # 鉴权：官方 curl 用 `api-key` 头；社区 SDK 文档里又有 `Bearer`。
             # 我们在 Anthropic 路径上把 x-api-key / api-key / Bearer 三个
             # 一起发，所以同一把 key 两个端点都能通。
             "api_urls": {
-                "openai": "https://api.mimomimo.com/v1",
-                "anthropic": "https://api.mimomimo.com/anthropic/v1",
+                "openai": "https://api.xiaomimimo.com/v1",
+                "anthropic": "https://api.xiaomimimo.com/anthropic/v1",
             },
             "default_message_type": "openai",
             # mimo-v2.5：通用新一代模型，同时作为 agent 主模型和 fast_model（摘要/意图）。
@@ -1198,7 +1198,7 @@ class WebGateway:
             "default_model": "mimo-v2.5",
             "default_fast_model": "mimo-v2.5",
             # legacy mirrors (see comment above)
-            "base_url": "https://api.mimomimo.com/v1",
+            "base_url": "https://api.xiaomimimo.com/v1",
             "message_type": "openai",
         },
         "openrouter": {

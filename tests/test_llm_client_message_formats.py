@@ -197,7 +197,7 @@ def test_web_search_sub_service_endpoint_is_hardcoded() -> None:
     """The whole point of the sub-service: endpoint + model are NOT
     user-configurable. Guard against someone accidentally making them so.
     """
-    assert MIMO_WEB_SEARCH_BASE_URL == "https://api.mimomimo.com/v1"
+    assert MIMO_WEB_SEARCH_BASE_URL == "https://api.xiaomimimo.com/v1"
     assert MIMO_WEB_SEARCH_MODEL == "mimo-v2.5-pro"
 
 

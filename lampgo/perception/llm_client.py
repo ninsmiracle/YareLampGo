@@ -35,7 +35,7 @@ MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash", "mimo-
 # exists on this specific surface, the endpoint + model are hard-coded here
 # (same rationale as the TTS module).  See ``LLMConfig.web_search_*`` in
 # ``lampgo.core.config`` for the full design note.
-MIMO_WEB_SEARCH_BASE_URL = "https://api.mimomimo.com/v1"
+MIMO_WEB_SEARCH_BASE_URL = "https://api.xiaomimimo.com/v1"
 MIMO_WEB_SEARCH_MODEL = "mimo-v2.5-pro"
 
 
@@ -45,7 +45,7 @@ def _resolve_web_search_api_key(config: LLMConfig) -> str:
     Priority:
       1. ``web_search_api_key`` if the user filled it in explicitly.
       2. ``api_key`` ONLY if ``provider == "mimo"`` (same key is known to
-         authenticate against ``api.mimomimo.com``).
+         authenticate against ``api.xiaomimimo.com``).
       3. Empty string → sub-service disabled (tool won't be registered).
 
     Keeping this a free function makes it easy to unit-test in isolation

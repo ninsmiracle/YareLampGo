@@ -151,13 +151,13 @@ PROVIDER_PRESETS: dict[str, dict[str, object]] = {
     "mimo": {
         "label": "MiMo",
         "api_urls": {
-            "openai": "https://api.mimomimo.com/v1",
-            "anthropic": "https://api.mimomimo.com/anthropic/v1",
+            "openai": "https://api.xiaomimimo.com/v1",
+            "anthropic": "https://api.xiaomimimo.com/anthropic/v1",
         },
         "default_message_type": "openai",
         "default_model": "mimo-v2.5",
         "default_fast_model": "mimo-v2.5",
-        "base_url": "https://api.mimomimo.com/v1",
+        "base_url": "https://api.xiaomimimo.com/v1",
         "message_type": "openai",
     },
     "openrouter": {
