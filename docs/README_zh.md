@@ -1,10 +1,12 @@
 # YareLampGo 文档中心
 
+简体中文 | [English](README.md)
+
 这里整理面向开源用户的中文文档。YareLampGo 想做的事很直接：把机械臂台灯从“实验室硬件”变成普通人也能玩起来的桌面小伙伴，让软件开发者、创作者和玩家都能更容易做出会听、会看、会动、会表达的桌面互动。
 
 对外项目名称使用 **YareLampGo**；文档中的 `lampgo` 是内部简称、CLI 命令、包名、配置目录或 OpenClaw 插件标识。
 
-根目录 `README.md` 负责快速说明项目价值和启动方式；更长的安装、配置、动作、OpenClaw 和开发说明放在 `docs/` 下维护。
+根目录 `README.md` / `README.zh-CN.md` 负责快速说明项目价值和启动方式；更长的安装、配置、动作、OpenClaw 和开发说明放在 `docs/` 下维护。
 
 ## 入门
 
@@ -40,10 +42,9 @@
 | [`examples/openclaw_integration.py`](../examples/openclaw_integration.py) | OpenClaw 集成示例。 |
 | [`openclaw-skills/lampgo/references/`](../openclaw-skills/lampgo/references/) | Agent 可读的关节、动作、LED 和 API 参考。 |
 
-## 开源前检查
+## 双语维护
 
-- 根 README 只链接适合公开发布的文档。
-- 内部介绍、商业 briefing 和未公开规划不随开源仓库发布。
-- 不提交 `.env`、`~/.lampgo/credentials.json`、私有模型 key、内部服务地址或未授权媒体素材。
-- 确认 `pyproject.toml` 中的私有包源和可选依赖是否需要替换为公开可安装方案。
-- 确认硬件、外观、3D 打印、运行时 3D 模型和供应商生产资料的公开边界。
+- 根 README 保持中英文双语：`README.md` 为英文入口，`README.zh-CN.md` 为中文入口。
+- 关键上手文档优先逐步补齐双语；更深的架构、硬件边界和开发记录可以先单语维护。
+- 修改双语文档时，请在 PR 中说明另一语言是否已同步；如果暂未同步，明确标记为待补。
+- 内部材料、商业 briefing、未公开规划、私有 token、内部服务地址和未授权素材不要从公开文档链接。
