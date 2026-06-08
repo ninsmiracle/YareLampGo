@@ -40,7 +40,7 @@ bridge = [
 ]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.4",
 ]
 
@@ -50,7 +50,7 @@ lampgo = "lampgo.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.4",
 ]
 
