@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "zh-CN"
+tone_instructions: "保持简洁、具体，优先指出真实 bug、安全风险、测试缺口和硬件安全边界。"
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  review_details: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: true
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: false
+  path_filters:
+    - "!assets/printable/**"
+    - "!assets/recordings/**"
+    - "!assets/*.glb"
+    - "!docs/images/**"
+    - "!docs/Appearance/**"
+    - "!**/*.gif"
+    - "!**/*.jpeg"
+    - "!**/*.jpg"
+    - "!**/*.png"
+    - "!**/*.STEP"
+    - "!**/*.STP"
+    - "!**/*.step"
+    - "!**/*.stp"
+  path_instructions:
+    - path: "lampgo/**/*.py"
+      instructions: "Focus on runtime correctness, async/concurrency hazards, credential handling, local/remote access control, hardware safety, and whether no-hardware mode still works."
+    - path: "lampgo/web/**"
+      instructions: "Check API authentication, origin/CORS behavior, browser safety, UI regressions, and whether sensitive config values can leak to the frontend."
+    - path: "lampgo/core/**"
+      instructions: "Check that motion commands continue to pass through MotionRuntime and SafetyKernel, and that new hardware behavior uses conservative limits."
+    - path: ".github/**"
+      instructions: "Check least-privilege permissions, safe pull_request usage, dependency pinning, and whether CI reflects the documented local verification commands."
+    - path: "docs/**"
+      instructions: "Check public-facing clarity and consistency. Flag private planning details, internal service URLs, credentials, or license/asset-scope ambiguity."
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    ignore_title_keywords:
+      - "wip"
+      - "draft"
+  tools:
+    ruff:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: false
+    github-checks:
+      enabled: true
+      timeout_ms: 180000
+
+chat:
+  auto_reply: true

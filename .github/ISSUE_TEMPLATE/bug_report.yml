@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible YareLampGo problem.
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the commands, UI actions, or hardware steps needed to reproduce it.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: main branch commit SHA, release version, or local checkout date
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Runtime mode
+      options:
+        - No hardware mode
+        - Real hardware
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove secrets, tokens, Wi-Fi passwords, and private URLs before posting logs.
+      render: text

@@ -8,11 +8,16 @@
 uv sync --group dev
 ```
 
-常用检查：
+必跑检查：
+
+```bash
+uv run pytest
+```
+
+仓库级 lint 检查目前仍有历史问题；如果本次改动涉及 Python 代码，请运行并在 PR 中说明结果：
 
 ```bash
 uv run ruff check lampgo tests
-uv run pytest
 ```
 
 只调试软件链路：

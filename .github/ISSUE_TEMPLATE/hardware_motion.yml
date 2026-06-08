@@ -1,0 +1,40 @@
+name: Hardware, motion, or skill contribution
+description: Share a motion asset, hardware adaptation, case, or composed skill idea.
+title: "[Contribution] "
+labels: ["community-contribution", "needs-triage"]
+body:
+  - type: dropdown
+    id: contribution_type
+    attributes:
+      label: Contribution type
+      options:
+        - Motion recording
+        - Composed skill
+        - Usage case
+        - Hardware adaptation
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What does it do, and when should someone use it?
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and calibration
+      description: Include device model, serial setup, calibration file, and any changed parts if relevant.
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety notes
+      description: Mention range limits, speed limits, collision concerns, or whether it works in `--no-hw`.
+  - type: textarea
+    id: assets
+    attributes:
+      label: Assets or references
+      description: Link to recordings, example scripts, videos, or documentation. Do not include private files or unauthorized materials.

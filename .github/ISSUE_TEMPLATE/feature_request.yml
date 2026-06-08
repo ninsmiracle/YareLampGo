@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a new YareLampGo capability or improvement.
+title: "[Feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What user workflow, creator scenario, or developer need does this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Web UI
+        - CLI
+        - Motion or skills
+        - Voice or perception
+        - OpenClaw integration
+        - Hardware
+        - Documentation
+        - Other
