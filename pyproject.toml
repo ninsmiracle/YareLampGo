@@ -23,7 +23,7 @@ dependencies = [
     "starlette>=0.45",
     "uvicorn>=0.34",
     "websockets>=14.0",
-    "zeroconf>=0.131",
+    "zeroconf>=0.149.7",
 ]
 
 [project.optional-dependencies]
