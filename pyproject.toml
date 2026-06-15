@@ -21,7 +21,7 @@ dependencies = [
     "edge-tts>=7.2.8",
     "httpx>=0.28.1",
     "starlette>=0.45",
-    "uvicorn>=0.34",
+    "uvicorn>=0.49.0",
     "websockets>=14.0",
     "zeroconf>=0.131",
 ]
