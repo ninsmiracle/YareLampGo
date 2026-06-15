@@ -1160,7 +1160,7 @@ requires-dist = [
     { name = "edge-tts", specifier = ">=7.2.8" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lampgo-livekit-agent-sdk", marker = "extra == 'voice'", specifier = ">=0.3.0" },
-    { name = "lerobot", extras = ["feetech"], specifier = ">=0.5.0" },
+    { name = "lerobot", extras = ["feetech"], specifier = ">=0.5.1" },
     { name = "livekit", marker = "extra == 'voice'", specifier = ">=0.17" },
     { name = "livekit-api", marker = "extra == 'voice'", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=2.0" },
