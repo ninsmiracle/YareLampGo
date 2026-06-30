@@ -55,6 +55,7 @@ def test_hal_configure_seeds_goal_position_before_enabling_torque() -> None:
 
     assert ("Present_Position", "base_pitch", False) in bus.reads
     assert ("Goal_Position", "base_pitch", 1739, False) in bus.writes
+    assert ("Torque_Limit", "base_pitch", 800, False) in bus.writes
 
     disable_idx = bus.writes.index(("Torque_Enable", "base_pitch", 0, True))
     seed_idx = bus.writes.index(("Goal_Position", "base_pitch", 1739, False))
@@ -114,6 +115,7 @@ def test_hal_configure_expands_limits_and_holds_when_present_outside_calibration
 
     assert ("Min_Position_Limit", "base_pitch", 444, False) in bus.writes
     assert ("Goal_Position", "base_pitch", 540, False) in bus.writes
+    assert ("Torque_Limit", "base_pitch", 800, False) in bus.writes
     assert ("Torque_Enable", "base_pitch", 0, True) in bus.writes
     assert ("Torque_Enable", "base_pitch", 1, True) in bus.writes
 

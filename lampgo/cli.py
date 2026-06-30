@@ -119,6 +119,24 @@ def main() -> None:
     ping_p = sub.add_parser("ping", help="Ping all motor IDs and report status")
     ping_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
 
+    scan_p = sub.add_parser(
+        "scan-motors",
+        help="Raw bus scan: probe ID 1-253 with bare pyserial, bypassing lerobot model checks. "
+             "Use for hardware diagnosis when calibrate/ping find nothing.",
+    )
+    scan_p.add_argument("--port", default=None, help="Serial port (default: auto-detect)")
+    scan_p.add_argument(
+        "--baud", type=int, default=1_000_000, help="Baud rate (default: 1000000)"
+    )
+    scan_p.add_argument(
+        "--ids",
+        default="1-20",
+        help="ID range or list to probe, e.g. '1-20' or '1,3,5' (default: 1-20)",
+    )
+    scan_p.add_argument(
+        "--timeout", type=float, default=0.1, help="Per-ID read timeout in seconds (default: 0.1)"
+    )
+
     # --- openclaw integration ---
     oc_p = sub.add_parser(
         "install-openclaw",
@@ -177,6 +195,7 @@ def main() -> None:
         "record": _cmd_record,
         "clear": _cmd_clear,
         "ping": _cmd_ping,
+        "scan-motors": _cmd_scan_motors,
         "install-openclaw": _cmd_install_openclaw,
         "onboard": _cmd_onboard,
         "install": _cmd_onboard,
@@ -260,6 +279,7 @@ def _build_help_text() -> str:
         "  uv run lampgo onboard -y --skip persona_memory,openclaw_plugin\n\n"
         "1) 串口和配置\n"
         "  uv run lampgo detect\n"
+        "  uv run lampgo scan-motors --ids 1-20\n"
         "  uv run lampgo skills\n\n"
         "2) 启动与状态\n"
         "  uv run lampgo run\n"
@@ -283,7 +303,8 @@ def _build_help_text() -> str:
         "  uv run lampgo play my_action\n"
         "  录制按 Ctrl+C 结束，默认保存到 assets/recordings/user/\n\n"
         "8) 硬件检测（串口 + 摄像头）\n"
-        "  uv run lampgo detect\n\n"
+        "  uv run lampgo detect\n"
+        "  uv run lampgo scan-motors --ids 1-20\n\n"
         "提示: 推荐用 Ctrl+C 优雅退出 daemon，避免电机保持扭矩锁死。"
     )
 
@@ -418,6 +439,103 @@ def _cmd_ping(args: argparse.Namespace) -> None:
 
     bus.port_handler.closePort()
     sys.exit(0 if all_ok else 1)
+
+
+def _cmd_scan_motors(args: argparse.Namespace) -> None:
+    """Raw SCS/STS bus scan using bare pyserial — no lerobot, no model checks.
+
+    Sends a PING packet to each requested ID and reports any response. Useful
+    for hardware diagnosis when ``calibrate`` / ``ping`` report an empty bus.
+    """
+    try:
+        import serial
+    except ImportError:
+        print("Error: pyserial not installed. Run: uv add pyserial", file=sys.stderr)
+        sys.exit(1)
+
+    # --- resolve port ---
+    port = getattr(args, "port", None)
+    if not port:
+        from lampgo.core.config import load_config
+        cfg = load_config(config_path=getattr(args, "config", None))
+        port = cfg.device.motor_port
+    if not port:
+        from lampgo.autodetect import detect_ports
+        port = detect_ports().get("motor_port")
+    if not port:
+        print("Error: no motor port found. Use --port or connect hardware.", file=sys.stderr)
+        sys.exit(1)
+
+    # --- parse ID range ---
+    ids: list[int] = []
+    spec: str = getattr(args, "ids", "1-20") or "1-20"
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            ids.extend(range(int(lo), int(hi) + 1))
+        else:
+            ids.append(int(part))
+
+    baud: int = getattr(args, "baud", 1_000_000)
+    timeout: float = getattr(args, "timeout", 0.05)
+
+    print(f"Scanning port {port} at {baud} baud, IDs {spec} …")
+    print(f"(TX echo is stripped automatically; each ID gets {int(timeout * 1000)} ms)\n")
+
+    try:
+        ser = serial.Serial(port, baud, timeout=timeout)
+    except Exception as e:
+        print(f"Error: cannot open {port}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    found: list[tuple[int, int]] = []  # (id, model_number)
+    PING_INSTR = 0x01
+
+    for motor_id in ids:
+        payload = bytes([motor_id, 2, PING_INSTR])
+        checksum = (~sum(payload)) & 0xFF
+        packet = b"\xff\xff" + payload + bytes([checksum])
+
+        ser.reset_input_buffer()
+        ser.write(packet)
+        ser.flush()  # wait for OS to actually transmit before switching to RX
+
+        # Read up to 12 bytes: 6 possible TX echo + 6 status response
+        raw = ser.read(12)
+
+        # Scan for a valid status-packet starting with FF FF <id>
+        model_num: int | None = None
+        for i in range(len(raw) - 5):
+            if raw[i] == 0xFF and raw[i + 1] == 0xFF and raw[i + 2] == motor_id:
+                # status packet: FF FF ID LEN ERROR CHECKSUM
+                # Some buses also include model in extended response — accept any reply
+                model_num = 0
+                break
+
+        if model_num is not None:
+            found.append((motor_id, model_num))
+            print(f"  ID {motor_id:>3}: ✓  ONLINE")
+        else:
+            print(f"  ID {motor_id:>3}:    (no response)")
+
+    ser.close()
+
+    print()
+    if found:
+        print(f"Found {len(found)} motor(s) responding: IDs {[f[0] for f in found]}")
+        sys.exit(0)
+    else:
+        print(
+            "No motors responded.\n"
+            "Possible causes:\n"
+            "  • 12 V power not reaching servos (check driver board output)\n"
+            "  • Bus data line disconnected or damaged\n"
+            "  • Motor IDs outside the scanned range (try --ids 1-253)\n"
+            "  • Wrong baud rate (Feetech default: 1000000, some units: 115200)\n"
+            "  • Half-duplex direction-pin issue on this USB adapter"
+        )
+        sys.exit(1)
 
 
 def _cmd_install_openclaw(args: argparse.Namespace) -> None:

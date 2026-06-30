@@ -392,6 +392,11 @@ class HardwareAbstraction:
 
         self._ensure_hardware_calibration()
 
+        # Torque_Limit (0-1000) caps stall current for every motor.
+        # Keeps the bus servo adapter board from overheating when servos are
+        # stalled against mechanical stops. 800 = 80 % of rated torque by default.
+        torque_limit_raw = max(100, min(1000, int(self._config.max_torque_pct * 10)))
+
         for motor in healthy_motors:
             # Configure each motor independently so one flaky status packet
             # does not block the whole arm from starting up.
@@ -403,6 +408,8 @@ class HardwareAbstraction:
             self._safe_bus_write("P_Coefficient", motor, 16)
             self._safe_bus_write("I_Coefficient", motor, 0)
             self._safe_bus_write("D_Coefficient", motor, 32)
+            self._safe_bus_write("Torque_Limit", motor, torque_limit_raw, normalize=False)
+        logger.info("hal.torque_limit_set", pct=self._config.max_torque_pct, raw=torque_limit_raw)
 
         self._seed_goal_positions_to_present(healthy_motors)
         for motor in healthy_motors:
