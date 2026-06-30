@@ -21,7 +21,7 @@ PRIORITY_SKILLS = {"estop", "return_safe"}
 
 _MOTION_SKILLS = {
     "nod", "headshake", "look_at", "idle_sway",
-    "dance_to_music",
+    "dance_to_music", "cat_teaser",
     "move_to", "return_safe", "estop",
     "presence_react", "face_follow",
     "play_recording", "teleop_mouse", "teleop_gamepad",

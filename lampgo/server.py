@@ -44,9 +44,11 @@ from lampgo.core.safety import SafetyKernel
 from lampgo.core.virtual_motion import VirtualMotionRuntime
 from lampgo.device import Esp32DeviceManager
 from lampgo.ipc import IPCServer
+from lampgo.perception.cat_teaser import CatTeaserFrameSource
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.recordings import build_recording_actions_prompt, write_recording_description
 from lampgo.skills.base import SkillContext
+from lampgo.skills.builtin.cat_teaser import CatTeaserSkill
 from lampgo.skills.builtin.expression_skills import SetExpressionSkill
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
 from lampgo.skills.builtin.music_skills import DanceToMusicSkill
@@ -161,6 +163,17 @@ class LampgoServer:
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
         self.registry.register(DanceToMusicSkill())
+        self.registry.register(CatTeaserSkill(self._make_cat_teaser_frame_source))
+
+    def _make_cat_teaser_frame_source(self) -> CatTeaserFrameSource:
+        return CatTeaserFrameSource(
+            self.config.camera,
+            device_esp32_config=self.config.device_esp32,
+            esp32_manager=self.esp32,
+        )
+
+    def _recording_actions_prompt(self) -> str:
+        return build_recording_actions_prompt(Path(self.config.recordings_dir))
 
     # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
 
@@ -412,7 +425,14 @@ class LampgoServer:
             self._openclaw_asks[ask_id] = fut
 
         opts = list(options or [])
-        await self.events.publish(OpenClawAskRequested(ask_id=ask_id, question=question, options=opts, request_id=request_id))
+        await self.events.publish(
+            OpenClawAskRequested(
+                ask_id=ask_id,
+                question=question,
+                options=opts,
+                request_id=request_id,
+            )
+        )
         await self.events.publish(ChatMessage(role="assistant", content=question, request_id=request_id))
 
         try:
@@ -880,7 +900,11 @@ class LampgoServer:
             return result
 
         if intent.intent_type == IntentType.COMPLEX:
-            await _publish_intent_progress("openclaw_handoff", "关键词未命中且未能本地完成，转交 OpenClaw...", "openclaw")
+            await _publish_intent_progress(
+                "openclaw_handoff",
+                "关键词未命中且未能本地完成，转交 OpenClaw...",
+                "openclaw",
+            )
             return await self._handoff_to_openclaw(
                 request_id=request_id,
                 text=text,
@@ -962,7 +986,12 @@ class LampgoServer:
         request_id = data.get("request_id", "")
 
         audio_rms = self._measure_audio_rms(audio_data)
-        logger.info("server.audio_transcribing", request_id=request_id, audio_b64_len=len(audio_data), rms=f"{audio_rms:.1f}")
+        logger.info(
+            "server.audio_transcribing",
+            request_id=request_id,
+            audio_b64_len=len(audio_data),
+            rms=f"{audio_rms:.1f}",
+        )
         await self.events.publish(IntentRouting(text="[语音输入]", request_id=request_id))
         await self.events.publish(
             IntentProgress(stage="audio_transcribe", message="正在识别语音...", source="stt", request_id=request_id)
@@ -1034,7 +1063,11 @@ class LampgoServer:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    cached = {str(k).strip(): str(v).strip() for k, v in data.items() if str(k).strip() and str(v).strip()}
+                    cached = {
+                        str(k).strip(): str(v).strip()
+                        for k, v in data.items()
+                        if str(k).strip() and str(v).strip()
+                    }
                 else:
                     cached = {}
             except Exception:
@@ -1501,9 +1534,17 @@ class LampgoServer:
             status = self.esp32.get_status() if self.esp32 else {}
             device = status.get("device") if isinstance(status, dict) else None
             if device and device.get("needs_firmware_update"):
-                return {"ok": False, "error": "esp32_firmware_update_required", "result": {"esp32": self._esp32_camera_info()}}
+                return {
+                    "ok": False,
+                    "error": "esp32_firmware_update_required",
+                    "result": {"esp32": self._esp32_camera_info()},
+                }
             if device and device.get("is_paired_to_other"):
-                return {"ok": False, "error": "esp32_paired_to_other", "result": {"esp32": self._esp32_camera_info()}}
+                return {
+                    "ok": False,
+                    "error": "esp32_paired_to_other",
+                    "result": {"esp32": self._esp32_camera_info()},
+                }
             self.config.device_esp32.enabled = True
             self.config.camera.port = ""
             logger.info("camera.switched_to_esp32")
@@ -1761,7 +1802,7 @@ class LampgoServer:
                 camera_config=self.config.camera,
                 device_esp32_config=self.config.device_esp32,
                 esp32_manager=self.esp32,
-                recording_actions_prompt_provider=lambda: build_recording_actions_prompt(Path(self.config.recordings_dir)),
+                recording_actions_prompt_provider=self._recording_actions_prompt,
             )
             self.router.set_llm_client(client)
             logger.info(
@@ -1954,7 +1995,7 @@ class LampgoServer:
                 camera_config=self.config.camera,
                 device_esp32_config=self.config.device_esp32,
                 esp32_manager=self.esp32,
-                recording_actions_prompt_provider=lambda: build_recording_actions_prompt(Path(self.config.recordings_dir)),
+                recording_actions_prompt_provider=self._recording_actions_prompt,
             )
             self.router.set_llm_client(client)
             logger.info(
@@ -1987,7 +2028,7 @@ class LampgoServer:
                 camera_config=self.config.camera,
                 device_esp32_config=self.config.device_esp32,
                 esp32_manager=self.esp32,
-                recording_actions_prompt_provider=lambda: build_recording_actions_prompt(Path(self.config.recordings_dir)),
+                recording_actions_prompt_provider=self._recording_actions_prompt,
             )
             self.router.set_llm_client(client)
             logger.info(
@@ -2101,11 +2142,14 @@ class LampgoServer:
 
             status = detect_openclaw_integration()
             overall = status.overall
+            plugin_detail = "已安装" if status.plugin.ok else "未安装（运行 `lampgo install-openclaw --yes` 一键安装）"
+            skill_detail = "已注册" if status.skill.ok else "未注册（关键词触发不可用）"
+            trusted_detail = "已启用" if status.trusted.ok else "未启用（OpenClaw 会拒绝加载）"
             integration_lines = [
                 f"openclaw CLI     : {_mark(status.binary.ok)} {status.binary.detail}",
-                f"lampgo plugin    : {_mark(status.plugin.ok)} {'已安装' if status.plugin.ok else '未安装（运行 `lampgo install-openclaw --yes` 一键安装）'}",
-                f"lampgo skill     : {_mark(status.skill.ok)} {'已注册' if status.skill.ok else '未注册（关键词触发不可用）'}",
-                f"plugin 启用      : {_mark(status.trusted.ok)} {'已启用' if status.trusted.ok else '未启用（OpenClaw 会拒绝加载）'}",
+                f"lampgo plugin    : {_mark(status.plugin.ok)} {plugin_detail}",
+                f"lampgo skill     : {_mark(status.skill.ok)} {skill_detail}",
+                f"plugin 启用      : {_mark(status.trusted.ok)} {trusted_detail}",
                 f"gateway 在线     : {_mark(status.gateway.ok)} {status.gateway.detail}",
             ]
             overall_line = f"集成状态         : {overall}"
@@ -2130,14 +2174,16 @@ class LampgoServer:
         )
         esp32_seen = bool(esp32_device or esp32_status.get("preferred_host"))
         voice_ready = livekit_configured and wake_configured and agent_ready and wake_loop_running
+        worker_detail = "registered worker" if agent_ready else ("启动中/未就绪" if agent_running else "未启动")
         livekit_lines = [
             f"LiveKit 配置      : {_mark(livekit_configured)} {vc.livekit_url or '未配置'}",
-            f"LiveKit worker    : {_mark(agent_ready)} {'registered worker' if agent_ready else ('启动中/未就绪' if agent_running else '未启动')}",
+            f"LiveKit worker    : {_mark(agent_ready)} {worker_detail}",
             f"唤醒监听          : {_mark(wake_loop_running and wake_configured)} {vc.wake_word or '未启用'}",
         ]
         if self.config.device_esp32.enabled:
+            esp32_wait = "" if esp32_online else "（等待健康检查）"
             livekit_lines.append(
-                f"ESP32 设备        : {_mark(esp32_online or esp32_seen)} {esp32_label}{'' if esp32_online else '（等待健康检查）'}"
+                f"ESP32 设备        : {_mark(esp32_online or esp32_seen)} {esp32_label}{esp32_wait}"
             )
         livekit_lines.append(f"通话状态          : {_mark(voice_ready)} {'ready' if voice_ready else 'not ready'}")
 

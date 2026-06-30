@@ -13,6 +13,7 @@ uv run lampgo invoke headshake
 uv run lampgo invoke look_at yaw=20 pitch=-10
 uv run lampgo invoke idle_sway
 uv run lampgo invoke dance
+uv run lampgo invoke cat_teaser marker_color=magenta duration=60
 ```
 
 自然语言入口：
@@ -33,6 +34,16 @@ uv run lampgo move elbow_pitch=-40 wrist_pitch=20 --velocity 90
 ```
 
 关节命令仍会经过 `MotionRuntime` 和 `SafetyKernel`，包括关节限位、速度上限、加速度上限和急停状态检查。
+
+## 逗猫棒互动
+
+`cat_teaser` 是本地视觉实时技能。请在逗猫棒末端贴一个明显的彩色标记，默认推荐亮品红色，并让灯头摄像头能看到标记。
+
+```bash
+uv run lampgo invoke cat_teaser marker_color=magenta duration=60
+```
+
+它会用 OpenCV 在本机识别标记位置，并根据标记附近的运动能量估计 `searching`、`teasing`、`engaged`、`pounce`、`caught`、`rest`、`unsafe_close` 等状态。检测到扑击、遮挡或距离过近时会短暂停顿或撤离；摄像头不可用或未安装 perception extra 时会返回明确错误。
 
 ## LED 表情
 

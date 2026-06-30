@@ -158,6 +158,7 @@
     look_at: { title: "注视", description: "朝指定方向看过去。" },
     idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
     dance_to_music: { title: "跟音乐跳舞", description: "读取音乐节奏，按风格预设做明确律动。" },
+    cat_teaser: { title: "逗猫棒互动", description: "识别逗猫棒彩色标记，根据猫咪互动状态实时摆动。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
     presence_react: { title: "人来反应", description: "检测到人时转向并展示问候表情。" },
@@ -3061,7 +3062,7 @@
   let userSkillQuery = "";
   let recordingQuery = "";
   let expressionQuery = "";
-  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway", "dance_to_music"]);
+  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway", "dance_to_music", "cat_teaser"]);
 
   function renderEmptyCell(grid, text) {
     const empty = document.createElement("div");
