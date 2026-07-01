@@ -222,6 +222,153 @@ class CatTeaserFrameSource:
         return backends
 
 
+class CatTeaserDebugView:
+    """OpenCV debug window for cat teaser perception."""
+
+    def __init__(self, *, enabled: bool = True, window_name: str = "LampGo Cat Teaser Vision") -> None:
+        self.enabled = enabled
+        self.window_name = window_name
+        self._cv2 = None
+        self._window_open = False
+        self._warned = False
+
+    def render(
+        self,
+        frame,
+        observation: CatPlayObservation,
+        *,
+        elapsed_s: float,
+        marker_color: str,
+        event_text: str | None = None,
+    ) -> bool:
+        """Show an annotated frame.
+
+        Returns True when the user asks to stop the skill by pressing q/esc or
+        closing the preview window.
+        """
+        if not self.enabled:
+            return False
+        try:
+            cv2 = self._ensure_cv2()
+            self._ensure_window(cv2, frame)
+            display = self._annotate_frame(cv2, frame, observation, elapsed_s, marker_color, event_text)
+            cv2.imshow(self.window_name, display)
+            key = cv2.waitKey(1) & 0xFF
+            if key in {27, ord("q")}:
+                return True
+            return self._window_was_closed(cv2)
+        except Exception as exc:
+            self._disable_after_error(exc)
+            return False
+
+    def close(self) -> None:
+        if self._cv2 is None or not self._window_open:
+            return
+        try:
+            self._cv2.destroyWindow(self.window_name)
+            self._cv2.waitKey(1)
+        except Exception:
+            logger.debug("cat_teaser.debug_view_close_failed", exc_info=True)
+        finally:
+            self._window_open = False
+
+    def _ensure_cv2(self):
+        if self._cv2 is None:
+            self._cv2 = _import_cv2()
+        return self._cv2
+
+    def _ensure_window(self, cv2, frame) -> None:
+        if self._window_open:
+            return
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        height, width = frame.shape[:2]
+        cv2.resizeWindow(self.window_name, min(width, 960), min(height, 720))
+        self._window_open = True
+
+    def _annotate_frame(
+        self,
+        cv2,
+        frame,
+        observation: CatPlayObservation,
+        elapsed_s: float,
+        marker_color: str,
+        event_text: str | None,
+    ):
+        display = frame.copy()
+        marker = observation.marker
+        if marker is not None:
+            color = self._bgr_for_marker(marker_color)
+            center = (int(marker.x), int(marker.y))
+            radius = max(3, int(marker.radius))
+            cv2.circle(display, center, radius, color, 2)
+            cv2.circle(display, center, 3, color, -1)
+            self._put_text(cv2, display, f"{marker_color} marker {marker.confidence:.2f}", center[0] + 8, center[1] - 8)
+        else:
+            self._put_text(cv2, display, f"{marker_color} marker lost", 14, 76, color=(0, 0, 255))
+
+        if observation.motion_centroid is not None:
+            height, width = display.shape[:2]
+            cx = int(observation.motion_centroid[0] * width)
+            cy = int(observation.motion_centroid[1] * height)
+            cv2.drawMarker(display, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 18, 2)
+
+        lines = [
+            f"t={elapsed_s:.1f}s state={observation.state}",
+            f"motion={observation.motion_energy:.3f} engagement={observation.engagement_score:.2f}",
+            "q/esc: stop cat_teaser",
+        ]
+        if event_text:
+            lines.insert(2, f"event: {event_text}")
+        self._draw_panel(cv2, display, lines)
+        return display
+
+    @staticmethod
+    def _draw_panel(cv2, display, lines: list[str]) -> None:
+        x, y = 12, 18
+        line_h = 24
+        width = max(300, max(len(line) for line in lines) * 10)
+        height = line_h * len(lines) + 14
+        overlay = display.copy()
+        cv2.rectangle(overlay, (8, 8), (8 + width, 8 + height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.48, display, 0.52, 0, display)
+        for idx, line in enumerate(lines):
+            CatTeaserDebugView._put_text(cv2, display, line, x, y + idx * line_h)
+
+    @staticmethod
+    def _put_text(cv2, display, text: str, x: int, y: int, *, color: tuple[int, int, int] = (255, 255, 255)) -> None:
+        cv2.putText(display, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(display, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 1, cv2.LINE_AA)
+
+    @staticmethod
+    def _bgr_for_marker(marker_color: str) -> tuple[int, int, int]:
+        return {
+            "magenta": (255, 0, 255),
+            "green": (0, 255, 0),
+            "blue": (255, 0, 0),
+            "red": (0, 0, 255),
+            "yellow": (0, 255, 255),
+        }.get(marker_color, (255, 255, 255))
+
+    def _window_was_closed(self, cv2) -> bool:
+        if not self._window_open:
+            return False
+        try:
+            return cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1
+        except Exception:
+            return False
+
+    def _disable_after_error(self, exc: Exception) -> None:
+        self.enabled = False
+        if self._warned:
+            return
+        self._warned = True
+        logger.warning(
+            "cat_teaser.debug_view_unavailable",
+            error=str(exc),
+            hint="OpenCV GUI preview is unavailable; cat_teaser continues without the popup window.",
+        )
+
+
 class CatToyTracker:
     """HSV marker tracker for the teaser wand tip."""
 

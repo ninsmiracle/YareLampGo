@@ -13,6 +13,7 @@ from lampgo.core.types import JointState
 from lampgo.perception.cat_teaser import (
     CatPlayObservation,
     CatPlayStateEstimator,
+    CatTeaserDebugView,
     CatToyTracker,
     MarkerDetection,
 )
@@ -30,6 +31,14 @@ def _magenta_frame(*, with_marker: bool = True, motion_size: int = 0) -> np.ndar
     return frame
 
 
+def _red_frame(*, with_marker: bool = True) -> np.ndarray:
+    cv2 = pytest.importorskip("cv2")
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    if with_marker:
+        cv2.circle(frame, (160, 120), 16, (0, 0, 255), -1)
+    return frame
+
+
 def test_cat_toy_tracker_detects_magenta_marker_and_blank_frame() -> None:
     pytest.importorskip("cv2")
     tracker = CatToyTracker(marker_color="magenta")
@@ -41,6 +50,16 @@ def test_cat_toy_tracker_detects_magenta_marker_and_blank_frame() -> None:
     assert 0.45 < detection.normalized_x < 0.55
     assert 0.45 < detection.normalized_y < 0.55
     assert tracker.track(_magenta_frame(with_marker=False)) is None
+
+
+def test_cat_toy_tracker_detects_red_marker() -> None:
+    pytest.importorskip("cv2")
+    tracker = CatToyTracker(marker_color="red")
+
+    detection = tracker.track(_red_frame())
+
+    assert detection is not None
+    assert detection.confidence > 0.2
 
 
 def test_cat_play_state_estimator_transitions_on_synthetic_motion() -> None:
@@ -62,6 +81,20 @@ def test_cat_play_state_estimator_transitions_on_synthetic_motion() -> None:
     assert pounce.state == "pounce"
     assert caught.state == "caught"
     assert rest.state == "rest"
+
+
+def test_cat_teaser_debug_view_disabled_is_noop() -> None:
+    view = CatTeaserDebugView(enabled=False)
+    observation = CatPlayObservation(
+        state="teasing",
+        marker=None,
+        motion_energy=0.0,
+        engagement_score=0.0,
+        motion_centroid=None,
+        timestamp=1.0,
+    )
+
+    assert view.render(object(), observation, elapsed_s=0.0, marker_color="red") is False
 
 
 class _FakeFrameSource:
@@ -157,6 +190,8 @@ async def test_cat_teaser_skill_emits_bounded_linear_targets(monkeypatch) -> Non
         max_yaw=25,
         max_pitch=14,
         max_wrist_pitch=8,
+        debug_view=False,
+        log_events=False,
     )
 
     assert result.status == "ok"
@@ -180,7 +215,9 @@ async def test_cat_teaser_skill_cancels_cleanly(monkeypatch) -> None:
     motion = _FakeMotion()
     skill = CatTeaserSkill(lambda: source)
 
-    task = asyncio.create_task(skill.execute(_fake_context(motion), duration=5, camera_fps=12))
+    task = asyncio.create_task(
+        skill.execute(_fake_context(motion), duration=5, camera_fps=12, debug_view=False, log_events=False)
+    )
     while source.reads == 0:
         await asyncio.sleep(0.01)
     await skill.cancel()
@@ -190,6 +227,23 @@ async def test_cat_teaser_skill_cancels_cleanly(monkeypatch) -> None:
     assert result.data["stop_reason"] == "cancelled"
     assert source.closed is True
     assert motion.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_cat_teaser_skill_prints_touch_event_log(monkeypatch, capsys) -> None:
+    source = _FakeFrameSource()
+    monkeypatch.setattr(cat_skill_mod, "CatToyTracker", _FakeTracker)
+    monkeypatch.setattr(cat_skill_mod, "CatPlayStateEstimator", _FakeEstimator)
+    motion = _FakeMotion()
+    skill = CatTeaserSkill(lambda: source)
+
+    result = await skill.execute(_fake_context(motion), duration=0.4, camera_fps=12, debug_view=False)
+    out = capsys.readouterr().out
+
+    assert result.status == "ok"
+    assert "有触碰动作" in out
+    assert result.data["event_counts"]["touch"] >= 1
+    assert any(event["type"] == "touch" for event in result.data["events"])
 
 
 @pytest.mark.asyncio
@@ -219,3 +273,5 @@ def test_cat_teaser_is_registered_and_exposes_parameters() -> None:
     assert cat_teaser["label"] == "逗猫棒互动"
     assert cat_teaser["parameters"]["marker_color"]["default"] == "magenta"
     assert cat_teaser["parameters"]["duration"]["default"] == 60.0
+    assert cat_teaser["parameters"]["debug_view"]["default"] is True
+    assert cat_teaser["parameters"]["log_events"]["default"] is True

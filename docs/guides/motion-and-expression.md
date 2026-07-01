@@ -41,9 +41,12 @@ uv run lampgo move elbow_pitch=-40 wrist_pitch=20 --velocity 90
 
 ```bash
 uv run lampgo invoke cat_teaser marker_color=magenta duration=60
+uv run lampgo invoke cat_teaser marker_color=red duration=60
 ```
 
-它会用 OpenCV 在本机识别标记位置，并根据标记附近的运动能量估计 `searching`、`teasing`、`engaged`、`pounce`、`caught`、`rest`、`unsafe_close` 等状态。检测到扑击、遮挡或距离过近时会短暂停顿或撤离；摄像头不可用或未安装 perception extra 时会返回明确错误。
+它会用 OpenCV 在本机识别标记位置，并根据标记附近的运动能量估计 `searching`、`teasing`、`engaged`、`pounce`、`caught`、`rest`、`unsafe_close` 等状态。运行时默认弹出 `LampGo Cat Teaser Vision` 调试窗口，窗口里会显示摄像头画面、标记圈、运动质心、状态、motion/engagement 分数；按 `q` 或 `esc` 可停止本次逗猫。终端会打印类似 `[cat_teaser] 12.4秒有触碰动作 ...` 的事件日志，便于判断是摄像头没看到标记、颜色参数不匹配，还是状态机阈值需要调。
+
+检测到扑击、遮挡或距离过近时会短暂停顿或撤离；摄像头不可用或未安装 perception extra 时会返回明确错误。如果只想后台运行，可以加 `debug_view=false`，如果只想关闭中文事件日志，可以加 `log_events=false`。
 
 ## LED 表情
 

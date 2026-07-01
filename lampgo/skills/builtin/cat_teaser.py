@@ -18,6 +18,7 @@ from lampgo.perception.cat_teaser import (
     CatPlayState,
     CatPlayStateEstimator,
     CatTeaserCameraError,
+    CatTeaserDebugView,
     CatTeaserDependencyError,
     CatTeaserFrameSource,
     CatToyTracker,
@@ -88,6 +89,20 @@ class CatTeaserSkill(Skill):
             default=8.0,
             description="Maximum wrist-pitch offset around the starting pose.",
         ),
+        "debug_view": ParameterSpec(
+            name="debug_view",
+            type="bool",
+            required=False,
+            default=True,
+            description="Show an OpenCV preview window with marker and state overlays.",
+        ),
+        "log_events": ParameterSpec(
+            name="log_events",
+            type="bool",
+            required=False,
+            default=True,
+            description="Print Chinese interaction events such as touch and pounce detections.",
+        ),
     }
 
     def __init__(self, frame_source_factory: FrameSourceFactory) -> None:
@@ -105,6 +120,8 @@ class CatTeaserSkill(Skill):
             max_yaw = max(1.0, min(45.0, abs(float(params.get("max_yaw", 25.0)))))
             max_pitch = max(1.0, min(28.0, abs(float(params.get("max_pitch", 14.0)))))
             max_wrist = max(0.0, min(18.0, abs(float(params.get("max_wrist_pitch", 8.0)))))
+            debug_view_enabled = _bool_param(params.get("debug_view"), default=True)
+            log_events = _bool_param(params.get("log_events"), default=True)
             tracker = CatToyTracker(marker_color=marker_color)
         except ValueError as exc:
             return SkillResult(status="error", message=str(exc))
@@ -112,6 +129,8 @@ class CatTeaserSkill(Skill):
         energy_scale = {"gentle": 0.72, "normal": 1.0, "active": 1.22}.get(energy, 1.0)
         frame_interval = 1.0 / camera_fps
         estimator = CatPlayStateEstimator()
+        debug_view = CatTeaserDebugView(enabled=debug_view_enabled)
+        event_tracker = _CatTeaserEventTracker(marker_color=marker_color, enabled=log_events)
         source = self._frame_source_factory()
         cancel_event = asyncio.Event()
         self._cancel_event = cancel_event
@@ -137,6 +156,12 @@ class CatTeaserSkill(Skill):
             await asyncio.to_thread(source.start)
             started_at = time.monotonic()
             end_at = started_at + duration
+            if log_events:
+                print(
+                    f"[cat_teaser] 0.0秒开始逗猫 marker_color={marker_color} "
+                    f"camera={source.device_label} debug_view={debug_view_enabled}",
+                    flush=True,
+                )
             while not cancel_event.is_set() and time.monotonic() < end_at:
                 tick_started = time.monotonic()
                 frame = await asyncio.to_thread(source.read)
@@ -160,6 +185,18 @@ class CatTeaserSkill(Skill):
 
                 if observation.state in {"caught", "unsafe_close", "pounce"}:
                     pause_until = max(pause_until, tick_started + self._pause_duration(observation.state))
+                elapsed_s = tick_started - started_at
+                event_text = event_tracker.update(observation, elapsed_s=elapsed_s)
+                debug_stop = debug_view.render(
+                    frame,
+                    observation,
+                    elapsed_s=elapsed_s,
+                    marker_color=marker_color,
+                    event_text=event_text,
+                )
+                if debug_stop:
+                    stop_reason = "debug_view_closed"
+                    break
                 target = self._target_for_observation(
                     observation,
                     anchor=anchor,
@@ -197,10 +234,14 @@ class CatTeaserSkill(Skill):
                     "engagement_peak": round(engagement_peak, 3),
                     "pounces": pounces,
                     "caught": catches,
+                    "event_counts": event_tracker.counts(),
+                    "events": event_tracker.events[-40:],
                     "stop_reason": stop_reason,
                     "camera": source.device_label,
                     "marker_color": marker_color,
                     "energy": energy,
+                    "debug_view": debug_view_enabled,
+                    "log_events": log_events,
                 },
             )
         except ValueError as exc:
@@ -216,6 +257,7 @@ class CatTeaserSkill(Skill):
             try:
                 ctx.motion.stop_smooth()
             finally:
+                debug_view.close()
                 await asyncio.to_thread(source.close)
                 self._cancel_event = None
                 self._source = None
@@ -324,3 +366,95 @@ class CatTeaserSkill(Skill):
         if state == "caught":
             return 0.65
         return 0.35
+
+
+class _CatTeaserEventTracker:
+    def __init__(self, *, marker_color: str, enabled: bool) -> None:
+        self.marker_color = marker_color
+        self.enabled = enabled
+        self.events: list[dict[str, Any]] = []
+        self._last_state: CatPlayState | None = None
+        self._last_marker_seen = False
+        self._last_emitted_at: dict[str, float] = {}
+
+    def update(self, observation: CatPlayObservation, *, elapsed_s: float) -> str | None:
+        marker_seen = observation.marker is not None
+        event_type, description = self._event_for_observation(observation, marker_seen)
+        self._last_state = observation.state
+        self._last_marker_seen = marker_seen
+        if event_type is None or description is None:
+            return None
+        if not self.enabled or not self._should_emit(event_type, elapsed_s):
+            return description
+
+        message = f"{elapsed_s:.1f}秒{description}"
+        record = {
+            "time_s": round(elapsed_s, 2),
+            "type": event_type,
+            "message": message,
+            "state": observation.state,
+            "motion_energy": round(observation.motion_energy, 4),
+            "engagement_score": round(observation.engagement_score, 4),
+            "marker_seen": marker_seen,
+        }
+        self.events.append(record)
+        self._last_emitted_at[event_type] = elapsed_s
+        print(
+            "[cat_teaser] "
+            f"{message} state={observation.state} motion={observation.motion_energy:.3f} "
+            f"engagement={observation.engagement_score:.2f} marker={'seen' if marker_seen else 'lost'}",
+            flush=True,
+        )
+        logger.info("cat_teaser.event", **record)
+        return description
+
+    def counts(self) -> dict[str, int]:
+        return dict(Counter(str(event["type"]) for event in self.events))
+
+    def _event_for_observation(
+        self,
+        observation: CatPlayObservation,
+        marker_seen: bool,
+    ) -> tuple[str | None, str | None]:
+        if observation.state == "caught":
+            return "touch", "有触碰动作"
+        if observation.state == "pounce":
+            return "pounce", "有扑击动作"
+        if observation.state == "unsafe_close":
+            return "unsafe_close", "距离过近，暂停撤离"
+        if marker_seen and not self._last_marker_seen:
+            return "marker_seen", f"识别到{self.marker_color}标记"
+        if not marker_seen and self._last_marker_seen:
+            return "marker_lost", f"{self.marker_color}标记丢失"
+        if observation.state == "engaged" and self._last_state not in {"engaged", "pounce", "caught"}:
+            return "engaged", "进入互动状态"
+        return None, None
+
+    def _should_emit(self, event_type: str, elapsed_s: float) -> bool:
+        last = self._last_emitted_at.get(event_type)
+        if last is None:
+            return True
+        gap = {
+            "touch": 0.65,
+            "pounce": 0.65,
+            "unsafe_close": 1.0,
+            "engaged": 1.2,
+            "marker_seen": 1.0,
+            "marker_lost": 1.0,
+        }.get(event_type, 1.0)
+        return elapsed_s - last >= gap
+
+
+def _bool_param(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    return default
