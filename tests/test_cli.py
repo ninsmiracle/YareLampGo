@@ -19,6 +19,7 @@ def test_build_help_text_contains_common_commands():
     assert "uv run lampgo detect" in text
     assert "uv run lampgo scan-motors --ids 1-20" in text
     assert "uv run lampgo clear" in text
+    assert "uv run lampgo setup-motors" in text
     assert "uv run lampgo calibrate" in text
 
 
@@ -266,3 +267,56 @@ def test_cmd_ping_reports_status_error(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "STATUS ERROR" in out
     assert "OverEle error" in out
+
+
+def test_cmd_setup_motors_assigns_each_configured_motor(monkeypatch, capsys):
+    args = argparse.Namespace(port="/dev/tty.test", config=None)
+    prompts: list[str] = []
+    setup_calls: list[tuple[str, int]] = []
+
+    class FakeBus:
+        def __init__(self, port, motors):
+            self.port = port
+            self.motors = motors
+            self.port_handler = SimpleNamespace(closePort=lambda: None)
+
+        def connect(self, handshake=False):
+            return None
+
+        def setup_motor(self, motor_name):
+            setup_calls.append((motor_name, self.motors[motor_name].id))
+
+    fake_motors_mod = SimpleNamespace(
+        Motor=lambda id_, model, norm_mode: SimpleNamespace(id=id_, model=model),
+        MotorNormMode=SimpleNamespace(DEGREES="degrees"),
+    )
+    fake_feetech_mod = SimpleNamespace(FeetechMotorsBus=FakeBus)
+    monkeypatch.setitem(sys.modules, "lerobot.motors", fake_motors_mod)
+    monkeypatch.setitem(sys.modules, "lerobot.motors.feetech", fake_feetech_mod)
+    monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "")
+
+    import lampgo.core.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            device=SimpleNamespace(
+                motor_port="/dev/tty.config",
+                motors={
+                    "base_yaw": SimpleNamespace(id=1, model="sts3215"),
+                    "base_pitch": SimpleNamespace(id=2, model="sts3215"),
+                },
+            )
+        ),
+    )
+
+    cli._cmd_setup_motors(args)
+
+    assert setup_calls == [("base_yaw", 1), ("base_pitch", 2)]
+    assert len(prompts) == 2
+    assert "target ID 1" in prompts[0]
+    assert "target ID 2" in prompts[1]
+    out = capsys.readouterr().out
+    assert "Connect exactly one motor" in out
+    assert "All configured motor IDs" in out

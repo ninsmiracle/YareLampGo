@@ -119,6 +119,11 @@ def main() -> None:
     ping_p = sub.add_parser("ping", help="Ping all motor IDs and report status")
     ping_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
 
+    # --- setup-motors ---
+    setup_p = sub.add_parser("setup-motors", help="Interactively assign Feetech motor IDs")
+    setup_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
+
+    # --- scan-motors ---
     scan_p = sub.add_parser(
         "scan-motors",
         help="Raw bus scan: probe ID 1-253 with bare pyserial, bypassing lerobot model checks. "
@@ -195,6 +200,7 @@ def main() -> None:
         "record": _cmd_record,
         "clear": _cmd_clear,
         "ping": _cmd_ping,
+        "setup-motors": _cmd_setup_motors,
         "scan-motors": _cmd_scan_motors,
         "install-openclaw": _cmd_install_openclaw,
         "onboard": _cmd_onboard,
@@ -294,6 +300,7 @@ def _build_help_text() -> str:
         "  uv run lampgo move base_yaw=0 --velocity 20\n"
         "  uv run lampgo invoke return_safe\n\n"
         "5) 校准\n"
+        "  uv run lampgo setup-motors --port /dev/tty.usbmodemXXXX  # 逐颗设置舵机 ID\n"
         "  uv run lampgo calibrate --port /dev/tty.usbmodemXXXX --id AL02\n\n"
         "6) 表情与文本路由\n"
         "  uv run lampgo invoke set_expression expression=heart\n"
@@ -440,6 +447,61 @@ def _cmd_ping(args: argparse.Namespace) -> None:
     bus.port_handler.closePort()
     sys.exit(0 if all_ok else 1)
 
+def _cmd_setup_motors(args: argparse.Namespace) -> None:
+    """Interactively assign each configured Feetech motor ID and baud rate."""
+    from lampgo.core.config import load_config
+
+    config = load_config(config_path=getattr(args, "config", None))
+    port = _resolve_calibration_port(args, config)
+    if not port:
+        print(
+            "Error: serial port required. Use --port, set LAMPGO_MOTOR_PORT, or connect hardware for auto-detect.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        from lerobot.motors import Motor, MotorNormMode
+        from lerobot.motors.feetech import FeetechMotorsBus
+    except ImportError:
+        print("Error: lerobot[feetech] not installed.", file=sys.stderr)
+        sys.exit(1)
+
+    motors = {
+        name: Motor(mc.id, mc.model, MotorNormMode.DEGREES)
+        for name, mc in config.device.motors.items()
+    }
+    print(
+        "This will assign Feetech motor IDs one at a time.\n"
+        "Connect exactly one motor when prompted; motors with duplicate IDs must not share the bus.\n"
+        f"Port: {port}\n"
+    )
+
+    ordered_names = list(motors)
+    for index, name in enumerate(ordered_names, start=1):
+        motor = motors[name]
+        input(f"[{index}/{len(ordered_names)}] Connect only '{name}' (target ID {motor.id}) and press ENTER.")
+
+        bus = FeetechMotorsBus(port=port, motors={name: motor})
+        try:
+            bus.connect(handshake=False)
+            bus.setup_motor(name)
+            print(f"  ✓ '{name}' ID set to {motor.id}")
+        except Exception as e:
+            print(f"Setup failed for '{name}' on {port}: {type(e).__name__}: {e}", file=sys.stderr)
+            print(
+                "Hint: connect exactly one STS3215 motor, check power/cable, then rerun this command.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        finally:
+            try:
+                bus.port_handler.closePort()
+            except Exception:
+                pass
+
+    print("All configured motor IDs have been assigned. Run `uv run lampgo ping` to verify the full chain.")
+
 
 def _cmd_scan_motors(args: argparse.Namespace) -> None:
     """Raw SCS/STS bus scan using bare pyserial — no lerobot, no model checks.
@@ -536,7 +598,6 @@ def _cmd_scan_motors(args: argparse.Namespace) -> None:
             "  • Half-duplex direction-pin issue on this USB adapter"
         )
         sys.exit(1)
-
 
 def _cmd_install_openclaw(args: argparse.Namespace) -> None:
     from lampgo.bridge.openclaw_installer import install_openclaw_integration
