@@ -136,6 +136,7 @@ uv run lampgo calibrate
 uv run lampgo help                         # 查看常用调试命令
 uv run lampgo status                       # 查询守护进程状态
 uv run lampgo detect                       # 自动探测串口
+uv run lampgo scan-motors --ids 1-20       # 电机总线原始扫描
 uv run lampgo skills                       # 列出可用技能
 
 uv run lampgo text "做个害羞的表情"          # 自然语言路由

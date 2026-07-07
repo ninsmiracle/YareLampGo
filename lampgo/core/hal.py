@@ -199,15 +199,7 @@ class HardwareAbstraction:
         if self._bus is None:
             logger.info("hal.disable_torque: stub mode")
             return
-        # Prefer per-motor explicit register writes first (more observable and
-        # robust across mixed firmware), then call bus-level helper as fallback.
-        for motor in self._bus.motors:
-            self._safe_bus_write("Lock", motor, 0)
-            self._safe_bus_write("Torque_Enable", motor, 0)
-        try:
-            self._bus.disable_torque()
-        except Exception:
-            logger.warning("hal.disable_torque_bus_call_failed", exc_info=True)
+        self._release_torque_for_manual_motion(strict=False)
         logger.info("hal.torque_disabled")
 
     def enable_torque(self) -> None:
@@ -266,9 +258,10 @@ class HardwareAbstraction:
                 return
 
         logger.info("calibration.start")
-        self._bus.disable_torque()
+        self._release_torque_for_manual_motion(strict=True)
         for motor in self._bus.motors:
-            self._bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+            self._write_register_or_raise("Operating_Mode", motor, OperatingMode.POSITION.value)
+        self._open_manual_calibration_range()
 
         input("Move arm to the middle of its range of motion and press ENTER...")
         homing_offsets = self._bus.set_half_turn_homings()
@@ -392,6 +385,11 @@ class HardwareAbstraction:
 
         self._ensure_hardware_calibration()
 
+        # Torque_Limit (0-1000) caps stall current for every motor.
+        # Keeps the bus servo adapter board from overheating when servos are
+        # stalled against mechanical stops. 800 = 80 % of rated torque by default.
+        torque_limit_raw = max(100, min(1000, int(self._config.max_torque_pct * 10)))
+
         for motor in healthy_motors:
             # Configure each motor independently so one flaky status packet
             # does not block the whole arm from starting up.
@@ -403,6 +401,8 @@ class HardwareAbstraction:
             self._safe_bus_write("P_Coefficient", motor, 16)
             self._safe_bus_write("I_Coefficient", motor, 0)
             self._safe_bus_write("D_Coefficient", motor, 32)
+            self._safe_bus_write("Torque_Limit", motor, torque_limit_raw, normalize=False)
+        logger.info("hal.torque_limit_set", pct=self._config.max_torque_pct, raw=torque_limit_raw)
 
         self._seed_goal_positions_to_present(healthy_motors)
         for motor in healthy_motors:
@@ -434,6 +434,110 @@ class HardwareAbstraction:
                 exc_info=True,
             )
             return False
+
+    def _write_register_or_raise(
+        self,
+        data_name: str,
+        motor: str,
+        value: Any,
+        *,
+        normalize: bool = True,
+        num_retry: int = 3,
+    ) -> None:
+        if not self._safe_bus_write(
+            data_name,
+            motor,
+            value,
+            normalize=normalize,
+            num_retry=num_retry,
+        ):
+            raise RuntimeError(f"Cannot write {data_name}={value!r} for '{motor}'.")
+
+        try:
+            actual = self._bus.read(data_name, motor, normalize=normalize)
+        except Exception:
+            logger.warning(
+                "hal.register_verify_read_failed",
+                motor=motor,
+                register=data_name,
+                expected=value,
+                exc_info=True,
+            )
+            return
+
+        if int(actual) != int(value):
+            raise RuntimeError(
+                f"Cannot verify {data_name} for '{motor}': expected {value}, got {actual}."
+            )
+
+    def _release_torque_for_manual_motion(self, *, strict: bool) -> None:
+        """Release every motor before hand-guided calibration/recording.
+
+        Feetech configuration writes are slow and occasionally flaky on a busy
+        serial bus. Use explicit per-register retries and then verify the two
+        registers that matter for safe hand movement.
+        """
+        if self._bus is None:
+            return
+
+        motors = list(self._bus.motors)
+        for motor in motors:
+            self._safe_bus_write("Torque_Enable", motor, 0, num_retry=3)
+            self._safe_bus_write("Lock", motor, 0, num_retry=3)
+
+        try:
+            self._bus.disable_torque(motors, num_retry=3)
+        except TypeError:
+            try:
+                self._bus.disable_torque()
+            except Exception:
+                logger.warning("hal.disable_torque_bus_call_failed", exc_info=True)
+        except Exception:
+            logger.warning("hal.disable_torque_bus_call_failed", exc_info=True)
+
+        bad: dict[str, dict[str, Any]] = {}
+        for motor in motors:
+            state: dict[str, Any] = {}
+            for register in ("Torque_Enable", "Lock"):
+                try:
+                    state[register] = self._bus.read(register, motor, normalize=False)
+                except Exception as exc:
+                    state[register] = f"read_failed:{type(exc).__name__}"
+            if state.get("Torque_Enable") != 0 or state.get("Lock") != 0:
+                bad[motor] = state
+
+        if bad:
+            logger.warning("hal.torque_release_verify_failed", motors=bad)
+            if strict:
+                detail = ", ".join(f"{motor}={state}" for motor, state in bad.items())
+                raise RuntimeError(
+                    "Motor torque/lock registers did not release before manual motion: "
+                    f"{detail}"
+                )
+
+    def _open_manual_calibration_range(self) -> None:
+        """Clear stale hardware limits before asking the user to move joints by hand."""
+        if self._bus is None:
+            return
+
+        opened: dict[str, dict[str, int]] = {}
+        for motor, config in self._bus.motors.items():
+            model = config.model
+            max_position = int(self._bus.model_resolution_table[model]) - 1
+            self._write_register_or_raise("Homing_Offset", motor, 0, normalize=False)
+            self._write_register_or_raise("Min_Position_Limit", motor, 0, normalize=False)
+            self._write_register_or_raise(
+                "Max_Position_Limit",
+                motor,
+                max_position,
+                normalize=False,
+            )
+            opened[motor] = {
+                "min": 0,
+                "max": max_position,
+            }
+
+        logger.info("calibration.manual_range_opened", motors=opened)
 
     def _ensure_hardware_calibration(self) -> None:
         if self._bus is None or not self._bus.calibration:

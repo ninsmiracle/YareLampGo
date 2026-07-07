@@ -13,6 +13,7 @@
 motor_port = "/dev/ttyUSB0"    # Feetech 电机总线串口 (必填，你的设备可能不同)
 lamp_id = "AL02"               # 设备标识，用于校准文件查找
 use_degrees = true             # true = 角度模式, false = 归一化 -100~100
+max_torque_pct = 80            # 电机 Torque_Limit 百分比 (10-100)，降低堵转电流和转接板发热
 
 [motion]
 tick_rate_hz = 50.0            # 控制循环频率 (Hz)

@@ -17,6 +17,7 @@ def test_build_help_text_contains_common_commands():
     assert "uv run lampgo run --web" in text
     assert "http://localhost:8420" in text
     assert "uv run lampgo detect" in text
+    assert "uv run lampgo scan-motors --ids 1-20" in text
     assert "uv run lampgo clear" in text
     assert "uv run lampgo setup-motors" in text
     assert "uv run lampgo calibrate" in text

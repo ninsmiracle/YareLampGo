@@ -48,7 +48,7 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 
 - `无线接入`：ESP32 设备自动发现或指定 `lampgo-cam-XXXX.local` / IP，调整画面尺寸、JPEG 画质和 HTTP 超时。
 - `本机硬件`：电机串口 `device.motor_port`、本地摄像头 `camera.port`、本地麦克风 `voice.mic_device`。
-- `高级`：设备标识 `device.lamp_id` 和角度单位 `device.use_degrees`。
+- `高级`：设备标识 `device.lamp_id`、角度单位 `device.use_degrees` 和堵转保护 `device.max_torque_pct`。
 - `运动 / 安全`：默认动作速度、动作风格、待机随机摆动、安全速度和安全加速度。
 
 
@@ -154,6 +154,7 @@ silence_timeout_s = 60
 motor_port = "/dev/ttyUSB0"
 lamp_id = "AL02"
 use_degrees = true
+max_torque_pct = 80
 
 [camera]
 port = ""
@@ -168,6 +169,7 @@ http_timeout_s = 5.0
 
 - `motor_port`：Feetech 电机总线串口，可在 Web 硬件页保存后热重连。
 - `lamp_id`：用于匹配 `assets/calibration/` 下的校准文件。
+- `max_torque_pct`：电机 Torque_Limit 百分比，默认 `80`；降低堵转电流和转接板发热，不改变正常空载速度。
 - `camera.port`：本地 USB 摄像头索引，如 `0` 或 `1`；使用 ESP32 摄像头时通常留空。
 - `device_esp32.preferred_host`：留空表示自动发现，也可指定 `lampgo-cam-XXXX.local` 或设备 IP。
 
