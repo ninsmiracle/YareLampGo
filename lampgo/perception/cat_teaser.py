@@ -77,6 +77,8 @@ class CatPlayObservation:
     engagement_score: float
     motion_centroid: tuple[float, float] | None
     timestamp: float
+    contact_motion_energy: float = 0.0
+    marker_disturbance: float = 0.0
 
 
 def _import_cv2():
@@ -94,7 +96,9 @@ class CatTeaserFrameSource:
     """Read BGR frames from the lamp-head camera.
 
     ESP32 camera is preferred when enabled and online. If a local camera port is
-    configured, it is used as a fallback or as the primary source.
+    configured, it is used as a fallback or as the primary source. In no-hardware
+    mode callers may allow an implicit local camera fallback, which tries device
+    index 0 without persisting it to config.
     """
 
     WIDTH = 640
@@ -107,21 +111,28 @@ class CatTeaserFrameSource:
         *,
         device_esp32_config: DeviceEsp32Config | None = None,
         esp32_manager: Esp32DeviceManager | None = None,
+        allow_local_camera_fallback: bool = False,
+        fallback_local_port: str = "0",
     ) -> None:
         self._config = camera_config or CameraConfig()
         self._device_cfg = device_esp32_config
         self._esp32 = esp32_manager
+        self._allow_local_camera_fallback = allow_local_camera_fallback
+        self._fallback_local_port = str(fallback_local_port or "0")
         self._cv2 = None
         self._cap = None
+        self._local_label = ""
 
     @property
     def enabled(self) -> bool:
-        if self._config.port.strip():
+        if self._local_camera_port():
             return True
         return bool(self._device_cfg and self._device_cfg.enabled)
 
     @property
     def device_label(self) -> str:
+        if self._cap is not None and self._local_label:
+            return self._local_label
         if self._device_cfg is not None and self._device_cfg.enabled and self._esp32 is not None:
             host = self._esp32.get_active_host()
             if host:
@@ -129,13 +140,17 @@ class CatTeaserFrameSource:
             if self._device_cfg.preferred_host:
                 return f"esp32://{self._device_cfg.preferred_host} (offline)"
             return "esp32://(discovering)"
-        return self._config.port
+        port = self._local_camera_port()
+        if port:
+            suffix = " (fallback)" if self._using_implicit_local_fallback() else ""
+            return f"local://{port}{suffix}"
+        return ""
 
     def start(self) -> None:
         if not self.enabled:
             raise CatTeaserCameraError("cat_teaser needs a configured lamp-head camera")
         self._cv2 = _import_cv2()
-        if self._config.port.strip():
+        if self._local_camera_port():
             self._open_local_camera()
 
     def read(self):
@@ -164,7 +179,8 @@ class CatTeaserFrameSource:
         cv2 = self._cv2
         if cv2 is None:
             return
-        device = self._parse_device(self._config.port)
+        port = self._local_camera_port()
+        device = self._parse_device(port)
         if device is None:
             return
         for backend in self._candidate_backends(cv2, device):
@@ -173,9 +189,15 @@ class CatTeaserFrameSource:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.HEIGHT)
                 self._cap = cap
+                suffix = " (fallback)" if self._using_implicit_local_fallback() else ""
+                self._local_label = f"local://{port}{suffix}"
                 return
             cap.release()
-        logger.warning("cat_teaser.local_camera_unavailable", port=self._config.port)
+        logger.warning(
+            "cat_teaser.local_camera_unavailable",
+            port=port,
+            fallback=self._using_implicit_local_fallback(),
+        )
 
     def _read_esp32_frame(self):
         cv2 = self._cv2
@@ -209,6 +231,17 @@ class CatTeaserFrameSource:
         if value.isdigit():
             return int(value)
         return value
+
+    def _local_camera_port(self) -> str:
+        configured = self._config.port.strip()
+        if configured:
+            return configured
+        if self._allow_local_camera_fallback:
+            return self._fallback_local_port.strip() or "0"
+        return ""
+
+    def _using_implicit_local_fallback(self) -> bool:
+        return not self._config.port.strip() and bool(self._allow_local_camera_fallback)
 
     @staticmethod
     def _candidate_backends(cv2, device: int | str) -> list[int | None]:
@@ -315,6 +348,7 @@ class CatTeaserDebugView:
         lines = [
             f"t={elapsed_s:.1f}s state={observation.state}",
             f"motion={observation.motion_energy:.3f} engagement={observation.engagement_score:.2f}",
+            f"contact={observation.contact_motion_energy:.3f} disturb={observation.marker_disturbance:.3f}",
             "q/esc: stop cat_teaser",
         ]
         if event_text:
@@ -429,12 +463,28 @@ class CatPlayStateEstimator:
 
     motion_threshold: int = 18
     marker_timeout_s: float = 0.8
+    min_caught_lost_s: float = 0.28
+    min_caught_lost_frames: int = 3
+    stable_marker_frames: int = 3
+    caught_motion_threshold: float = 0.22
+    pounce_motion_threshold: float = 0.19
+    visible_caught_motion_threshold: float = 0.18
+    visible_caught_contact_threshold: float = 0.27
+    visible_caught_disturbed_contact_threshold: float = 0.18
+    visible_caught_marker_disturbance: float = 0.055
+    visible_caught_strong_marker_disturbance: float = 0.09
     rest_after_s: float = 2.0
     unsafe_radius_ratio: float = 0.22
     unsafe_area_ratio: float = 0.055
     _previous_gray: object | None = field(default=None, init=False, repr=False)
     _last_marker: MarkerDetection | None = field(default=None, init=False)
     _last_seen_at: float | None = field(default=None, init=False)
+    _lost_started_at: float | None = field(default=None, init=False)
+    _marker_seen_frames: int = field(default=0, init=False)
+    _marker_lost_frames: int = field(default=0, init=False)
+    _seen_frames_before_loss: int = field(default=0, init=False)
+    _pounce_motion_frames: int = field(default=0, init=False)
+    _last_pounce_at: float | None = field(default=None, init=False)
     _engagement_score: float = field(default=0.0, init=False)
 
     def update(
@@ -449,15 +499,19 @@ class CatPlayStateEstimator:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         motion_mask = self._motion_mask(cv2, gray)
+        motion_mask = self._without_marker_self_motion(cv2, motion_mask, marker)
 
         anchor = marker or self._last_marker
         motion_energy, centroid = self._local_motion(motion_mask, anchor)
-        state = self._classify(marker, motion_energy, now)
+        contact_motion_energy = self._contact_motion(motion_mask, marker)
+        marker_disturbance = self._marker_disturbance(marker) if marker is not None else 0.0
+        self._update_marker_history(marker, now)
+        state = self._classify(marker, motion_energy, contact_motion_energy, marker_disturbance, now)
+        self._update_pounce_history(state, now)
         self._update_engagement(marker, motion_energy, state)
 
         if marker is not None:
             self._last_marker = marker
-            self._last_seen_at = now
         self._previous_gray = gray
 
         return CatPlayObservation(
@@ -467,6 +521,8 @@ class CatPlayStateEstimator:
             engagement_score=self._engagement_score,
             motion_centroid=centroid,
             timestamp=now,
+            contact_motion_energy=contact_motion_energy,
+            marker_disturbance=marker_disturbance,
         )
 
     def _motion_mask(self, cv2, gray):
@@ -474,6 +530,23 @@ class CatPlayStateEstimator:
             return np.zeros_like(gray, dtype=np.uint8)
         delta = cv2.absdiff(self._previous_gray, gray)
         _ret, mask = cv2.threshold(delta, self.motion_threshold, 255, cv2.THRESH_BINARY)
+        return mask
+
+    def _without_marker_self_motion(
+        self,
+        cv2,
+        motion_mask,
+        marker: MarkerDetection | None,
+    ):
+        if marker is None and self._last_marker is None:
+            return motion_mask
+        mask = motion_mask.copy()
+        for detection in (marker, self._last_marker):
+            if detection is None:
+                continue
+            center = (int(detection.x), int(detection.y))
+            radius = max(20, int(detection.radius * 1.8))
+            cv2.circle(mask, center, radius, 0, -1)
         return mask
 
     def _local_motion(
@@ -503,10 +576,40 @@ class CatPlayStateEstimator:
         cy = (y0 + float(np.mean(ys))) / max(float(height), 1.0)
         return energy, (cx, cy)
 
+    def _contact_motion(
+        self,
+        motion_mask,
+        marker: MarkerDetection | None,
+    ) -> float:
+        if marker is None:
+            return 0.0
+        height, width = motion_mask.shape[:2]
+        cx = int(marker.x)
+        cy = int(marker.y)
+        inner = max(20, int(marker.radius * 1.7))
+        outer = max(inner + 12, int(marker.radius * 3.3))
+        x0 = max(0, cx - outer)
+        x1 = min(width, cx + outer)
+        y0 = max(0, cy - outer)
+        y1 = min(height, cy + outer)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+
+        roi = motion_mask[y0:y1, x0:x1]
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        distance_sq = (xx - marker.x) ** 2 + (yy - marker.y) ** 2
+        ring = (distance_sq >= inner**2) & (distance_sq <= outer**2)
+        ring_area = int(np.count_nonzero(ring))
+        if ring_area <= 0:
+            return 0.0
+        return float(np.count_nonzero(roi[ring])) / float(ring_area)
+
     def _classify(
         self,
         marker: MarkerDetection | None,
         motion_energy: float,
+        contact_motion_energy: float,
+        marker_disturbance: float,
         now: float,
     ) -> CatPlayState:
         if marker is not None and self._is_unsafe_close(marker):
@@ -514,18 +617,100 @@ class CatPlayStateEstimator:
 
         if marker is None:
             recent_marker = self._last_seen_at is not None and now - self._last_seen_at <= self.marker_timeout_s
-            if recent_marker and motion_energy > 0.035:
+            lost_duration = now - self._lost_started_at if self._lost_started_at is not None else 0.0
+            sustained_loss = (
+                self._marker_lost_frames >= self.min_caught_lost_frames
+                and lost_duration >= self.min_caught_lost_s
+            )
+            stable_before_loss = self._seen_frames_before_loss >= self.stable_marker_frames
+            was_pouncing = self._last_pounce_at is not None and now - self._last_pounce_at <= self.marker_timeout_s
+            if (
+                recent_marker
+                and sustained_loss
+                and stable_before_loss
+                and was_pouncing
+                and motion_energy > self.caught_motion_threshold
+            ):
                 return "caught"
             if self._last_seen_at is not None and now - self._last_seen_at > self.rest_after_s:
                 if self._engagement_score < 0.12 and motion_energy < 0.02:
                     return "rest"
             return "searching"
 
-        if motion_energy > 0.16:
+        if self._is_visible_contact(marker, motion_energy, contact_motion_energy, marker_disturbance):
+            return "caught"
+
+        if motion_energy > self.pounce_motion_threshold:
+            self._pounce_motion_frames += 1
+        else:
+            self._pounce_motion_frames = 0
+        if self._pounce_motion_frames >= 2 or motion_energy > self.pounce_motion_threshold * 2.2:
             return "pounce"
         if motion_energy > 0.045 or self._engagement_score > 0.35:
             return "engaged"
         return "teasing"
+
+    def _is_visible_contact(
+        self,
+        marker: MarkerDetection,
+        motion_energy: float,
+        contact_motion_energy: float,
+        marker_disturbance: float,
+    ) -> bool:
+        del marker
+        if contact_motion_energy < self.visible_caught_disturbed_contact_threshold:
+            return False
+
+        strong_contact = (
+            motion_energy >= self.visible_caught_motion_threshold * 1.8
+            and contact_motion_energy >= self.visible_caught_contact_threshold
+            and marker_disturbance >= self.visible_caught_marker_disturbance
+        )
+        disturbed_contact = (
+            motion_energy >= self.visible_caught_motion_threshold
+            and contact_motion_energy >= self.visible_caught_contact_threshold
+            and marker_disturbance >= self.visible_caught_strong_marker_disturbance
+        )
+        near_tip_nudge = (
+            motion_energy >= self.visible_caught_motion_threshold
+            and contact_motion_energy >= self.visible_caught_contact_threshold * 1.1
+            and marker_disturbance >= self.visible_caught_marker_disturbance
+        )
+        if not (strong_contact or disturbed_contact or near_tip_nudge):
+            return False
+        return True
+
+    def _marker_disturbance(self, marker: MarkerDetection) -> float:
+        previous = self._last_marker
+        if previous is None:
+            return 0.0
+        dx = marker.normalized_x - previous.normalized_x
+        dy = marker.normalized_y - previous.normalized_y
+        shift = (dx * dx + dy * dy) ** 0.5 * 4.0
+        area_change = abs(marker.area - previous.area) / max(marker.area, previous.area, 1.0)
+        radius_change = abs(marker.radius - previous.radius) / max(marker.radius, previous.radius, 1.0)
+        confidence_drop = max(0.0, previous.confidence - marker.confidence)
+        return max(shift, area_change, radius_change * 1.4, confidence_drop)
+
+    def _update_marker_history(self, marker: MarkerDetection | None, now: float) -> None:
+        if marker is not None:
+            self._marker_seen_frames += 1
+            self._marker_lost_frames = 0
+            self._lost_started_at = None
+            self._seen_frames_before_loss = 0
+            self._last_seen_at = now
+            return
+
+        if self._marker_lost_frames == 0:
+            self._lost_started_at = now
+            self._seen_frames_before_loss = self._marker_seen_frames
+        self._marker_lost_frames += 1
+        self._marker_seen_frames = 0
+        self._pounce_motion_frames = 0
+
+    def _update_pounce_history(self, state: CatPlayState, now: float) -> None:
+        if state == "pounce":
+            self._last_pounce_at = now
 
     def _is_unsafe_close(self, marker: MarkerDetection) -> bool:
         min_dim = max(float(min(marker.frame_width, marker.frame_height)), 1.0)

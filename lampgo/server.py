@@ -170,6 +170,7 @@ class LampgoServer:
             self.config.camera,
             device_esp32_config=self.config.device_esp32,
             esp32_manager=self.esp32,
+            allow_local_camera_fallback=bool(self.config.no_hw),
         )
 
     def _recording_actions_prompt(self) -> str:
@@ -1421,6 +1422,12 @@ class LampgoServer:
         virtual = bool(getattr(self.motion, "is_virtual", False))
         if not self.hal.is_connected and not virtual:
             health = "disconnected"
+        cat_teaser_camera = self._cat_teaser_camera_status()
+        camera_ready = (
+            bool(self.config.camera.port.strip())
+            or bool(self.config.device_esp32.enabled)
+            or bool(cat_teaser_camera.get("fallback"))
+        )
         return {
             "ok": True,
             "result": {
@@ -1435,9 +1442,41 @@ class LampgoServer:
                 "recording": self._record_status(),
                 "hal_connected": bool(self.hal.is_connected),
                 "led_ready": bool(self.led.is_connected),
-                "camera_ready": bool(self.config.camera.port.strip()) or bool(self.config.device_esp32.enabled),
+                "camera_ready": camera_ready,
+                "cat_teaser_camera": cat_teaser_camera,
                 "conversation_state": self._wake_loop.conversation_state.value if self._wake_loop else None,
             },
+        }
+
+    def _cat_teaser_camera_status(self) -> dict[str, Any]:
+        if self.config.device_esp32.enabled:
+            host = self.esp32.get_active_host() if self.esp32 else ""
+            return {
+                "mode": "esp32",
+                "label": f"esp32://{host}" if host else "esp32://(discovering)",
+                "fallback": False,
+                "hardware_present": bool(self.hal.is_connected) and not self.config.no_hw,
+            }
+        port = self.config.camera.port.strip()
+        if port:
+            return {
+                "mode": "local_configured",
+                "label": f"local://{port}",
+                "fallback": False,
+                "hardware_present": bool(self.hal.is_connected) and not self.config.no_hw,
+            }
+        if self.config.no_hw:
+            return {
+                "mode": "local_no_hw_fallback",
+                "label": "local://0 (fallback)",
+                "fallback": True,
+                "hardware_present": False,
+            }
+        return {
+            "mode": "none",
+            "label": "",
+            "fallback": False,
+            "hardware_present": bool(self.hal.is_connected),
         }
 
     def _handle_list_cameras(self) -> dict:

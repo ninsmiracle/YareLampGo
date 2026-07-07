@@ -1202,6 +1202,44 @@
     </form>
   </dialog>
 
+  <dialog id="cat-teaser-dialog" class="record-dialog">
+    <form id="cat-teaser-form" class="record-dialog-card">
+      <div class="record-dialog-title">逗猫棒互动</div>
+      <div id="cat-teaser-hardware-notice" class="cat-teaser-hardware-notice" hidden></div>
+      <label class="record-dialog-field">
+        <span class="record-dialog-label">持续时间</span>
+        <div class="cat-teaser-duration-row">
+          <input
+            id="cat-teaser-duration-input"
+            class="record-dialog-input"
+            type="number"
+            min="1"
+            max="300"
+            step="1"
+            value="60"
+            inputmode="numeric"
+          >
+          <span class="cat-teaser-duration-unit">秒</span>
+        </div>
+      </label>
+      <label class="record-dialog-field">
+        <span class="record-dialog-label">标识颜色</span>
+        <select id="cat-teaser-marker-select" class="record-dialog-input record-dialog-select">
+          <option value="red">红色</option>
+          <option value="magenta">品红</option>
+          <option value="green">绿色</option>
+          <option value="blue">蓝色</option>
+          <option value="yellow">黄色</option>
+        </select>
+      </label>
+      <div id="cat-teaser-error" class="record-dialog-error"></div>
+      <div class="record-dialog-actions">
+        <button id="btn-cat-teaser-cancel" class="ghost-button" type="button">取消</button>
+        <button id="btn-cat-teaser-start" class="send-button" type="submit">开始逗猫</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="esp32-setup-dialog" class="esp32-setup-dialog">
     <div class="esp32-setup-card">
       <div class="esp32-setup-head">
