@@ -83,6 +83,7 @@
   const catTeaserForm = document.getElementById("cat-teaser-form");
   const catTeaserDurationInput = document.getElementById("cat-teaser-duration-input");
   const catTeaserMarkerSelect = document.getElementById("cat-teaser-marker-select");
+  const catTeaserSaveRecordingInput = document.getElementById("cat-teaser-save-recording-input");
   const catTeaserHardwareNotice = document.getElementById("cat-teaser-hardware-notice");
   const catTeaserError = document.getElementById("cat-teaser-error");
   const btnCatTeaserCancel = document.getElementById("btn-cat-teaser-cancel");
@@ -2306,6 +2307,12 @@
     closeCameraPopover();
   }
 
+  function cameraSetErrorLabel(error) {
+    if (error === "esp32_firmware_update_required") return "ESP32 摄像头固件版本过旧，请先更新固件后再启用。";
+    if (error === "esp32_paired_to_other") return "ESP32 摄像头已配对到其他设备，请先在设备上解除或重新配网。";
+    return `摄像头切换失败：${error || "未知错误"}`;
+  }
+
   if (chipCamera) {
     chipCamera.style.cursor = "pointer";
     chipCamera.classList.add("is-clickable");
@@ -2398,6 +2405,13 @@
         repopulateCameraPortSelect(displayPort);
         maybeSyncInitialEsp32Volume();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
+        send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
+      } else {
+        if (msg.result && msg.result.esp32) cameraCache.esp32 = msg.result.esp32;
+        const message = cameraSetErrorLabel(msg.error);
+        if (chipCamera) chipCamera.title = message;
+        addSystemMessage(message);
+        send({ type: "list_cameras", request_id: `cam_recover_${Date.now()}` });
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
       }
       return;
@@ -3698,9 +3712,26 @@
     return Math.max(min, Math.min(max, n));
   }
 
+  function isCatTeaserNoHwMode() {
+    const status = latestStatusData || {};
+    return Boolean(status.no_hw);
+  }
+
+  function syncCatTeaserRecordingControlAvailability() {
+    if (!catTeaserSaveRecordingInput) return;
+    const noHw = isCatTeaserNoHwMode();
+    catTeaserSaveRecordingInput.disabled = noHw;
+    catTeaserSaveRecordingInput.title = noHw ? "--no-hw 模式下不保存摄像头视频" : "保存本次摄像头视频 MP4";
+    if (noHw) catTeaserSaveRecordingInput.checked = false;
+  }
+
   function openCatTeaserDialog(skill) {
     if (!catTeaserDialog || !catTeaserForm) {
-      invokeSkill("cat_teaser", { duration: 60, marker_color: "red" }, "逗猫棒互动 · 60 秒 · 红色标识");
+      invokeSkill(
+        "cat_teaser",
+        { duration: 60, marker_color: "red", save_recording: !isCatTeaserNoHwMode() },
+        "逗猫棒互动 · 60 秒 · 红色标识"
+      );
       return;
     }
     catTeaserDialog.dataset.skillId = "cat_teaser";
@@ -3711,6 +3742,10 @@
       const hasMarkerOption = Array.from(catTeaserMarkerSelect.options).some((option) => option.value === marker);
       catTeaserMarkerSelect.value = hasMarkerOption ? marker : "red";
     }
+    if (catTeaserSaveRecordingInput) {
+      catTeaserSaveRecordingInput.checked = Boolean(skillParamDefault(skill, "save_recording", true));
+    }
+    syncCatTeaserRecordingControlAvailability();
     if (catTeaserError) catTeaserError.textContent = "";
     renderCatTeaserHardwareNotice();
     catTeaserDialog.showModal();
@@ -3725,6 +3760,9 @@
   function startCatTeaserFromDialog() {
     const duration = clampNumber(catTeaserDurationInput && catTeaserDurationInput.value, 1, 300, 60);
     const markerColor = String((catTeaserMarkerSelect && catTeaserMarkerSelect.value) || "red").trim().toLowerCase();
+    const saveRecording = catTeaserSaveRecordingInput
+      ? Boolean(catTeaserSaveRecordingInput.checked && !catTeaserSaveRecordingInput.disabled)
+      : !isCatTeaserNoHwMode();
     if (!duration) {
       if (catTeaserError) catTeaserError.textContent = "请输入持续时间";
       if (catTeaserDurationInput) catTeaserDurationInput.focus();
@@ -3734,7 +3772,7 @@
     closeCatTeaserDialog();
     invokeSkill(
       "cat_teaser",
-      { duration, marker_color: markerColor },
+      { duration, marker_color: markerColor, save_recording: saveRecording },
       `逗猫棒互动 · ${duration} 秒 · ${catTeaserMarkerLabel(markerColor)}标识`
     );
   }
@@ -3745,10 +3783,13 @@
     const catCamera = status.cat_teaser_camera || {};
     let text = "";
     if (status.no_hw && catCamera.fallback) {
-      text = "当前是无硬件模式：没有 LampGo 本体机械臂/灯头摄像头。逗猫算法会尝试使用电脑摄像头 local://0 作为 fallback，并通过虚拟运动模拟动作。";
-    } else if (status.no_hw || status.virtual_motion || status.hal_connected === false) {
+      text = "当前是无硬件模式：没有 LampGo 本体机械臂/灯头摄像头。逗猫算法会尝试使用电脑摄像头 local://0 作为 fallback，并通过虚拟运动模拟动作；本次不会保存摄像头视频。";
+    } else if (status.no_hw) {
+      text = "当前是无硬件模式：没有 LampGo 本体机械臂/灯头摄像头；本次不会保存摄像头视频。";
+    } else if (status.virtual_motion || status.hal_connected === false) {
       text = "当前没有检测到 LampGo 本体硬件；逗猫动作不会驱动真实机械臂。";
     }
+    syncCatTeaserRecordingControlAvailability();
     catTeaserHardwareNotice.textContent = text;
     catTeaserHardwareNotice.hidden = !text;
   }

@@ -511,10 +511,13 @@ async def test_cat_teaser_skill_cancels_cleanly(monkeypatch) -> None:
     task = asyncio.create_task(
         skill.execute(_fake_context(motion), duration=5, camera_fps=12, debug_view=False, log_events=False)
     )
-    while source.reads == 0:
-        await asyncio.sleep(0.01)
+    async def _wait_for_first_read() -> None:
+        while source.reads == 0:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_wait_for_first_read(), timeout=2.0)
     await skill.cancel()
-    result = await task
+    result = await asyncio.wait_for(task, timeout=2.0)
 
     assert result.status == "cancelled"
     assert result.data["stop_reason"] == "cancelled"
@@ -588,6 +591,31 @@ async def test_cat_teaser_skill_saves_camera_video(monkeypatch, tmp_path) -> Non
     assert metadata["video"] == "cat_teaser.mp4"
     assert metadata["video_codec"] == "mp4v"
     assert metadata["frames_written"] == recording["frames_written"]
+
+
+@pytest.mark.asyncio
+async def test_cat_teaser_skill_disables_recording_when_not_allowed(monkeypatch, tmp_path) -> None:
+    pytest.importorskip("cv2")
+    source = _ImageFrameSource()
+    monkeypatch.setattr(cat_skill_mod, "CatToyTracker", _FakeTracker)
+    monkeypatch.setattr(cat_skill_mod, "CatPlayStateEstimator", _FakeEstimator)
+    motion = _FakeMotion()
+    skill = CatTeaserSkill(lambda: source, allow_recording=False)
+
+    result = await skill.execute(
+        _fake_context(motion),
+        duration=0.25,
+        camera_fps=12,
+        debug_view=False,
+        log_events=False,
+        save_recording=True,
+        recording_dir=str(tmp_path),
+    )
+
+    assert result.status == "ok"
+    assert result.data["recording"]["enabled"] is False
+    assert result.data["recording"]["video_path"] is None
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio

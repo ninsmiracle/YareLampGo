@@ -3345,6 +3345,25 @@ button.device-chip.is-active {
   padding: 9px 11px;
 }
 
+.cat-teaser-recording-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.cat-teaser-recording-row input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.cat-teaser-recording-row:has(input:disabled) {
+  color: var(--text-soft);
+}
+
 /* ============= Scrollbar ============= */
 
 ::-webkit-scrollbar {

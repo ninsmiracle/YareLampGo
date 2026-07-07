@@ -127,8 +127,9 @@ class CatTeaserSkill(Skill):
         ),
     }
 
-    def __init__(self, frame_source_factory: FrameSourceFactory) -> None:
+    def __init__(self, frame_source_factory: FrameSourceFactory, *, allow_recording: bool = True) -> None:
         self._frame_source_factory = frame_source_factory
+        self._allow_recording = allow_recording
         self._cancel_event: asyncio.Event | None = None
         self._motion = None
         self._source: CatTeaserFrameSource | None = None
@@ -144,7 +145,7 @@ class CatTeaserSkill(Skill):
             max_wrist = max(0.0, min(18.0, abs(float(params.get("max_wrist_pitch", 8.0)))))
             debug_view_enabled = _bool_param(params.get("debug_view"), default=True)
             log_events = _bool_param(params.get("log_events"), default=True)
-            save_recording = _bool_param(params.get("save_recording"), default=True)
+            save_recording_requested = _bool_param(params.get("save_recording"), default=True)
             recording_dir = str(params.get("recording_dir") or "").strip()
             tracker = CatToyTracker(marker_color=marker_color)
         except ValueError as exc:
@@ -155,6 +156,7 @@ class CatTeaserSkill(Skill):
         estimator = CatPlayStateEstimator()
         debug_view = CatTeaserDebugView(enabled=debug_view_enabled)
         event_tracker = _CatTeaserEventTracker(marker_color=marker_color, enabled=log_events)
+        save_recording = save_recording_requested and self._allow_recording
         recorder = _CatTeaserFrameRecorder(
             enabled=save_recording,
             base_dir=_recording_base_dir(recording_dir),
@@ -196,9 +198,12 @@ class CatTeaserSkill(Skill):
             end_at = started_at + duration
             recorder.set_camera(source.device_label)
             if log_events:
+                if save_recording_requested and not self._allow_recording:
+                    print("[cat_teaser] --no-hw模式下不保存摄像头视频", flush=True)
                 print(
                     f"[cat_teaser] 0.0秒开始逗猫 marker_color={marker_color} "
-                    f"camera={source.device_label} debug_view={debug_view_enabled}",
+                    f"camera={source.device_label} debug_view={debug_view_enabled} "
+                    f"save_recording={save_recording}",
                     flush=True,
                 )
             while not cancel_event.is_set() and time.monotonic() < end_at:
@@ -369,8 +374,6 @@ class CatTeaserSkill(Skill):
             self._cancel_event.set()
         if self._motion is not None:
             self._motion.stop_smooth()
-        if self._source is not None:
-            await asyncio.to_thread(self._source.close)
 
     def _target_for_observation(
         self,

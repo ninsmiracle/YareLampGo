@@ -163,7 +163,12 @@ class LampgoServer:
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
         self.registry.register(DanceToMusicSkill())
-        self.registry.register(CatTeaserSkill(self._make_cat_teaser_frame_source))
+        self.registry.register(
+            CatTeaserSkill(
+                self._make_cat_teaser_frame_source,
+                allow_recording=not bool(self.config.no_hw),
+            )
+        )
 
     def _make_cat_teaser_frame_source(self) -> CatTeaserFrameSource:
         return CatTeaserFrameSource(
