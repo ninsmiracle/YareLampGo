@@ -36,7 +36,14 @@ def _list_serial_ports() -> list[str]:
 
 
 def _probe_feetech(port: str) -> bool:
-    """Try to ping motor ID 1 on a Feetech bus. Returns True if it responds."""
+    """Try to ping motor IDs 1-6 on a Feetech SCS bus. Returns True if any responds.
+
+    Note: SCS protocol is half-duplex single-wire. Raw pyserial probing may fail
+    because direction-pin control (handled by lerobot) is not available here. A
+    False return does NOT mean the hardware is absent — it may just mean the USB
+    adapter does not expose a direction pin. The caller applies a single-port
+    fallback in that case.
+    """
     try:
         import serial
     except ImportError:
@@ -49,15 +56,21 @@ def _probe_feetech(port: str) -> bool:
         return False
 
     try:
-        motor_id = 1
-        payload = bytes([motor_id, 2, 1])  # ID, length=2, instruction=PING
-        checksum = (~sum(payload)) & 0xFF
-        packet = b"\xff\xff" + payload + bytes([checksum])
-        ser.reset_input_buffer()
-        ser.write(packet)
-        response = ser.read(6)
-        if len(response) >= 6 and response[0:2] == b"\xff\xff":
-            return True
+        for motor_id in range(1, 7):
+            payload = bytes([motor_id, 2, 1])  # ID, length=2, instruction=PING
+            checksum = (~sum(payload)) & 0xFF
+            packet = b"\xff\xff" + payload + bytes([checksum])
+            ser.reset_input_buffer()
+            ser.write(packet)
+            # Read up to 12 bytes: 6 possible TX echo + 6 response
+            raw = ser.read(12)
+            # Scan for a valid status-packet header anywhere in the buffer
+            for i in range(len(raw) - 5):
+                if raw[i : i + 2] == b"\xff\xff" and raw[i + 2] == motor_id:
+                    logger.info(
+                        "autodetect.feetech_found", port=port, motor_id=motor_id
+                    )
+                    return True
         return False
     except Exception:
         return False
@@ -66,7 +79,11 @@ def _probe_feetech(port: str) -> bool:
 
 
 def _probe_esp32(port: str) -> bool:
-    """Try to communicate with ESP32 LED controller at 9600 baud."""
+    """Try to communicate with ESP32 LED controller at 9600 baud.
+
+    Sends a status query and waits for any non-empty reply. Returns False if no
+    data is received, so a bare USB-serial adapter does not false-positive.
+    """
     try:
         import serial
     except ImportError:
@@ -78,10 +95,12 @@ def _probe_esp32(port: str) -> bool:
         return False
 
     try:
-        ser.write(b"m0\n")
         import time
-        time.sleep(0.1)
-        return True
+        ser.reset_input_buffer()
+        ser.write(b"ping\n")
+        time.sleep(0.15)
+        data = ser.read(ser.in_waiting or 1)
+        return len(data) > 0
     except Exception:
         return False
     finally:
@@ -92,7 +111,9 @@ def _list_camera_names() -> dict[int, str]:
     """Best-effort: get human-readable camera names from the OS."""
     names: dict[int, str] = {}
     try:
-        import subprocess, json as _json
+        import json as _json
+        import subprocess
+
         proc = subprocess.run(
             ["system_profiler", "SPCameraDataType", "-json"],
             capture_output=True, text=True, timeout=5, check=False,
@@ -118,7 +139,8 @@ def _detect_camera() -> tuple[str | None, list[str]]:
     found: list[str] = []
     recommended: str | None = None
 
-    import os, sys
+    import os
+
     for idx in range(4):
         devnull = os.open(os.devnull, os.O_WRONLY)
         old_stderr = os.dup(2)
@@ -203,6 +225,21 @@ def detect_ports() -> dict:
                 motor_port = port
                 messages.append(f"Motor bus detected: {port}")
 
+        if motor_port is None:
+            # SCS half-duplex probing often fails without direction-pin support;
+            # fall back gracefully before probing for the LED controller so we
+            # don't accidentally assign the only port to LED instead of motors.
+            if len(ports) == 1:
+                motor_port = ports[0]
+                messages.append(
+                    f"Motor bus auto-probe inconclusive (expected for SCS half-duplex). "
+                    f"Only one port available — assuming motor bus: {motor_port}"
+                )
+            else:
+                messages.append(
+                    "Motor bus not detected. Check USB connection and power supply."
+                )
+
         remaining = [p for p in ports if p != motor_port]
         for port in remaining:
             if led_port is not None:
@@ -212,12 +249,7 @@ def detect_ports() -> dict:
                 led_port = port
                 messages.append(f"LED controller detected: {port}")
 
-        if motor_port is None:
-            messages.append("Motor bus not detected. Check connection and power.")
-            if len(ports) == 1:
-                motor_port = ports[0]
-                messages.append(f"Only one port found, assuming motor bus: {motor_port}")
-        if led_port is None and len(remaining) > 0:
+        if led_port is None and remaining:
             messages.append(f"LED controller not detected. Candidate ports: {remaining}")
 
     camera_port, cam_msgs = _detect_camera()

@@ -65,6 +65,20 @@ class DeviceConfig(BaseModel):
     use_degrees: bool = Field(default=True, description="Interpret positions as degrees (vs normalised -100..100)")
     disable_torque_on_disconnect: bool = True
     calibration_dir: Path = Field(default=Path("assets/calibration"))
+    max_torque_pct: int = Field(
+        default=80,
+        ge=10,
+        le=100,
+        description=(
+            "Maximum torque limit as a percentage of rated torque (10-100). "
+            "Applied to every motor at startup via the Torque_Limit register. "
+            "Only affects stall current (motor jammed against a hard stop); "
+            "free-running speed and acceleration are unaffected up to this limit. "
+            "80% cuts worst-case stall current by ~20%% while preserving full "
+            "expressiveness for normal motion. Lower to 50-60 if the bus adapter "
+            "still overheats."
+        ),
+    )
 
 
 class MotionConfig(BaseModel):
@@ -81,7 +95,10 @@ class MotionConfig(BaseModel):
     )
     default_style: str = Field(
         default="gentle",
-        description="Biomimetic style preset when MotionTarget.style is unset (gentle|confident|curious|bouncy|hesitant|linear)",
+        description=(
+            "Biomimetic style preset when MotionTarget.style is unset "
+            "(gentle|confident|curious|bouncy|hesitant|linear)"
+        ),
     )
     default_playback_mode: str = Field(
         default="cleaned",
@@ -235,7 +252,11 @@ class LLMConfig(BaseModel):
         them so the runtime value matches what the UI/preset table expects.
         """
         return cls.normalize_provider_alias(v)
-    message_type: str = Field(default="openai", description="Message envelope: 'openai' (chat.completions) or 'anthropic' (messages)")
+
+    message_type: str = Field(
+        default="openai",
+        description="Message envelope: 'openai' (chat.completions) or 'anthropic' (messages)",
+    )
     model: str = Field(default="mimo-v2.5", description="Model name for complex reasoning tasks")
     fast_model: str = Field(default="mimo-v2.5", description="Model for simple/fast intent classification")
     api_key: str = Field(default="", description="Set via LAMPGO_LLM_API_KEY env var, NOT in config file")
@@ -426,7 +447,10 @@ class VoiceConfig(BaseModel):
     )
     call_mode: Literal["stable", "interruptible", "esp32_aec"] = Field(
         default="stable",
-        description="LiveKit call mode: stable half-duplex, interruptible without ESP32 AEC, or experimental ESP32 AEC.",
+        description=(
+            "LiveKit call mode: stable half-duplex, interruptible without "
+            "ESP32 AEC, or experimental ESP32 AEC."
+        ),
     )
     livekit_allow_interruptions: bool = Field(
         default=False,
@@ -442,7 +466,12 @@ class VoiceConfig(BaseModel):
         default=True,
         description="Drop likely self-echo ASR text in interruptible modes without enabling ESP32-side AEC.",
     )
-    silence_timeout_s: int = Field(default=60, ge=10, le=300, description="Seconds of silence before ending a conversation")
+    silence_timeout_s: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="Seconds of silence before ending a conversation",
+    )
     volcengine_app_id: str = Field(default="", description="Volcengine app ID for ASR/TTS")
     volcengine_access_token: str = Field(default="", description="Volcengine access token for ASR/TTS")
     livekit_tts_voice: str = Field(
@@ -700,6 +729,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_MOTOR_PORT": ("device", "motor_port"),
         "LAMPGO_LED_PORT": ("device", "led_port"),
         "LAMPGO_LAMP_ID": ("device", "lamp_id"),
+        "LAMPGO_MAX_TORQUE_PCT": ("device", "max_torque_pct"),
         "LAMPGO_MOTION_DEFAULT_MAX_VELOCITY": ("motion", "default_max_velocity"),
         "LAMPGO_MOTION_DEFAULT_STYLE": ("motion", "default_style"),
         "LAMPGO_MOTION_DEFAULT_PLAYBACK_MODE": ("motion", "default_playback_mode"),
