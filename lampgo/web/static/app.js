@@ -79,6 +79,14 @@
   const recordStartDesc = document.getElementById("record-start-desc");
   const recordTimer = document.getElementById("record-timer");
   const recordMetrics = document.getElementById("record-metrics");
+  const catTeaserDialog = document.getElementById("cat-teaser-dialog");
+  const catTeaserForm = document.getElementById("cat-teaser-form");
+  const catTeaserDurationInput = document.getElementById("cat-teaser-duration-input");
+  const catTeaserMarkerSelect = document.getElementById("cat-teaser-marker-select");
+  const catTeaserSaveRecordingInput = document.getElementById("cat-teaser-save-recording-input");
+  const catTeaserHardwareNotice = document.getElementById("cat-teaser-hardware-notice");
+  const catTeaserError = document.getElementById("cat-teaser-error");
+  const btnCatTeaserCancel = document.getElementById("btn-cat-teaser-cancel");
   const playbackModeButtons = Array.from(document.querySelectorAll("[data-playback-mode]"));
   const navButtons = Array.from(document.querySelectorAll(".nav-item[data-view]"));
   const viewSections = Array.from(document.querySelectorAll(".view[data-view]"));
@@ -158,6 +166,7 @@
     look_at: { title: "注视", description: "朝指定方向看过去。" },
     idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
     dance_to_music: { title: "跟音乐跳舞", description: "读取音乐节奏，按风格预设做明确律动。" },
+    cat_teaser: { title: "逗猫棒互动", description: "识别逗猫棒彩色标记，根据猫咪互动状态实时摆动。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
     presence_react: { title: "人来反应", description: "检测到人时转向并展示问候表情。" },
@@ -178,6 +187,7 @@
 
   const expressionMetaByName = new Map();
   const recordingExpressionByName = new Map();
+  let latestStatusData = {};
 
   function expressionMeta(name) {
     return expressionMetaByName.get(String(name || ""));
@@ -2297,6 +2307,12 @@
     closeCameraPopover();
   }
 
+  function cameraSetErrorLabel(error) {
+    if (error === "esp32_firmware_update_required") return "ESP32 摄像头固件版本过旧，请先更新固件后再启用。";
+    if (error === "esp32_paired_to_other") return "ESP32 摄像头已配对到其他设备，请先在设备上解除或重新配网。";
+    return `摄像头切换失败：${error || "未知错误"}`;
+  }
+
   if (chipCamera) {
     chipCamera.style.cursor = "pointer";
     chipCamera.classList.add("is-clickable");
@@ -2389,6 +2405,13 @@
         repopulateCameraPortSelect(displayPort);
         maybeSyncInitialEsp32Volume();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
+        send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
+      } else {
+        if (msg.result && msg.result.esp32) cameraCache.esp32 = msg.result.esp32;
+        const message = cameraSetErrorLabel(msg.error);
+        if (chipCamera) chipCamera.title = message;
+        addSystemMessage(message);
+        send({ type: "list_cameras", request_id: `cam_recover_${Date.now()}` });
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
       }
       return;
@@ -2935,6 +2958,7 @@
 
   function updateStatus(data) {
     if (!data) return;
+    latestStatusData = data || {};
 
     const healthy = data.device_health === "ok" && !data.estopped;
     const jointEntries = Object.entries(data.joint_positions || {});
@@ -2964,7 +2988,12 @@
         chipCameraDot.classList.toggle("is-online", online);
         chipCameraDot.classList.toggle("is-offline", !online);
       }
-      chipCamera.title = online ? "摄像头已接入" : "摄像头未配置";
+      const catCamera = data.cat_teaser_camera || {};
+      if (data.no_hw && catCamera.fallback) {
+        chipCamera.title = "无硬件模式：逗猫将尝试使用电脑摄像头 local://0";
+      } else {
+        chipCamera.title = online ? "摄像头已接入" : "摄像头未配置";
+      }
     }
 
     if (chipLed) {
@@ -2977,6 +3006,7 @@
       }
       chipLed.title = online ? "LED 控制器已连接" : "LED 控制器未连接";
     }
+    if (catTeaserDialog && catTeaserDialog.open) renderCatTeaserHardwareNotice();
 
     if (isJointPopoverOpen()) renderJointPopoverContent();
     if (data.running_skill === "dance_to_music") {
@@ -3061,7 +3091,7 @@
   let userSkillQuery = "";
   let recordingQuery = "";
   let expressionQuery = "";
-  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway", "dance_to_music"]);
+  const FACTORY_SKILL_VISIBLE_IDS = new Set(["return_safe", "idle_sway", "dance_to_music", "cat_teaser"]);
 
   function renderEmptyCell(grid, text) {
     const empty = document.createElement("div");
@@ -3126,7 +3156,10 @@
         title: label.title,
         meta: label.description,
         tooltip: `${label.description}（${skill.skill_id}）`,
-        onClick: () => invokeSkill(skill.skill_id),
+        onClick: () => {
+          if (skill.skill_id === "cat_teaser") openCatTeaserDialog(skill);
+          else invokeSkill(skill.skill_id);
+        },
       });
       skillGrid.appendChild(card);
     });
@@ -3666,12 +3699,117 @@
 
   /* ---- Invoke actions ---- */
 
-  function invokeSkill(skillId) {
+  function skillParamDefault(skill, name, fallback) {
+    const params = skill && skill.parameters;
+    const spec = params && params[name];
+    if (!spec || spec.default === undefined || spec.default === null || spec.default === "") return fallback;
+    return spec.default;
+  }
+
+  function clampNumber(value, min, max, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function isCatTeaserNoHwMode() {
+    const status = latestStatusData || {};
+    return Boolean(status.no_hw);
+  }
+
+  function syncCatTeaserRecordingControlAvailability() {
+    if (!catTeaserSaveRecordingInput) return;
+    const noHw = isCatTeaserNoHwMode();
+    catTeaserSaveRecordingInput.disabled = noHw;
+    catTeaserSaveRecordingInput.title = noHw ? "--no-hw 模式下不保存摄像头视频" : "保存本次摄像头视频 MP4";
+    if (noHw) catTeaserSaveRecordingInput.checked = false;
+  }
+
+  function openCatTeaserDialog(skill) {
+    if (!catTeaserDialog || !catTeaserForm) {
+      invokeSkill(
+        "cat_teaser",
+        { duration: 60, marker_color: "red", save_recording: !isCatTeaserNoHwMode() },
+        "逗猫棒互动 · 60 秒 · 红色标识"
+      );
+      return;
+    }
+    catTeaserDialog.dataset.skillId = "cat_teaser";
+    const duration = clampNumber(skillParamDefault(skill, "duration", 60), 1, 300, 60);
+    const marker = String(skillParamDefault(skill, "marker_color", "red") || "red").trim().toLowerCase();
+    if (catTeaserDurationInput) catTeaserDurationInput.value = String(duration);
+    if (catTeaserMarkerSelect) {
+      const hasMarkerOption = Array.from(catTeaserMarkerSelect.options).some((option) => option.value === marker);
+      catTeaserMarkerSelect.value = hasMarkerOption ? marker : "red";
+    }
+    if (catTeaserSaveRecordingInput) {
+      catTeaserSaveRecordingInput.checked = Boolean(skillParamDefault(skill, "save_recording", true));
+    }
+    syncCatTeaserRecordingControlAvailability();
+    if (catTeaserError) catTeaserError.textContent = "";
+    renderCatTeaserHardwareNotice();
+    catTeaserDialog.showModal();
+    if (catTeaserDurationInput) catTeaserDurationInput.focus();
+  }
+
+  function closeCatTeaserDialog() {
+    if (!catTeaserDialog || !catTeaserDialog.open) return;
+    catTeaserDialog.close();
+  }
+
+  function startCatTeaserFromDialog() {
+    const duration = clampNumber(catTeaserDurationInput && catTeaserDurationInput.value, 1, 300, 60);
+    const markerColor = String((catTeaserMarkerSelect && catTeaserMarkerSelect.value) || "red").trim().toLowerCase();
+    const saveRecording = catTeaserSaveRecordingInput
+      ? Boolean(catTeaserSaveRecordingInput.checked && !catTeaserSaveRecordingInput.disabled)
+      : !isCatTeaserNoHwMode();
+    if (!duration) {
+      if (catTeaserError) catTeaserError.textContent = "请输入持续时间";
+      if (catTeaserDurationInput) catTeaserDurationInput.focus();
+      return;
+    }
+    if (catTeaserError) catTeaserError.textContent = "";
+    closeCatTeaserDialog();
+    invokeSkill(
+      "cat_teaser",
+      { duration, marker_color: markerColor, save_recording: saveRecording },
+      `逗猫棒互动 · ${duration} 秒 · ${catTeaserMarkerLabel(markerColor)}标识`
+    );
+  }
+
+  function renderCatTeaserHardwareNotice() {
+    if (!catTeaserHardwareNotice) return;
+    const status = latestStatusData || {};
+    const catCamera = status.cat_teaser_camera || {};
+    let text = "";
+    if (status.no_hw && catCamera.fallback) {
+      text = "当前是无硬件模式：没有 LampGo 本体机械臂/灯头摄像头。逗猫算法会尝试使用电脑摄像头 local://0 作为 fallback，并通过虚拟运动模拟动作；本次不会保存摄像头视频。";
+    } else if (status.no_hw) {
+      text = "当前是无硬件模式：没有 LampGo 本体机械臂/灯头摄像头；本次不会保存摄像头视频。";
+    } else if (status.virtual_motion || status.hal_connected === false) {
+      text = "当前没有检测到 LampGo 本体硬件；逗猫动作不会驱动真实机械臂。";
+    }
+    syncCatTeaserRecordingControlAvailability();
+    catTeaserHardwareNotice.textContent = text;
+    catTeaserHardwareNotice.hidden = !text;
+  }
+
+  function catTeaserMarkerLabel(value) {
+    return {
+      red: "红色",
+      magenta: "品红",
+      green: "绿色",
+      blue: "蓝色",
+      yellow: "黄色",
+    }[value] || value || "红色";
+  }
+
+  function invokeSkill(skillId, params = {}, stepLabel = null) {
     clearEmptyState();
     const requestId = nextId();
     const bubble = addAssistantBubble(requestId);
-    addStep(getPreludeArea(ensureActivityLog(bubble)), `调用 ${skillId}`, "active");
-    send({ type: "invoke", skill_id: skillId, params: {}, wait: true, request_id: requestId });
+    addStep(getPreludeArea(ensureActivityLog(bubble)), `调用 ${stepLabel || skillId}`, "active");
+    send({ type: "invoke", skill_id: skillId, params: params || {}, wait: true, request_id: requestId });
   }
 
   function setMusicModeActive(active, requestId = null) {
@@ -6195,6 +6333,17 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
           if (recordEditError) recordEditError.textContent = `保存失败：${err && err.message ? err.message : err}`;
         });
     });
+  }
+
+  if (catTeaserForm) {
+    catTeaserForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      startCatTeaserFromDialog();
+    });
+  }
+
+  if (btnCatTeaserCancel) {
+    btnCatTeaserCancel.addEventListener("click", () => closeCatTeaserDialog());
   }
 
   if (btnRecordEditCancel) {

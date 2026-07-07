@@ -3322,6 +3322,48 @@ button.device-chip.is-active {
   gap: 8px;
 }
 
+.cat-teaser-duration-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.cat-teaser-duration-unit {
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.cat-teaser-hardware-notice {
+  border: 1px solid #efd0c7;
+  background: #fff7f2;
+  border-radius: 10px;
+  color: #8a5148;
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 9px 11px;
+}
+
+.cat-teaser-recording-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.cat-teaser-recording-row input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.cat-teaser-recording-row:has(input:disabled) {
+  color: var(--text-soft);
+}
+
 /* ============= Scrollbar ============= */
 
 ::-webkit-scrollbar {

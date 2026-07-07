@@ -141,6 +141,7 @@ uv run lampgo skills                       # 列出可用技能
 
 uv run lampgo text "做个害羞的表情"          # 自然语言路由
 uv run lampgo invoke dance                 # 调用内置技能
+uv run lampgo invoke cat_teaser marker_color=red duration=60      # 逗猫棒互动
 uv run lampgo move base_yaw=30             # 直接移动指定关节
 uv run lampgo play shy                     # 回放录制动作
 uv run lampgo record my_action --fps 30    # 手动录制新动作
