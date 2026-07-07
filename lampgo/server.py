@@ -44,7 +44,7 @@ from lampgo.core.safety import SafetyKernel
 from lampgo.core.virtual_motion import VirtualMotionRuntime
 from lampgo.device import Esp32DeviceManager
 from lampgo.ipc import IPCServer
-from lampgo.perception.cat_teaser import CatTeaserFrameSource
+from lampgo.perception.cat_teaser import CatTeaserFrameSource, is_supported_local_camera_port
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.recordings import build_recording_actions_prompt, write_recording_description
 from lampgo.skills.base import SkillContext
@@ -1428,11 +1428,7 @@ class LampgoServer:
         if not self.hal.is_connected and not virtual:
             health = "disconnected"
         cat_teaser_camera = self._cat_teaser_camera_status()
-        camera_ready = (
-            bool(self.config.camera.port.strip())
-            or bool(self.config.device_esp32.enabled)
-            or bool(cat_teaser_camera.get("fallback"))
-        )
+        camera_ready = self._cat_teaser_camera_ready(cat_teaser_camera)
         return {
             "ok": True,
             "result": {
@@ -1483,6 +1479,21 @@ class LampgoServer:
             "fallback": False,
             "hardware_present": bool(self.hal.is_connected),
         }
+
+    def _cat_teaser_camera_ready(self, camera_status: dict[str, Any] | None = None) -> bool:
+        camera_status = camera_status or self._cat_teaser_camera_status()
+        if bool(camera_status.get("fallback")):
+            return True
+        if bool(self.config.camera.port.strip()):
+            return True
+        if self.config.device_esp32.enabled:
+            esp32 = self._esp32_camera_info()
+            return (
+                bool(esp32.get("online"))
+                and not bool(esp32.get("hidden"))
+                and not bool(esp32.get("needs_firmware_update"))
+            )
+        return False
 
     def _handle_list_cameras(self) -> dict:
         """Probe camera indices 0..3 and return availability + names.
@@ -1593,6 +1604,17 @@ class LampgoServer:
             self.config.camera.port = ""
             logger.info("camera.switched_to_esp32")
         else:
+            if not is_supported_local_camera_port(value):
+                return {
+                    "ok": False,
+                    "error": "unsupported_camera_port",
+                    "result": {
+                        "active": "esp32" if self.config.device_esp32.enabled else self.config.camera.port,
+                        "camera_ready": self._cat_teaser_camera_ready(),
+                        "cat_teaser_camera": self._cat_teaser_camera_status(),
+                        "esp32": self._esp32_camera_info(),
+                    },
+                }
             self.config.device_esp32.enabled = False
             self.config.camera.port = value
             logger.info("camera.port_updated", port=value or "<disabled>")
@@ -1600,7 +1622,8 @@ class LampgoServer:
             "ok": True,
             "result": {
                 "active": "esp32" if self.config.device_esp32.enabled else self.config.camera.port,
-                "camera_ready": bool(value) or self.config.device_esp32.enabled,
+                "camera_ready": self._cat_teaser_camera_ready(),
+                "cat_teaser_camera": self._cat_teaser_camera_status(),
                 "esp32": self._esp32_camera_info(),
             },
         }

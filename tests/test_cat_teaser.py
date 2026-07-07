@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from lampgo.core.config import CameraConfig
+from lampgo.core.config import CameraConfig, DeviceConfig, DeviceEsp32Config, LampgoConfig
 from lampgo.core.events import EventBus
 from lampgo.core.types import JointState
 from lampgo.perception import cat_teaser as cat_perception_mod
@@ -285,6 +285,19 @@ def test_cat_teaser_frame_source_requires_camera_without_fallback() -> None:
         source.start()
 
 
+def test_cat_teaser_frame_source_rejects_non_local_camera_strings(monkeypatch) -> None:
+    fake_cv2 = _FakeCv2()
+    monkeypatch.setattr(cat_perception_mod, "_import_cv2", lambda: fake_cv2)
+    source = CatTeaserFrameSource(CameraConfig(port="https://example.invalid/stream.mjpg"))
+
+    with pytest.raises(CatTeaserCameraError):
+        source.start()
+
+    assert source.enabled is False
+    assert fake_cv2.devices == []
+    assert source.device_label == ""
+
+
 class _FakeFrameSource:
     device_label = "fake://camera"
 
@@ -547,6 +560,7 @@ async def test_cat_teaser_skill_prints_touch_event_log(monkeypatch, capsys) -> N
 @pytest.mark.asyncio
 async def test_cat_teaser_skill_saves_camera_video(monkeypatch, tmp_path) -> None:
     cv2 = pytest.importorskip("cv2")
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     source = _ImageFrameSource()
     monkeypatch.setattr(cat_skill_mod, "CatToyTracker", _FakeTracker)
     monkeypatch.setattr(cat_skill_mod, "CatPlayStateEstimator", _FakeEstimator)
@@ -559,7 +573,7 @@ async def test_cat_teaser_skill_saves_camera_video(monkeypatch, tmp_path) -> Non
         camera_fps=12,
         debug_view=False,
         log_events=False,
-        recording_dir=str(tmp_path),
+        recording_dir="session-tests",
     )
 
     recording = result.data["recording"]
@@ -569,7 +583,7 @@ async def test_cat_teaser_skill_saves_camera_video(monkeypatch, tmp_path) -> Non
     metadata = json.loads((session_dir / "metadata.json").read_text(encoding="utf-8"))
 
     assert result.status == "ok"
-    assert session_dir.parent == tmp_path
+    assert session_dir.parent == tmp_path / "cat_teaser_recordings" / "session-tests"
     assert recording["enabled"] is True
     assert recording["video_path"] == str(video_path)
     assert video_path.exists()
@@ -596,6 +610,7 @@ async def test_cat_teaser_skill_saves_camera_video(monkeypatch, tmp_path) -> Non
 @pytest.mark.asyncio
 async def test_cat_teaser_skill_disables_recording_when_not_allowed(monkeypatch, tmp_path) -> None:
     pytest.importorskip("cv2")
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     source = _ImageFrameSource()
     monkeypatch.setattr(cat_skill_mod, "CatToyTracker", _FakeTracker)
     monkeypatch.setattr(cat_skill_mod, "CatPlayStateEstimator", _FakeEstimator)
@@ -609,13 +624,40 @@ async def test_cat_teaser_skill_disables_recording_when_not_allowed(monkeypatch,
         debug_view=False,
         log_events=False,
         save_recording=True,
-        recording_dir=str(tmp_path),
+        recording_dir="session-tests",
     )
 
     assert result.status == "ok"
     assert result.data["recording"]["enabled"] is False
     assert result.data["recording"]["video_path"] is None
-    assert not list(tmp_path.iterdir())
+    assert not (tmp_path / "cat_teaser_recordings").exists()
+
+
+@pytest.mark.asyncio
+async def test_cat_teaser_skill_rejects_unsafe_recording_dir() -> None:
+    source = _FakeFrameSource()
+    motion = _FakeMotion()
+    skill = CatTeaserSkill(lambda: source)
+
+    result = await skill.execute(_fake_context(motion), recording_dir="/tmp/cat-videos")
+
+    assert result.status == "error"
+    assert "recording_dir must be a simple subdirectory name" in result.message
+    assert source.started is False
+    assert motion.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_cat_teaser_skill_returns_error_for_bad_numeric_param() -> None:
+    source = _FakeFrameSource()
+    motion = _FakeMotion()
+    skill = CatTeaserSkill(lambda: source)
+
+    result = await skill.execute(_fake_context(motion), duration=None)
+
+    assert result.status == "error"
+    assert source.started is False
+    assert motion.stopped is False
 
 
 @pytest.mark.asyncio
@@ -652,7 +694,6 @@ def test_cat_teaser_is_registered_and_exposes_parameters() -> None:
 
 
 def test_no_hw_server_enables_cat_teaser_local_camera_fallback() -> None:
-    from lampgo.core.config import LampgoConfig
     from lampgo.server import LampgoServer
 
     server = LampgoServer(LampgoConfig(no_hw=True))
@@ -668,3 +709,42 @@ def test_no_hw_server_enables_cat_teaser_local_camera_fallback() -> None:
         "fallback": True,
         "hardware_present": False,
     }
+
+
+def test_server_rejects_unsupported_camera_port() -> None:
+    from lampgo.server import LampgoServer
+
+    server = LampgoServer(
+        LampgoConfig(
+            device=DeviceConfig(motor_port="/dev/null"),
+            camera=CameraConfig(port="0"),
+        )
+    )
+
+    result = server._handle_set_camera("https://example.invalid/stream.mjpg")
+
+    assert result["ok"] is False
+    assert result["error"] == "unsupported_camera_port"
+    assert server.config.camera.port == "0"
+    assert server.config.device_esp32.enabled is False
+
+
+def test_server_marks_offline_esp32_camera_not_ready() -> None:
+    from lampgo.server import LampgoServer
+
+    server = LampgoServer(
+        LampgoConfig(
+            device=DeviceConfig(motor_port="/dev/null"),
+            device_esp32=DeviceEsp32Config(enabled=True),
+        )
+    )
+    server.esp32 = SimpleNamespace(
+        is_online=lambda: False,
+        get_status=lambda: {"device": {"needs_firmware_update": False}, "blocked_devices_count": 0},
+        get_active_host=lambda: "192.168.4.1",
+    )
+
+    status = server._handle_status()["result"]
+
+    assert status["camera_ready"] is False
+    assert status["cat_teaser_camera"]["mode"] == "esp32"

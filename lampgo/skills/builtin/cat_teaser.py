@@ -147,8 +147,9 @@ class CatTeaserSkill(Skill):
             log_events = _bool_param(params.get("log_events"), default=True)
             save_recording_requested = _bool_param(params.get("save_recording"), default=True)
             recording_dir = str(params.get("recording_dir") or "").strip()
+            recording_base_dir = _recording_base_dir(recording_dir)
             tracker = CatToyTracker(marker_color=marker_color)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             return SkillResult(status="error", message=str(exc))
 
         energy_scale = {"gentle": 0.72, "normal": 1.0, "active": 1.22}.get(energy, 1.0)
@@ -159,7 +160,7 @@ class CatTeaserSkill(Skill):
         save_recording = save_recording_requested and self._allow_recording
         recorder = _CatTeaserFrameRecorder(
             enabled=save_recording,
-            base_dir=_recording_base_dir(recording_dir),
+            base_dir=recording_base_dir,
             marker_color=marker_color,
             camera_fps=camera_fps,
         )
@@ -875,9 +876,13 @@ class _CatTeaserFrameRecorder:
 
 
 def _recording_base_dir(value: str) -> Path:
+    root = lampgo_home() / "cat_teaser_recordings"
     if value:
-        return Path(value).expanduser()
-    return lampgo_home() / "cat_teaser_recordings"
+        name = Path(value).name
+        if name != value or name in {"", ".", ".."}:
+            raise ValueError("recording_dir must be a simple subdirectory name")
+        return root / name
+    return root
 
 
 def _bool_param(value: Any, *, default: bool) -> bool:

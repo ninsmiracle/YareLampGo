@@ -32,6 +32,7 @@ CatPlayState = Literal[
 ]
 
 _SUPPORTED_MARKER_COLORS = {"magenta", "green", "blue", "red", "yellow"}
+_LOCAL_VIDEO_DEVICE_PREFIX = "/dev/video"
 
 
 class CatTeaserError(RuntimeError):
@@ -44,6 +45,19 @@ class CatTeaserDependencyError(CatTeaserError):
 
 class CatTeaserCameraError(CatTeaserError):
     """Raised when no camera source is configured or readable."""
+
+
+def is_supported_local_camera_port(raw: str) -> bool:
+    """Return True for local camera selectors that cannot become URL/file reads."""
+    value = raw.strip()
+    if not value:
+        return True
+    if value.isdigit():
+        return True
+    if value.startswith(_LOCAL_VIDEO_DEVICE_PREFIX):
+        suffix = value.removeprefix(_LOCAL_VIDEO_DEVICE_PREFIX)
+        return bool(suffix) and suffix.isdigit()
+    return False
 
 
 @dataclass(frozen=True)
@@ -230,12 +244,17 @@ class CatTeaserFrameSource:
             return None
         if value.isdigit():
             return int(value)
-        return value
+        if value.startswith(_LOCAL_VIDEO_DEVICE_PREFIX):
+            suffix = value.removeprefix(_LOCAL_VIDEO_DEVICE_PREFIX)
+            if suffix.isdigit():
+                return value
+        logger.warning("cat_teaser.local_camera_port_rejected", port=value)
+        return None
 
     def _local_camera_port(self) -> str:
         configured = self._config.port.strip()
         if configured:
-            return configured
+            return configured if is_supported_local_camera_port(configured) else ""
         if self._allow_local_camera_fallback:
             return self._fallback_local_port.strip() or "0"
         return ""
