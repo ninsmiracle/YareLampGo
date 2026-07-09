@@ -187,7 +187,17 @@ class LEDController:
             return False
 
         if self._serial is None:
-            return self._send_remote({"mode": mode})
+            expression = LED_MODE_NAMES.get(mode, str(mode))
+            payload: dict[str, Any] = {"mode": mode, "expression": expression}
+            try:
+                from lampgo.expression_clips import clip_for_expression
+
+                clip = clip_for_expression(expression)
+                if clip:
+                    payload["clip_id"] = str(clip.get("clip_id") or "")
+            except Exception:
+                pass
+            return self._send_remote(payload)
         return self._send(f"m{mode}\n")
 
     def set_brightness(self, brightness: int) -> bool:
