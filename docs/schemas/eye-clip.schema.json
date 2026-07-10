@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lampgo.local/schemas/eye-clip.schema.json",
+  "title": "LampGo Eye Clip",
+  "type": "object",
+  "required": ["eye_clip_id", "fps", "duration_ms", "frame_count", "lcd"],
+  "properties": {
+    "eye_clip_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+    "default_led_effect_id": {"type": ["string", "null"]},
+    "fps": {"type": "integer", "minimum": 8, "maximum": 12},
+    "duration_ms": {"type": "integer", "minimum": 2500, "maximum": 3500},
+    "frame_count": {"type": "integer", "minimum": 1},
+    "lcd": {
+      "type": "object",
+      "required": ["width", "height", "bytes", "sha256"],
+      "properties": {
+        "width": {"const": 320},
+        "height": {"const": 172},
+        "bytes": {"type": "integer", "maximum": 262144},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

@@ -179,7 +179,10 @@ class LampgoServer:
         )
 
     def _recording_actions_prompt(self) -> str:
-        return build_recording_actions_prompt(Path(self.config.recordings_dir))
+        from lampgo.expression_library import build_expression_prompt
+
+        recordings = build_recording_actions_prompt(Path(self.config.recordings_dir))
+        return f"{recordings}\n\n{build_expression_prompt()}".strip()
 
     # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
 

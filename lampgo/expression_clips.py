@@ -24,7 +24,7 @@ MIN_FPS = 8
 MAX_FPS = 12
 DEFAULT_FPS = 10
 MAX_CLIPS = 10
-MAX_LCD_BYTES = 720 * 1024
+MAX_LCD_BYTES = 256 * 1024
 
 LCD_WIDTH = 320
 LCD_HEIGHT = 172
@@ -50,6 +50,10 @@ class ExpressionClipPackage:
     lcd_bytes: int
     lcd_sha256: str
     led_effect: str
+    default_led_effect_id: str | None
+    source_stored_filename: str
+    grid_rows: int | None
+    grid_cols: int | None
     path: Path
 
     def to_manifest(self) -> dict[str, Any]:
@@ -61,6 +65,16 @@ class ExpressionClipPackage:
             "frame_count": self.frame_count,
             "source_filename": self.source_filename,
             "source_content_type": self.source_content_type,
+            "kind": "eye_clip",
+            "eye_clip_id": self.clip_id,
+            "default_led_effect_id": self.default_led_effect_id,
+            "source": {
+                "filename": self.source_filename,
+                "stored_filename": self.source_stored_filename,
+                "content_type": self.source_content_type,
+                "grid_rows": self.grid_rows,
+                "grid_cols": self.grid_cols,
+            },
             "lcd": {
                 "width": LCD_WIDTH,
                 "height": LCD_HEIGHT,
@@ -141,6 +155,23 @@ def load_expression_clip(clip_id: str) -> dict[str, Any]:
     return data
 
 
+def load_expression_clip_lcd_payload(clip_id: str) -> bytes:
+    manifest = load_expression_clip(clip_id)
+    lcd_meta = manifest.get("lcd") or {}
+    filename = str(lcd_meta.get("filename") or "lcd.bin")
+    path = _clip_dir(clip_id) / filename
+    if not path.exists():
+        raise ExpressionClipError(f"lcd payload not found for clip: {clip_id}")
+    payload = path.read_bytes()
+    expected_size = int(lcd_meta.get("bytes") or 0)
+    expected_sha = str(lcd_meta.get("sha256") or "")
+    if expected_size and len(payload) != expected_size:
+        raise ExpressionClipError(f"lcd payload size mismatch for clip: {clip_id}")
+    if expected_sha and _sha256(payload) != expected_sha:
+        raise ExpressionClipError(f"lcd payload sha mismatch for clip: {clip_id}")
+    return payload
+
+
 def update_expression_clip_sync(clip_id: str, *, status: str, device: dict[str, Any] | None = None) -> dict[str, Any]:
     import time
 
@@ -204,6 +235,7 @@ def create_expression_clip(
     duration_s: float | None = None,
     grid_rows: int | None = None,
     grid_cols: int | None = None,
+    default_led_effect_id: str | None = None,
 ) -> dict[str, Any]:
     clip_id = sanitize_clip_id(clip_id)
     expression = (expression or clip_id).strip().lower()
@@ -242,7 +274,8 @@ def create_expression_clip(
     clip_dir = _clip_dir(clip_id)
     clip_dir.mkdir(parents=True, exist_ok=True)
     source_suffix = Path(filename or "source.bin").suffix or ".bin"
-    (clip_dir / f"source{source_suffix}").write_bytes(source_bytes)
+    source_stored_filename = f"source{source_suffix}"
+    (clip_dir / source_stored_filename).write_bytes(source_bytes)
     (clip_dir / "lcd.bin").write_bytes(lcd_payload)
     stale_led = clip_dir / "led.bin"
     if stale_led.exists():
@@ -259,6 +292,10 @@ def create_expression_clip(
         lcd_bytes=len(lcd_payload),
         lcd_sha256=_sha256(lcd_payload),
         led_effect=expression,
+        default_led_effect_id=(default_led_effect_id or "").strip().lower() or None,
+        source_stored_filename=source_stored_filename,
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
         path=clip_dir,
     )
     manifest = package.to_manifest()

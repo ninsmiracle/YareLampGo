@@ -136,6 +136,8 @@ class Esp32DeviceManager:
         self._preferred_health_ok = False
         self._preferred_health_ok_at = 0.0
         self._preferred_fallback_snapshot: Esp32Device | None = None
+        self._transfer_lock = asyncio.Lock()
+        self._active_transfers = 0
         self._owner_id = _load_or_create_owner_id()
         self._owner_label = f"{socket.gethostname()}:{config.preferred_host or 'lampgo'}"
         self._pairing_secret = _load_or_create_pairing_secret()
@@ -292,6 +294,9 @@ class Esp32DeviceManager:
                 logger.exception("esp32.health_loop_failed")
 
     async def _probe_all(self) -> None:
+        if self.is_transfer_active():
+            self.mark_active_healthy()
+            return
         async with self._lock:
             devices = list(self._devices.values())
         for dev in devices:
@@ -478,6 +483,8 @@ class Esp32DeviceManager:
         dev = self._pick_active()
         if dev is None:
             return False
+        if self.is_transfer_active():
+            return True
         if not dev.last_health_ok:
             return False
         return (time.monotonic() - dev.last_health_ok_at) < HEALTH_TTL_S + 10.0
@@ -489,6 +496,9 @@ class Esp32DeviceManager:
         even when the main HTTP health endpoint is slow or wedged.
         """
         return self._config.enabled and self._pick_active() is not None
+
+    def is_transfer_active(self) -> bool:
+        return self._active_transfers > 0
 
     def mark_active_healthy(self) -> None:
         """Mark the active device healthy after a successful non-HTTP channel.
@@ -629,6 +639,7 @@ class Esp32DeviceManager:
             "enabled": self._config.enabled,
             "configured": dev is not None,
             "online": self.is_online(),
+            "transfer_active": self.is_transfer_active(),
             "session_used": self._session_used,
             "preferred_host": self._config.preferred_host,
             "owner_id": self._owner_id,
@@ -712,6 +723,44 @@ class Esp32DeviceManager:
         if dev is None or self._http is None:
             return 503, {"ok": False, "error": "no_device"}, "application/json"
         return await self._post_to_device(dev, path, json_body)
+
+    async def proxy_post_bytes(
+        self,
+        path: str,
+        payload: bytes,
+        *,
+        params: dict[str, Any] | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> tuple[int, dict[str, Any], str]:
+        dev = self._pick_active()
+        if dev is None or self._http is None:
+            return 503, {"ok": False, "error": "no_device"}, "application/json"
+        async with self._transfer_lock:
+            self._active_transfers += 1
+            self.mark_active_healthy()
+            try:
+                upload_timeout_s = max(float(self._config.http_timeout_s), min(180.0, 30.0 + len(payload) / 4_000.0))
+                resp = await self._http.post(
+                    f"{dev.base_url}{path}",
+                    params=params or {},
+                    content=payload,
+                    headers={"Content-Type": content_type},
+                    timeout=upload_timeout_s,
+                )
+                if resp.status_code < 400:
+                    dev.last_health_ok = True
+                    dev.last_health_ok_at = time.monotonic()
+                    self.mark_active_healthy()
+                response_content_type = resp.headers.get("content-type", "application/json")
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {"ok": resp.status_code < 400, "raw": resp.text}
+                return resp.status_code, body, response_content_type
+            except httpx.HTTPError as exc:
+                return 502, {"ok": False, "error": f"proxy_failed: {exc}"}, "application/json"
+            finally:
+                self._active_transfers = max(0, self._active_transfers - 1)
 
     async def snapshot_jpeg(self) -> bytes | None:
         dev = self._pick_active()

@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+from starlette.testclient import TestClient
+
+from lampgo.core.config import DeviceConfig, LampgoConfig
+from lampgo.expression_clips import create_expression_clip
+from lampgo.expression_library import (
+    ExpressionLibraryError,
+    expression_capabilities,
+    list_expression_presets,
+    list_led_effects,
+    resolve_expression,
+    save_expression_preset,
+    save_led_effect,
+)
+from lampgo.server import LampgoServer
+from lampgo.web.gateway import WebGateway
+
+
+def _sprite_sheet(*, rows: int = 3, cols: int = 10) -> bytes:
+    cv2 = pytest.importorskip("cv2")
+    sheet = np.zeros((rows * 12, cols * 20, 3), dtype=np.uint8)
+    for index in range(rows * cols):
+        row = index // cols
+        col = index % cols
+        sheet[row * 12 + 2 : row * 12 + 10, col * 20 + 3 : col * 20 + 17] = (index * 5, 220, 255)
+    ok, encoded = cv2.imencode(".png", cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR))
+    assert ok
+    return bytes(encoded)
+
+
+def _create_eye(clip_id: str, *, default_led_effect_id: str | None = None) -> dict:
+    return create_expression_clip(
+        clip_id=clip_id,
+        expression=clip_id,
+        source_bytes=_sprite_sheet(),
+        filename=f"{clip_id}.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+        default_led_effect_id=default_led_effect_id,
+    )
+
+
+def _custom_effect(effect_id: str) -> dict:
+    return save_led_effect(
+        {
+            "effect_id": effect_id,
+            "label": effect_id,
+            "role": "mouth",
+            "program": {
+                "version": 1,
+                "template": "mouth",
+                "variant": "smile",
+                "defaults": {"color": "#ffffff", "intensity": 0.8},
+            },
+        }
+    )
+
+
+def _gateway(monkeypatch, tmp_path: Path) -> WebGateway:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    return WebGateway(LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null"))))
+
+
+def test_eye_default_led_and_explicit_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    _create_eye("focused_eyes", default_led_effect_id="heart")
+
+    inherited = resolve_expression({"eye_clip_id": "focused_eyes"})
+    assert inherited["led_effect_id"] == "heart"
+
+    eye_only = resolve_expression({"eye_clip_id": "focused_eyes", "led_effect_id": None})
+    assert eye_only["led_effect_id"] is None
+    assert eye_only["eye_storage_clip_id"] == "focused_eyes"
+
+
+def test_many_to_many_presets_reuse_assets(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    _create_eye("calm_eyes")
+    _create_eye("happy_eyes")
+    _custom_effect("soft_mouth")
+
+    save_expression_preset(
+        {
+            "preset_id": "calm_smile",
+            "eye_clip_id": "calm_eyes",
+            "led_effect_id": "soft_mouth",
+            "playback": "once",
+        }
+    )
+    save_expression_preset(
+        {
+            "preset_id": "happy_smile",
+            "eye_clip_id": "happy_eyes",
+            "led_effect_id": "soft_mouth",
+            "playback": "once",
+        }
+    )
+
+    presets = list_expression_presets()
+    assert {item["preset_id"] for item in presets} == {"calm_smile", "happy_smile"}
+    assert {item["led_effect_id"] for item in presets} == {"soft_mouth"}
+    assert [item["effect_id"] for item in list_led_effects()].count("soft_mouth") == 1
+
+
+def test_dizzy_legacy_asset_migrates_without_copy(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    _create_eye("dizzy")
+
+    resolved = resolve_expression({"preset_id": "dizzy"})
+    assert resolved["eye_clip_id"] == "dizzy_eyes"
+    assert resolved["eye_storage_clip_id"] == "dizzy"
+    assert resolved["led_effect_id"] == "dizzy_mouth"
+    assert resolved["playback"] == "once"
+
+
+def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    _create_eye("focused_eyes")
+    _custom_effect("soft_mouth")
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_proxy_post(path: str, payload: dict):
+        sent.append((path, payload))
+        return 200, {"ok": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+    composition = {
+        "eye_clip_id": "focused_eyes",
+        "led_effect_id": "soft_mouth",
+        "led_params": {"color": "#ff00aa", "brightness": 64, "intensity": 0.8},
+        "playback": "once",
+    }
+
+    with TestClient(gateway.app) as client:
+        played = client.post("/api/expressions/play", json=composition)
+        assert played.status_code == 200
+        assert list_expression_presets() == []
+
+        rejected = client.post("/api/expression-presets", json={"preset_id": "focus", **composition})
+        assert rejected.status_code == 400
+        assert "confirmed=true" in rejected.json()["error"]
+
+        saved = client.post(
+            "/api/expression-presets",
+            json={"preset_id": "focus", "label": "Focus", "confirmed": True, **composition},
+        )
+        assert saved.status_code == 200
+
+    assert sent[0][0] == "/device/expressions/play"
+    assert sent[0][1]["eye_clip_id"] == "focused_eyes"
+    assert sent[0][1]["led_effect_id"] == "soft_mouth"
+    assert sent[0][1]["led_program"]["template"] == "mouth"
+    assert [item["preset_id"] for item in list_expression_presets()] == ["focus"]
+
+
+def test_led_only_play_keeps_eye_channel_untouched(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_proxy_post(path: str, payload: dict):
+        sent.append((path, payload))
+        return 200, {"ok": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+
+    with TestClient(gateway.app) as client:
+        played = client.post(
+            "/api/expressions/play",
+            json={
+                "eye_clip_id": None,
+                "led_effect_id": "heart",
+                "playback": "loop",
+                "duration_ms": 3000,
+            },
+        )
+
+    assert played.status_code == 200
+    assert sent[0][0] == "/device/expressions/play"
+    assert sent[0][1]["eye_clip_id"] is None
+    assert sent[0][1]["led_effect_id"] == "heart"
+    assert sent[0][1]["playback"] == "loop"
+
+
+def test_eye_default_led_api(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    _create_eye("focused_eyes")
+    _custom_effect("soft_mouth")
+
+    with TestClient(gateway.app) as client:
+        updated = client.post(
+            "/api/eyes/focused_eyes",
+            json={"default_led_effect_id": "soft_mouth"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["result"]["eye"]["default_led_effect_id"] == "soft_mouth"
+
+    resolved = resolve_expression({"eye_clip_id": "focused_eyes"})
+    assert resolved["led_effect_id"] == "soft_mouth"
+
+
+def test_led_dsl_and_capacity_guards(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    with pytest.raises(ExpressionLibraryError, match="program.template"):
+        save_led_effect(
+            {
+                "effect_id": "unsafe",
+                "role": "accent",
+                "program": {"version": 1, "template": "python", "defaults": {}},
+            }
+        )
+
+    _custom_effect("safe_mouth")
+    with pytest.raises(ExpressionLibraryError, match="brightness"):
+        resolve_expression({"led_effect_id": "safe_mouth", "led_params": {"brightness": 97}})
+    capacity = expression_capabilities()
+    assert capacity["led_effects"]["installed_custom"] == 1
+    assert capacity["led_effects"]["single_max_bytes"] == 8 * 1024
+    assert capacity["presets"]["max_count"] == 64

@@ -11,15 +11,21 @@ from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
 class SetExpressionSkill(Skill):
     skill_id = "set_expression"
-    description = "Set an LED expression (e.g. smiley, heart, angry, myu7gt)."
+    description = "Play a dynamic expression preset, eye clip, or LED effect without saving a new preset."
     parameters = {
         "expression": ParameterSpec(
             name="expression",
             type="str",
-            description=f"Expression name. Options: {', '.join(LED_EXPRESSIONS.keys())}",
+            description=(
+                "Expression preset, eye clip, or LED effect id. Built-ins include: "
+                f"{', '.join(LED_EXPRESSIONS.keys())}. Dynamic ids are listed by /api/expressions."
+            ),
         ),
         "brightness": ParameterSpec(
             name="brightness", type="int", required=False, default=200, description="Brightness 1-255"
+        ),
+        "playback": ParameterSpec(
+            name="playback", type="str", required=False, default="once", description="once or loop"
         ),
     }
 
@@ -30,8 +36,18 @@ class SetExpressionSkill(Skill):
 
         canonical = canonical_expression_name(str(expression))
         if canonical is None:
-            valid = ", ".join(LED_EXPRESSIONS.keys())
-            return SkillResult(status="error", message=f"Unknown expression: {expression}. Valid: {valid}")
+            ok, composition = ctx.led.play_expression(
+                str(expression),
+                playback=str(params.get("playback") or "once"),
+                led_params={"brightness": min(96, int(params.get("brightness") or 64))},
+            )
+            if not ok or composition is None:
+                valid = ", ".join(LED_EXPRESSIONS.keys())
+                return SkillResult(
+                    status="error",
+                    message=f"Unknown or unavailable expression: {expression}. Built-ins: {valid}",
+                )
+            return SkillResult(status="ok", data={"expression": str(expression), "composition": composition})
 
         brightness = params.get("brightness")
         if brightness is not None:

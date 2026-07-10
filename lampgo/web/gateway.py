@@ -33,11 +33,25 @@ from lampgo.core.led import led_expression_catalog
 from lampgo.device.audio_stream import redact_ws_owner_token
 from lampgo.expression_clips import (
     ExpressionClipError,
-    build_sync_chunks,
     create_expression_clip,
     list_expression_clips,
     load_expression_clip,
+    load_expression_clip_lcd_payload,
     update_expression_clip_sync,
+)
+from lampgo.expression_library import (
+    ExpressionLibraryError,
+    expression_capabilities,
+    expression_schemas,
+    eye_source_path,
+    eye_storage_id,
+    list_expression_presets,
+    list_eyes,
+    list_led_effects,
+    resolve_expression,
+    save_expression_preset,
+    save_led_effect,
+    set_eye_default_led,
 )
 from lampgo.perception.camera import CameraCapture
 from lampgo.recordings import (
@@ -202,6 +216,16 @@ class WebGateway:
             Route("/api/recordings/aliases", self.api_recording_aliases, methods=["GET", "POST"]),
             Route("/api/expressions", self.api_expressions),
             Route("/api/expression-clips", self.api_expression_clips, methods=["GET", "POST"]),
+            Route("/api/eyes", self.api_eyes, methods=["GET"]),
+            Route("/api/eyes/{eye_id:str}", self.api_eye_update, methods=["POST"]),
+            Route("/api/eyes/{eye_id:str}/source", self.api_eye_source, methods=["GET"]),
+            Route("/api/eyes/{eye_id:str}/sync", self.api_eye_sync, methods=["POST"]),
+            Route("/api/led-effects", self.api_led_effects, methods=["GET", "POST"]),
+            Route("/api/expression-presets", self.api_expression_presets, methods=["GET", "POST"]),
+            Route("/api/expressions/preview", self.api_expression_preview, methods=["POST"]),
+            Route("/api/expressions/play", self.api_expression_play, methods=["POST"]),
+            Route("/api/expressions/stop", self.api_expression_stop, methods=["POST"]),
+            Route("/api/device/expression-capabilities", self.api_expression_capabilities, methods=["GET"]),
             Route("/api/camera/snap", self.api_camera_snap),
             Route("/api/sensor/context", self.api_sensor_context),
             Route("/api/openclaw/ask", self.api_openclaw_ask, methods=["POST"]),
@@ -808,9 +832,164 @@ class WebGateway:
                 "result": {
                     "expressions": self._list_expressions(),
                     "expression_catalog": self._list_expression_catalog(),
+                    "eyes": list_eyes(),
+                    "led_effects": list_led_effects(),
+                    "presets": list_expression_presets(),
                 },
             }
         )
+
+    async def api_eyes(self, request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "eyes": list_eyes(),
+                    "capacity": expression_capabilities()["eyes"],
+                    "schema": expression_schemas()["eye_clip"],
+                },
+            }
+        )
+
+    async def api_eye_source(self, request: Request) -> FileResponse | JSONResponse:
+        eye_id = str(request.path_params.get("eye_id") or "")
+        try:
+            path = eye_source_path(eye_id)
+        except (ExpressionLibraryError, ExpressionClipError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+        return FileResponse(path)
+
+    async def api_eye_update(self, request: Request) -> JSONResponse:
+        eye_id = str(request.path_params.get("eye_id") or "")
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ExpressionLibraryError("eye update body must be an object")
+            eye = set_eye_default_led(eye_id, body.get("default_led_effect_id"))
+        except (ExpressionLibraryError, ExpressionClipError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "result": {"eye": eye}})
+
+    async def api_eye_sync(self, request: Request) -> JSONResponse:
+        eye_id = str(request.path_params.get("eye_id") or "")
+        return await self._sync_eye_response(eye_id)
+
+    async def api_led_effects(self, request: Request) -> JSONResponse:
+        if request.method == "GET":
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "result": {
+                        "led_effects": list_led_effects(),
+                        "capacity": expression_capabilities()["led_effects"],
+                        "schema": expression_schemas()["led_effect"],
+                    },
+                }
+            )
+        try:
+            body = await request.json()
+            effect = save_led_effect(body)
+        except (ExpressionLibraryError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "result": {"led_effect": effect}})
+
+    async def api_expression_presets(self, request: Request) -> JSONResponse:
+        if request.method == "GET":
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "result": {
+                        "presets": list_expression_presets(),
+                        "capacity": expression_capabilities()["presets"],
+                        "schema": expression_schemas()["expression_preset"],
+                    },
+                }
+            )
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ExpressionLibraryError("preset body must be an object")
+            if body.get("confirmed") is not True:
+                raise ExpressionLibraryError("saving a preset requires confirmed=true")
+            preset = save_expression_preset(body)
+        except (ExpressionLibraryError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "result": {"preset": preset}})
+
+    async def api_expression_preview(self, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            composition = resolve_expression(body)
+        except (ExpressionLibraryError, ExpressionClipError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        duration_ms = int(composition["duration_ms"])
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": {
+                    "composition": composition,
+                    "preview": {
+                        "duration_ms": duration_ms,
+                        "phase_start": 0.0,
+                        "phase_end": 1.0,
+                        "channels_start_together": True,
+                    },
+                },
+            }
+        )
+
+    async def _play_resolved_expression(self, composition: dict[str, Any]) -> tuple[int, Any]:
+        if not self.server.esp32:
+            return 503, {"ok": False, "error": "no_device"}
+        effect = composition.get("led_effect") or {}
+        payload: dict[str, Any] = {
+            "eye_clip_id": composition.get("eye_storage_clip_id"),
+            "led_effect_id": composition.get("led_effect_id"),
+            "led_params": composition.get("led_params") or {},
+            "playback": composition.get("playback") or "once",
+            "duration_ms": int(composition.get("duration_ms") or 3000),
+        }
+        if composition.get("preset_id"):
+            payload["preset_id"] = composition["preset_id"]
+        if effect.get("mode") is not None:
+            payload["led_mode"] = int(effect["mode"])
+        if isinstance(effect.get("program"), dict):
+            payload["led_program"] = effect["program"]
+        payload = self.server.esp32.with_owner_auth(payload, reason="expression_play")
+        status, response, _ = await self.server.esp32.proxy_post("/device/expressions/play", payload)
+        return status, response
+
+    async def api_expression_play(self, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            composition = resolve_expression(body)
+        except (ExpressionLibraryError, ExpressionClipError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        status, device_body = await self._play_resolved_expression(composition)
+        ok = status < 400 and not (isinstance(device_body, dict) and device_body.get("ok") is False)
+        return JSONResponse(
+            {"ok": ok, "result": {"composition": composition, "device": device_body}},
+            status_code=status,
+        )
+
+    async def api_expression_stop(self, request: Request) -> JSONResponse:
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        payload = self.server.esp32.with_owner_auth({}, reason="expression_stop")
+        status, body, _ = await self.server.esp32.proxy_post("/device/expressions/stop", payload)
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_expression_capabilities(self, request: Request) -> JSONResponse:
+        local = expression_capabilities()
+        device: Any = None
+        if self.server.esp32:
+            try:
+                status, body, _ = await self.server.esp32.proxy_get("/device/expression-capabilities")
+                if status < 400 and isinstance(body, dict):
+                    device = body.get("result") or body
+            except Exception:
+                logger.exception("expression_capabilities.device_failed")
+        return JSONResponse({"ok": True, "result": {"library": local, "device": device}})
 
     async def api_expression_clips(self, request: Request) -> JSONResponse:
         if request.method == "GET":
@@ -850,6 +1029,7 @@ class WebGateway:
                 "duration_s": float(body["duration_s"]) if body.get("duration_s") is not None else None,
                 "grid_rows": int(body["grid_rows"]) if body.get("grid_rows") is not None else None,
                 "grid_cols": int(body["grid_cols"]) if body.get("grid_cols") is not None else None,
+                "default_led_effect_id": str(body.get("default_led_effect_id") or "") or None,
             }
 
         query = request.query_params
@@ -865,6 +1045,7 @@ class WebGateway:
             "duration_s": float(query["duration_s"]) if query.get("duration_s") else None,
             "grid_rows": int(query["grid_rows"]) if query.get("grid_rows") else None,
             "grid_cols": int(query["grid_cols"]) if query.get("grid_cols") else None,
+            "default_led_effect_id": query.get("default_led_effect_id") or None,
         }
 
     async def api_camera_snap(self, request: Request) -> JSONResponse:
@@ -2251,7 +2432,12 @@ class WebGateway:
         wake_requested_model = ""
         wake_supported_models: list[str] = []
         led_status: dict[str, Any] = {}
-        if cfg.enabled and self.server.esp32:
+        transfer_active = bool(
+            self.server.esp32
+            and hasattr(self.server.esp32, "is_transfer_active")
+            and self.server.esp32.is_transfer_active()
+        )
+        if cfg.enabled and self.server.esp32 and not transfer_active:
             try:
                 device_status_code, device_body, _ = await asyncio.wait_for(
                     self.server.esp32.proxy_get("/device/status"),
@@ -2298,6 +2484,7 @@ class WebGateway:
                     "led": led_status,
                     "configured": status["configured"],
                     "online": status["online"],
+                    "transfer_active": status.get("transfer_active", False),
                     "session_used": status["session_used"],
                     "owner_id": status.get("owner_id"),
                     "owner_label": status.get("owner_label"),
@@ -2369,14 +2556,23 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
         if not isinstance(patch, dict):
             return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        candidate = str(patch.get("preset_id") or patch.get("clip_id") or patch.get("expression") or "").strip().lower()
+        preset_ids = {str(item.get("preset_id") or "") for item in list_expression_presets()}
+        if patch.get("preset_id") or candidate in preset_ids:
+            try:
+                request_body = dict(patch)
+                request_body["preset_id"] = str(patch.get("preset_id") or candidate)
+                composition = resolve_expression(request_body)
+            except (ExpressionLibraryError, ExpressionClipError, ValueError, TypeError) as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            status, body = await self._play_resolved_expression(composition)
+            return JSONResponse(self._with_expression_catalog(body), status_code=status)
         if self.server.esp32 and hasattr(self.server.esp32, "with_owner_auth"):
             patch = self.server.esp32.with_owner_auth(patch, reason="led")
         status, body, _ = await self.server.esp32.proxy_post("/device/led", patch)
         return JSONResponse(self._with_expression_catalog(body), status_code=status)
 
     async def api_esp32_expression_clip_sync(self, request: Request) -> JSONResponse:
-        if not self.server.esp32:
-            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
         try:
             body = await request.json()
         except Exception:
@@ -2387,35 +2583,55 @@ class WebGateway:
         clip_id = str(body.get("clip_id") or request.query_params.get("clip_id") or "").strip()
         if not clip_id:
             return JSONResponse({"ok": False, "error": "clip_id required"}, status_code=400)
+        return await self._sync_eye_response(clip_id)
+
+    async def _sync_eye_response(self, eye_id: str) -> JSONResponse:
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
         try:
+            clip_id = eye_storage_id(eye_id)
             manifest = load_expression_clip(clip_id)
-            chunks = build_sync_chunks(clip_id)
-        except ExpressionClipError as exc:
+            payload = load_expression_clip_lcd_payload(clip_id)
+        except (ExpressionClipError, ExpressionLibraryError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
         except Exception as exc:
             logger.exception("expression_clip.sync_prepare_failed", clip_id=clip_id)
             return JSONResponse({"ok": False, "error": f"sync prepare failed: {exc}"}, status_code=500)
 
-        sent = 0
-        last_status = 200
-        last_body: Any = {"ok": True}
-        for chunk in chunks:
-            patch = self.server.esp32.with_owner_auth(chunk, reason="expression_clip")
-            status, resp, _ = await self.server.esp32.proxy_post("/device/expression-clips/sync", patch)
-            sent += 1
-            last_status = status
-            last_body = resp
-            if status >= 400 or (isinstance(resp, dict) and resp.get("ok") is False):
-                device = self.server.esp32.get_status().get("device")
-                update_expression_clip_sync(clip_id, status="sync_failed", device=device)
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "device sync failed",
-                        "result": {"sent_chunks": sent, "device_status": status, "device_body": resp},
+        lcd_meta = manifest.get("lcd") or {}
+        query = {
+            "clip_id": manifest["clip_id"],
+            "expression": manifest["expression"],
+            "fps": manifest["fps"],
+            "duration_ms": manifest["duration_ms"],
+            "frame_count": manifest["frame_count"],
+            "lcd_bytes": int(lcd_meta.get("bytes") or len(payload)),
+            "lcd_sha256": str(lcd_meta.get("sha256") or ""),
+            "led_effect": (manifest.get("led") or {}).get("effect") or manifest["expression"],
+        }
+        query = self.server.esp32.with_owner_auth(query, reason="expression_clip")
+        status, last_body, _ = await self.server.esp32.proxy_post_bytes(
+            "/device/expression-clips/upload",
+            payload,
+            params=query,
+        )
+        c6_confirmed = isinstance(last_body, dict) and last_body.get("c6_confirmed") is True
+        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not c6_confirmed:
+            device = self.server.esp32.get_status().get("device")
+            update_expression_clip_sync(clip_id, status="sync_failed", device=device)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "device sync failed" if status >= 400 else "C6 did not confirm clip sync",
+                    "result": {
+                        "transfer_mode": "bulk",
+                        "sent_chunks": 1,
+                        "device_status": status,
+                        "device_body": last_body,
                     },
-                    status_code=status if status >= 400 else 502,
-                )
+                },
+                status_code=status if status >= 400 else 502,
+            )
 
         device = self.server.esp32.get_status().get("device")
         manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
@@ -2424,8 +2640,9 @@ class WebGateway:
                 "ok": True,
                 "result": {
                     "clip": manifest,
-                    "sent_chunks": sent,
-                    "device_status": last_status,
+                    "transfer_mode": "bulk",
+                    "sent_chunks": 1,
+                    "device_status": status,
                     "device_body": last_body,
                 },
             }
@@ -3645,6 +3862,9 @@ class WebGateway:
                     "result": {
                         "expressions": self._list_expressions(),
                         "expression_catalog": self._list_expression_catalog(),
+                        "eyes": list_eyes(),
+                        "led_effects": list_led_effects(),
+                        "presets": list_expression_presets(),
                     },
                     "request_id": request_id,
                 }

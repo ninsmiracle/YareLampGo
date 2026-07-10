@@ -27,6 +27,39 @@
   const skillSearchEl = document.getElementById("skill-search");
   const recordingSearchEl = document.getElementById("recording-search");
   const expressionSearchEl = document.getElementById("expression-search");
+  const expressionTabs = Array.from(document.querySelectorAll("[data-expression-tab]"));
+  const expressionPanels = Array.from(document.querySelectorAll("[data-expression-panel]"));
+  const expressionCapacityEl = document.getElementById("expression-capacity");
+  const eyeGrid = document.getElementById("eye-grid");
+  const eyeUploadFile = document.getElementById("eye-upload-file");
+  const eyeUploadId = document.getElementById("eye-upload-id");
+  const eyeUploadRows = document.getElementById("eye-upload-rows");
+  const eyeUploadCols = document.getElementById("eye-upload-cols");
+  const eyeUploadFps = document.getElementById("eye-upload-fps");
+  const btnEyeUpload = document.getElementById("btn-eye-upload");
+  const ledEffectForm = document.getElementById("led-effect-form");
+  const ledEffectId = document.getElementById("led-effect-id");
+  const ledEffectLabel = document.getElementById("led-effect-label");
+  const ledEffectRole = document.getElementById("led-effect-role");
+  const ledEffectTemplate = document.getElementById("led-effect-template");
+  const ledEffectColor = document.getElementById("led-effect-color");
+  const composerEye = document.getElementById("composer-eye");
+  const composerLed = document.getElementById("composer-led");
+  const composerColor = document.getElementById("composer-color");
+  const composerBrightness = document.getElementById("composer-brightness");
+  const composerIntensity = document.getElementById("composer-intensity");
+  const composerPresetId = document.getElementById("composer-preset-id");
+  const composerPresetLabel = document.getElementById("composer-preset-label");
+  const expressionEyePreview = document.getElementById("expression-eye-preview");
+  const expressionLedPreview = document.getElementById("expression-led-preview");
+  const expressionPreviewStatus = document.getElementById("expression-preview-status");
+  const expressionPresetGrid = document.getElementById("expression-preset-grid");
+  const btnExpressionPreview = document.getElementById("btn-expression-preview");
+  const btnExpressionSync = document.getElementById("btn-expression-sync");
+  const btnExpressionSetDefault = document.getElementById("btn-expression-set-default");
+  const btnExpressionPlay = document.getElementById("btn-expression-play");
+  const btnExpressionStop = document.getElementById("btn-expression-stop");
+  const btnExpressionSave = document.getElementById("btn-expression-save");
   const openclawTaskList = document.getElementById("openclaw-task-list");
   const chipJoint = document.getElementById("chip-joint");
   const chipJointDot = document.getElementById("chip-joint-dot");
@@ -187,6 +220,13 @@
 
   const expressionMetaByName = new Map();
   const recordingExpressionByName = new Map();
+  let expressionEyes = [];
+  let expressionLedEffects = [];
+  let expressionPresets = [];
+  let expressionDirection = "right";
+  let expressionPlayback = "once";
+  let expressionPreviewTimer = null;
+  let expressionPreviewImage = null;
   let latestStatusData = {};
 
   function expressionMeta(name) {
@@ -2464,6 +2504,7 @@
     }
 
     if (msg.ok && msg.result && (msg.result.expression_catalog || msg.result.expressions)) {
+      hydrateExpressionStudio(msg.result);
       renderExpressions(msg.result.expression_catalog || msg.result.expressions);
       return;
     }
@@ -3463,6 +3504,463 @@
     }
   }
 
+  function hydrateExpressionStudio(result) {
+    if (Array.isArray(result.eyes)) expressionEyes = result.eyes;
+    if (Array.isArray(result.led_effects)) expressionLedEffects = result.led_effects;
+    if (Array.isArray(result.presets)) expressionPresets = result.presets;
+    renderExpressionStudio();
+  }
+
+  function expressionResource(title, meta, actions = []) {
+    const row = document.createElement("div");
+    row.className = "expression-resource";
+    const copy = document.createElement("div");
+    const heading = document.createElement("div");
+    heading.className = "expression-resource-title";
+    heading.textContent = title;
+    const detail = document.createElement("div");
+    detail.className = "expression-resource-meta";
+    detail.textContent = meta;
+    copy.append(heading, detail);
+    const controls = document.createElement("div");
+    controls.className = "expression-resource-actions";
+    actions.forEach((action) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = action.primary ? "primary-button" : "ghost-button";
+      button.textContent = action.label;
+      button.title = action.title || action.label;
+      button.addEventListener("click", action.run);
+      controls.appendChild(button);
+    });
+    row.append(copy, controls);
+    return row;
+  }
+
+  function formatBytes(value) {
+    const bytes = Math.max(0, Number(value || 0));
+    if (bytes < 1024) return `${bytes} B`;
+    return `${(bytes / 1024).toFixed(bytes >= 102400 ? 0 : 1)} KiB`;
+  }
+
+  function populateExpressionComposer() {
+    if (composerEye) {
+      const selected = composerEye.value;
+      composerEye.innerHTML = '<option value="">无眼睛</option>';
+      expressionEyes.forEach((eye) => {
+        const option = document.createElement("option");
+        option.value = eye.eye_clip_id;
+        option.textContent = `${eye.label || eye.eye_clip_id} (${eye.eye_clip_id})`;
+        composerEye.appendChild(option);
+      });
+      composerEye.value = expressionEyes.some((item) => item.eye_clip_id === selected) ? selected : "";
+    }
+    if (composerLed) {
+      const selected = composerLed.value;
+      composerLed.innerHTML = '<option value="">无 LED</option>';
+      expressionLedEffects.forEach((effect) => {
+        const option = document.createElement("option");
+        option.value = effect.effect_id;
+        option.textContent = `${effect.label || effect.effect_id} · ${effect.role || "accent"}`;
+        composerLed.appendChild(option);
+      });
+      composerLed.value = expressionLedEffects.some((item) => item.effect_id === selected) ? selected : "";
+    }
+  }
+
+  function renderExpressionEyes() {
+    if (!eyeGrid) return;
+    eyeGrid.innerHTML = "";
+    expressionEyes.forEach((eye) => {
+      const lcd = eye.lcd || {};
+      const sync = eye.sync || {};
+      eyeGrid.appendChild(expressionResource(
+        eye.label || eye.eye_clip_id,
+        `${eye.eye_clip_id} · ${eye.frame_count || 0} 帧 · ${eye.fps || 0} FPS · ${formatBytes(lcd.bytes)} · ${sync.status || "unsynced"}`,
+        [
+          { label: "同步", run: () => syncExpressionEye(eye.eye_clip_id) },
+          { label: "选用", run: () => selectExpressionResource(eye.eye_clip_id, null), primary: true },
+        ],
+      ));
+    });
+    if (!expressionEyes.length) renderEmptyCell(eyeGrid, "暂无眼睛素材");
+  }
+
+  function renderExpressionPresets() {
+    if (!expressionPresetGrid) return;
+    expressionPresetGrid.innerHTML = "";
+    expressionPresets.forEach((preset) => {
+      const pair = `${preset.eye_clip_id || "无眼睛"} + ${preset.led_effect_id || "无 LED"}`;
+      expressionPresetGrid.appendChild(expressionResource(
+        preset.label || preset.preset_id,
+        `${preset.preset_id} · ${pair} · ${preset.playback === "loop" ? "循环" : "单次"}`,
+        [
+          { label: "载入", run: () => loadExpressionPreset(preset) },
+          { label: "▶", title: "播放", run: () => playExpression({ preset_id: preset.preset_id }), primary: true },
+        ],
+      ));
+    });
+    if (!expressionPresets.length) renderEmptyCell(expressionPresetGrid, "暂无组合表情");
+  }
+
+  function renderExpressionStudio() {
+    populateExpressionComposer();
+    renderExpressionEyes();
+    renderExpressionPresets();
+  }
+
+  async function refreshExpressionStudio() {
+    try {
+      const [eyes, effects, presets, capacity] = await Promise.all([
+        fetchJson("/api/eyes"),
+        fetchJson("/api/led-effects"),
+        fetchJson("/api/expression-presets"),
+        fetchJson("/api/device/expression-capabilities"),
+      ]);
+      expressionEyes = eyes.eyes || [];
+      expressionLedEffects = effects.led_effects || [];
+      expressionPresets = presets.presets || [];
+      renderExpressionStudio();
+      renderExpressions(expressionLedEffects.map((effect) => ({
+        name: effect.effect_id,
+        label: effect.label,
+        mode: effect.mode,
+        animated: effect.animated,
+      })));
+      const library = capacity.library;
+      const device = capacity.device;
+      if (expressionCapacityEl && library) {
+        const deviceEyeCount = device && Number(device.c6_eye_max_count || 0) > 0
+          ? `${device.c6_eye_installed_count}/${device.c6_eye_max_count}`
+          : `${library.eyes.installed}/${library.eyes.max_count}`;
+        const deviceEyeBytes = device && Number(device.c6_eye_budget_bytes || 0) > 0
+          ? `${formatBytes(device.c6_eye_installed_bytes)}/${formatBytes(device.c6_eye_budget_bytes)}`
+          : `${formatBytes(library.eyes.used_bytes)}/${formatBytes(library.eyes.budget_bytes)}`;
+        expressionCapacityEl.textContent = [
+          `C6 眼睛 ${deviceEyeCount} · ${deviceEyeBytes}`,
+          `用户 LED ${library.led_effects.installed_custom}/${library.led_effects.max_custom_count} · ${formatBytes(library.led_effects.used_bytes)}/${formatBytes(library.led_effects.budget_bytes)}`,
+          `组合 ${library.presets.installed}/${library.presets.max_count}`,
+          device ? `S3 可用 ${formatBytes(device.spiffs_free_bytes)}` : "设备未连接",
+        ].join("  |  ");
+      }
+    } catch (error) {
+      if (expressionCapacityEl) expressionCapacityEl.textContent = `表情库加载失败：${error.message || error}`;
+    }
+  }
+
+  function selectExpressionResource(eyeId, ledId) {
+    expressionTabs.find((tab) => tab.dataset.expressionTab === "compose")?.click();
+    if (eyeId !== null && composerEye) composerEye.value = eyeId || "";
+    if (ledId !== null && composerLed) composerLed.value = ledId || "";
+  }
+
+  function loadExpressionPreset(preset) {
+    selectExpressionResource(preset.eye_clip_id || "", preset.led_effect_id || "");
+    if (composerPresetId) composerPresetId.value = preset.preset_id || "";
+    if (composerPresetLabel) composerPresetLabel.value = preset.label || "";
+    expressionPlayback = preset.playback === "loop" ? "loop" : "once";
+    document.querySelectorAll("[data-playback]").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.playback === expressionPlayback);
+    });
+    const params = preset.led_params || {};
+    if (params.color && composerColor) composerColor.value = params.color;
+    if (params.brightness && composerBrightness) composerBrightness.value = String(params.brightness);
+    if (params.intensity && composerIntensity) composerIntensity.value = String(Math.round(params.intensity * 100));
+    if (params.direction) setExpressionDirection(params.direction);
+  }
+
+  function setExpressionDirection(direction) {
+    expressionDirection = direction;
+    document.querySelectorAll("[data-direction]").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.direction === direction);
+    });
+  }
+
+  function currentExpressionBody() {
+    return {
+      eye_clip_id: (composerEye && composerEye.value) || null,
+      led_effect_id: (composerLed && composerLed.value) || null,
+      led_params: {
+        color: (composerColor && composerColor.value) || "#ffffff",
+        brightness: Number((composerBrightness && composerBrightness.value) || 64),
+        intensity: Number((composerIntensity && composerIntensity.value) || 100) / 100,
+        direction: expressionDirection,
+      },
+      playback: expressionPlayback,
+      duration_ms: 3000,
+    };
+  }
+
+  function ensureLedPreviewCells() {
+    if (!expressionLedPreview || expressionLedPreview.childElementCount === 459) return;
+    expressionLedPreview.innerHTML = "";
+    for (let index = 0; index < 459; index += 1) {
+      const cell = document.createElement("span");
+      cell.className = "expression-led-cell";
+      expressionLedPreview.appendChild(cell);
+    }
+  }
+
+  function ledCellActive(effect, row, col, phase) {
+    if (!effect) return false;
+    const program = effect.program || {};
+    const template = program.template || (effect.role === "mouth" ? "mouth" : "");
+    const effectId = effect.effect_id || "";
+    if (template === "arrow" || ["left", "right", "up", "down"].includes(effectId)) {
+      const direction = effectId === "arrow" ? expressionDirection : effectId;
+      const x = col - 25;
+      const y = row - 4;
+      if (direction === "left" || direction === "right") {
+        const signedX = direction === "left" ? -x : x;
+        return (Math.abs(y) <= 1 && signedX >= -18 && signedX <= 10) ||
+          (signedX >= 6 && signedX <= 18 && Math.abs(y) === Math.floor((18 - signedX) / 2));
+      }
+      const signedY = direction === "up" ? -y : y;
+      return (Math.abs(x) <= 2 && signedY >= -3 && signedY <= 2) ||
+        (signedY >= 0 && signedY <= 4 && Math.abs(x) === (4 - signedY) * 2);
+    }
+    if (template === "heart" || effectId === "heart") {
+      const x = (col - 25) / 2.4;
+      const y = (4 - row) * 1.6;
+      const q = x * x + y * y - 30;
+      return q * q * q - x * x * y * y * y < 0;
+    }
+    if (template === "pulse" || effect.role === "accent") {
+      const radius = 5 + Math.sin(phase * Math.PI * 2) * 3;
+      const distance = Math.hypot((col - 25) / 3.2, row - 4);
+      return Math.abs(distance - radius) < 0.8;
+    }
+    const wave = 0.65 + 0.35 * Math.sin(phase * Math.PI * 2);
+    const dx = (col - 25) / (18 + wave * 6);
+    const dy = (row - 4) / (2.2 + wave * 1.5);
+    return dx * dx + dy * dy <= 1 && dx * dx + dy * dy >= 0.42;
+  }
+
+  function renderLedPreview(effect, phase) {
+    ensureLedPreviewCells();
+    if (!expressionLedPreview) return;
+    const color = (composerColor && composerColor.value) || "#ffffff";
+    const intensity = Number((composerIntensity && composerIntensity.value) || 100) / 100;
+    Array.from(expressionLedPreview.children).forEach((cell, index) => {
+      const row = Math.floor(index / 51);
+      const col = index % 51;
+      const active = ledCellActive(effect, row, col, phase);
+      cell.style.background = active ? color : "#30353a";
+      cell.style.opacity = active ? String(0.35 + intensity * 0.65) : "1";
+      cell.style.boxShadow = active ? `0 0 5px ${color}` : "none";
+    });
+  }
+
+  async function loadEyePreviewImage(eye) {
+    expressionPreviewImage = null;
+    if (!eye) return;
+    await new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => { expressionPreviewImage = image; resolve(); };
+      image.onerror = () => resolve();
+      image.src = `/api/eyes/${encodeURIComponent(eye.eye_clip_id)}/source?ts=${Date.now()}`;
+    });
+  }
+
+  function renderEyePreview(eye, phase) {
+    if (!expressionEyePreview) return;
+    const context = expressionEyePreview.getContext("2d");
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, 320, 172);
+    if (!eye) return;
+    if (expressionPreviewImage) {
+      const frameCount = Math.max(1, Number(eye.frame_count || 1));
+      const source = eye.source || {};
+      const rows = Math.max(1, Number(source.grid_rows || (frameCount === 30 ? 5 : 1)));
+      const cols = Math.max(1, Number(source.grid_cols || Math.ceil(frameCount / rows)));
+      const frame = Math.min(frameCount - 1, Math.floor(phase * frameCount));
+      const sourceWidth = expressionPreviewImage.naturalWidth / cols;
+      const sourceHeight = expressionPreviewImage.naturalHeight / rows;
+      context.drawImage(
+        expressionPreviewImage,
+        (frame % cols) * sourceWidth,
+        Math.floor(frame / cols) * sourceHeight,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        320,
+        172,
+      );
+      return;
+    }
+    context.strokeStyle = "#fff";
+    context.lineWidth = 18;
+    context.beginPath(); context.arc(95, 86, 42, 0, Math.PI * 2); context.stroke();
+    context.beginPath(); context.arc(225, 86, 42, 0, Math.PI * 2); context.stroke();
+  }
+
+  async function previewExpression() {
+    const body = currentExpressionBody();
+    if (!body.eye_clip_id && !body.led_effect_id) {
+      window.alert("请至少选择眼睛或 LED 效果");
+      return;
+    }
+    try {
+      const result = await fetchJson("/api/expressions/preview", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const composition = result.composition;
+      const eye = expressionEyes.find((item) => item.eye_clip_id === composition.eye_clip_id);
+      const effect = expressionLedEffects.find((item) => item.effect_id === composition.led_effect_id);
+      await loadEyePreviewImage(eye);
+      if (expressionPreviewTimer) cancelAnimationFrame(expressionPreviewTimer);
+      const started = Date.now();
+      const tick = () => {
+        const elapsed = Date.now() - started;
+        const phase = (elapsed % 3000) / 3000;
+        renderEyePreview(eye, phase);
+        renderLedPreview(effect, phase);
+        if (expressionPreviewStatus) expressionPreviewStatus.textContent = `${Math.min(3, elapsed / 1000).toFixed(1)} / 3.0 秒`;
+        if (expressionPlayback === "loop" || elapsed < 3000) {
+          expressionPreviewTimer = requestAnimationFrame(tick);
+        } else if (expressionPreviewStatus) {
+          expressionPreviewStatus.textContent = "预览完成";
+        }
+      };
+      expressionPreviewTimer = requestAnimationFrame(tick);
+    } catch (error) {
+      window.alert(`预览失败：${error.message || error}`);
+    }
+  }
+
+  async function playExpression(body = null) {
+    try {
+      const result = await fetchJson("/api/expressions/play", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body || currentExpressionBody()),
+      });
+      if (expressionPreviewStatus) expressionPreviewStatus.textContent = result.device ? "设备播放中" : "播放已发送";
+      return result;
+    } catch (error) {
+      window.alert(`播放失败：${error.message || error}`);
+      return null;
+    }
+  }
+
+  async function playLedEffect(name) {
+    await playExpression({
+      eye_clip_id: null,
+      led_effect_id: name,
+      playback: "loop",
+      duration_ms: 3000,
+    });
+  }
+
+  async function syncExpressionEye(eyeId = null) {
+    const selected = eyeId || (composerEye && composerEye.value);
+    if (!selected) {
+      window.alert("请选择眼睛素材");
+      return;
+    }
+    if (expressionPreviewStatus) expressionPreviewStatus.textContent = "同步中…";
+    try {
+      await fetchJson(`/api/eyes/${encodeURIComponent(selected)}/sync`, { method: "POST" });
+      if (expressionPreviewStatus) expressionPreviewStatus.textContent = "同步完成";
+      await refreshExpressionStudio();
+    } catch (error) {
+      if (expressionPreviewStatus) expressionPreviewStatus.textContent = "同步失败";
+      window.alert(`同步失败：${error.message || error}`);
+    }
+  }
+
+  async function setDefaultLedForEye() {
+    const eyeId = (composerEye && composerEye.value) || "";
+    if (!eyeId) {
+      window.alert("请选择眼睛素材");
+      return;
+    }
+    try {
+      await fetchJson(`/api/eyes/${encodeURIComponent(eyeId)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ default_led_effect_id: (composerLed && composerLed.value) || null }),
+      });
+      if (expressionPreviewStatus) expressionPreviewStatus.textContent = "默认搭配已更新";
+      await refreshExpressionStudio();
+    } catch (error) {
+      window.alert(`更新失败：${error.message || error}`);
+    }
+  }
+
+  async function stopExpression() {
+    try {
+      await fetchJson("/api/expressions/stop", { method: "POST" });
+      if (expressionPreviewTimer) cancelAnimationFrame(expressionPreviewTimer);
+      if (expressionPreviewStatus) expressionPreviewStatus.textContent = "已停止";
+    } catch (error) {
+      window.alert(`停止失败：${error.message || error}`);
+    }
+  }
+
+  async function saveExpressionPresetFromComposer() {
+    const presetId = String((composerPresetId && composerPresetId.value) || "").trim();
+    if (!presetId) {
+      window.alert("请输入组合 ID");
+      return;
+    }
+    if (!window.confirm(`确认保存组合「${presetId}」？`)) return;
+    try {
+      const body = currentExpressionBody();
+      body.preset_id = presetId;
+      body.label = String((composerPresetLabel && composerPresetLabel.value) || presetId).trim();
+      body.confirmed = true;
+      await fetchJson("/api/expression-presets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await refreshExpressionStudio();
+    } catch (error) {
+      window.alert(`保存失败：${error.message || error}`);
+    }
+  }
+
+  async function uploadExpressionEye() {
+    const file = eyeUploadFile && eyeUploadFile.files && eyeUploadFile.files[0];
+    const clipId = String((eyeUploadId && eyeUploadId.value) || "").trim();
+    if (!file || !clipId) {
+      window.alert("请选择素材并填写素材 ID");
+      return;
+    }
+    btnEyeUpload.disabled = true;
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("读取失败"));
+        reader.readAsDataURL(file);
+      });
+      await fetchJson("/api/expression-clips", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clip_id: clipId,
+          expression: clipId,
+          filename: file.name,
+          content_type: file.type,
+          content_base64: dataUrl.split(",", 2)[1] || "",
+          fps: Number((eyeUploadFps && eyeUploadFps.value) || 10),
+          grid_rows: Number((eyeUploadRows && eyeUploadRows.value) || 0) || null,
+          grid_cols: Number((eyeUploadCols && eyeUploadCols.value) || 0) || null,
+        }),
+      });
+      await refreshExpressionStudio();
+    } catch (error) {
+      window.alert(`上传失败：${error.message || error}`);
+    } finally {
+      btnEyeUpload.disabled = false;
+    }
+  }
+
   function renderExpressions(expressions) {
     if (Array.isArray(expressions)) latestExpressions = normalizeExpressionEntries(expressions);
     populateRecordingExpressionSelect();
@@ -3480,15 +3978,18 @@
       : latestExpressions;
     filtered.forEach((name) => {
       const meta = expressionMeta(name);
+      const effect = expressionLedEffects.find((item) => item.effect_id === name);
       const labelCn = expressionLabel(name);
-      const metaParts = ["LED 表情"];
+      const metaParts = [effect ? (effect.role || "LED") : "LED 表情"];
       if (meta && meta.mode !== null && meta.mode !== undefined) metaParts.push(`m${meta.mode}`);
       if (meta) metaParts.push(meta.animated ? "动态" : "静态");
+      if (effect) metaParts.push(effect.source || "builtin");
+      metaParts.push("眼睛保持当前");
       const card = makeSkillCard({
         title: labelCn,
         meta: metaParts.join(" · "),
-        tooltip: `切换灯光表情：${labelCn}（${name}）`,
-        onClick: () => invokeExpression(name),
+        tooltip: `单独播放 LED 效果：${labelCn}（${name}），眼睛保持当前画面`,
+        onClick: () => { void playLedEffect(name); },
       });
       expressionGrid.appendChild(card);
     });
@@ -3509,6 +4010,62 @@
   wireSkillSearch(userSkillSearchEl, (v) => { userSkillQuery = v; renderUserSkills(); });
   wireSkillSearch(recordingSearchEl, (v) => { recordingQuery = v; renderRecordings(); });
   wireSkillSearch(expressionSearchEl, (v) => { expressionQuery = v; renderExpressions(); });
+  expressionTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.expressionTab;
+      expressionTabs.forEach((item) => item.classList.toggle("is-active", item === tab));
+      expressionPanels.forEach((panel) => panel.classList.toggle("hidden", panel.dataset.expressionPanel !== target));
+    });
+  });
+  document.querySelectorAll("[data-direction]").forEach((button) => {
+    button.addEventListener("click", () => setExpressionDirection(button.dataset.direction || "right"));
+  });
+  document.querySelectorAll("[data-playback]").forEach((button) => {
+    button.addEventListener("click", () => {
+      expressionPlayback = button.dataset.playback === "loop" ? "loop" : "once";
+      document.querySelectorAll("[data-playback]").forEach((item) => {
+        item.classList.toggle("is-active", item.dataset.playback === expressionPlayback);
+      });
+    });
+  });
+  if (btnExpressionPreview) btnExpressionPreview.addEventListener("click", () => { void previewExpression(); });
+  if (btnExpressionSync) btnExpressionSync.addEventListener("click", () => { void syncExpressionEye(); });
+  if (btnExpressionSetDefault) {
+    btnExpressionSetDefault.addEventListener("click", () => { void setDefaultLedForEye(); });
+  }
+  if (btnExpressionPlay) btnExpressionPlay.addEventListener("click", () => { void playExpression(); });
+  if (btnExpressionStop) btnExpressionStop.addEventListener("click", () => { void stopExpression(); });
+  if (btnExpressionSave) btnExpressionSave.addEventListener("click", () => { void saveExpressionPresetFromComposer(); });
+  if (btnEyeUpload) btnEyeUpload.addEventListener("click", () => { void uploadExpressionEye(); });
+  if (ledEffectForm) {
+    ledEffectForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await fetchJson("/api/led-effects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            effect_id: String(ledEffectId.value || "").trim(),
+            label: String(ledEffectLabel.value || "").trim(),
+            role: ledEffectRole.value,
+            program: {
+              version: 1,
+              template: ledEffectTemplate.value,
+              defaults: { color: ledEffectColor.value, intensity: 1.0 },
+            },
+          }),
+        });
+        ledEffectForm.reset();
+        ledEffectColor.value = "#ffffff";
+        await refreshExpressionStudio();
+      } catch (error) {
+        window.alert(`保存失败：${error.message || error}`);
+      }
+    });
+  }
+  ensureLedPreviewCells();
+  void refreshSkillsAndRecordings();
+  void refreshExpressionStudio();
   if (btnUserSkillsReload) {
     btnUserSkillsReload.addEventListener("click", () => { void reloadUserSkills(); });
   }
@@ -5035,37 +5592,6 @@
   let hangupPending = false;
   let hangupCancelled = false;
 
-  const ESP32_WORKLET_CODE = `
-class Esp32PcmProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._buffer = new Float32Array(0);
-    this.port.onmessage = (e) => {
-      const incoming = e.data;
-      const merged = new Float32Array(this._buffer.length + incoming.length);
-      merged.set(this._buffer);
-      merged.set(incoming, this._buffer.length);
-      this._buffer = merged;
-    };
-  }
-  process(inputs, outputs) {
-    const out = outputs[0][0];
-    if (!out) return true;
-    const needed = out.length;
-    if (this._buffer.length >= needed) {
-      out.set(this._buffer.subarray(0, needed));
-      this._buffer = this._buffer.subarray(needed);
-    } else {
-      out.set(this._buffer);
-      out.fill(0, this._buffer.length);
-      this._buffer = new Float32Array(0);
-    }
-    return true;
-  }
-}
-registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
-`;
-
   function setBrowserCallState(state) {
     updateCallViewState(state);
   }
@@ -5593,10 +6119,7 @@ registerProcessor("esp32-pcm-processor", Esp32PcmProcessor);
     if (esp32AudioCtx.state === "suspended") {
       try { await esp32AudioCtx.resume(); } catch (_) { /* ignore */ }
     }
-    const blob = new Blob([ESP32_WORKLET_CODE], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-    await esp32AudioCtx.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
+    await esp32AudioCtx.audioWorklet.addModule("/esp32-pcm-worklet.js?v=20260709");
 
     esp32WorkletNode = new AudioWorkletNode(esp32AudioCtx, "esp32-pcm-processor");
     const dest = esp32AudioCtx.createMediaStreamDestination();

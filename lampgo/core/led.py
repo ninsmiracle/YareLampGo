@@ -210,6 +210,34 @@ class LEDController:
     def off(self) -> bool:
         return self.set_mode(0)
 
+    def play_expression(self, expression_id: str, **overrides: Any) -> tuple[bool, dict[str, Any] | None]:
+        """Resolve and play a preset, eye clip, or LED effect without saving it."""
+        try:
+            from lampgo.expression_library import resolve_expression
+
+            request: dict[str, Any] = {"expression_id": expression_id}
+            request.update({key: value for key, value in overrides.items() if value is not None})
+            composition = resolve_expression(request)
+        except Exception as exc:
+            logger.warning("led.expression_resolve_failed", expression_id=expression_id, error=str(exc))
+            return False, None
+
+        effect = composition.get("led_effect") or {}
+        payload: dict[str, Any] = {
+            "eye_clip_id": composition.get("eye_storage_clip_id"),
+            "led_effect_id": composition.get("led_effect_id"),
+            "led_params": composition.get("led_params") or {},
+            "playback": composition.get("playback") or "once",
+            "duration_ms": int(composition.get("duration_ms") or 3000),
+        }
+        if composition.get("preset_id"):
+            payload["preset_id"] = composition["preset_id"]
+        if effect.get("mode") is not None:
+            payload["led_mode"] = int(effect["mode"])
+        if isinstance(effect.get("program"), dict):
+            payload["led_program"] = effect["program"]
+        return self._send_remote_path("/device/expressions/play", payload, reason="expression_play"), composition
+
     def _send(self, command: str) -> bool:
         if self._serial is None:
             logger.debug("led.send_skipped (not connected)", cmd=command.strip())
@@ -231,6 +259,9 @@ class LEDController:
             return False
 
     def _send_remote(self, payload: dict[str, Any]) -> bool:
+        return self._send_remote_path("/device/led", payload, reason="led")
+
+    def _send_remote_path(self, path: str, payload: dict[str, Any], *, reason: str) -> bool:
         manager = self._esp32_manager
         if manager is None:
             logger.debug("led.remote_send_skipped (no esp32 manager)", payload=payload)
@@ -247,10 +278,10 @@ class LEDController:
             return False
 
         try:
-            body = manager.with_owner_auth(payload, reason="led") if hasattr(manager, "with_owner_auth") else payload
+            body = manager.with_owner_auth(payload, reason=reason) if hasattr(manager, "with_owner_auth") else payload
             import httpx
 
-            resp = httpx.post(f"{base_url}/device/led", json=body, timeout=2.0, trust_env=False)
+            resp = httpx.post(f"{base_url}{path}", json=body, timeout=5.0, trust_env=False)
             ok = resp.status_code < 400
             if ok:
                 try:
@@ -263,11 +294,12 @@ class LEDController:
                 mark_healthy = getattr(manager, "mark_active_healthy", None)
                 if callable(mark_healthy):
                     mark_healthy()
-                logger.info("led.remote_sent", payload=payload, base_url=base_url)
+                logger.info("led.remote_sent", path=path, payload=payload, base_url=base_url)
             else:
                 logger.warning(
                     "led.remote_send_failed",
                     payload=payload,
+                    path=path,
                     base_url=base_url,
                     status=resp.status_code,
                     body=resp.text[:200],
@@ -285,6 +317,7 @@ class LEDController:
             logger.warning(
                 "led.remote_ack_timeout_assumed_sent",
                 payload=payload,
+                path=path,
                 base_url=base_url,
                 error=str(exc),
                 error_type=type(exc).__name__,
@@ -294,6 +327,7 @@ class LEDController:
             logger.warning(
                 "led.remote_send_failed",
                 payload=payload,
+                path=path,
                 base_url=base_url,
                 error=str(exc),
                 error_type=type(exc).__name__,

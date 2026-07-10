@@ -75,13 +75,19 @@ def test_expression_clip_rejects_short_duration(monkeypatch, tmp_path):
 
 def test_expression_clip_api_upload_and_sync(monkeypatch, tmp_path):
     gateway = _make_gateway(monkeypatch, tmp_path)
-    sent: list[tuple[str, dict[str, object]]] = []
+    sent: list[tuple[str, bytes, dict[str, object]]] = []
 
-    async def fake_proxy_post(path: str, payload: dict[str, object]):
-        sent.append((path, payload))
-        return 200, {"ok": True}, "application/json"
+    async def fake_proxy_post_bytes(
+        path: str,
+        payload: bytes,
+        *,
+        params: dict[str, object] | None = None,
+        content_type: str = "application/octet-stream",
+    ):
+        sent.append((path, payload, params or {}))
+        return 200, {"ok": True, "action": "upload", "c6_confirmed": True}, "application/json"
 
-    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
 
     upload = {
         "clip_id": "focused",
@@ -105,11 +111,39 @@ def test_expression_clip_api_upload_and_sync(monkeypatch, tmp_path):
 
         sync = client.post("/api/device/expression-clips/sync", json={"clip_id": "focused"})
         assert sync.status_code == 200
-        assert sync.json()["result"]["sent_chunks"] == len(sent)
+        result = sync.json()["result"]
+        assert result["transfer_mode"] == "bulk"
+        assert result["sent_chunks"] == 1
+        assert result["device_body"]["c6_confirmed"] is True
 
-    assert sent[0][0] == "/device/expression-clips/sync"
-    assert sent[0][1]["action"] == "begin"
-    assert sent[0][1]["led_effect"] == "focused"
-    assert not any(payload["action"] == "chunk" and payload["target"] == "led" for _path, payload in sent)
-    assert any(payload["action"] == "chunk" and payload["target"] == "lcd" for _path, payload in sent)
-    assert sent[-1][1]["action"] == "commit"
+    assert len(sent) == 1
+    assert sent[0][0] == "/device/expression-clips/upload"
+    assert sent[0][1]
+    assert sent[0][2]["clip_id"] == "focused"
+    assert sent[0][2]["led_effect"] == "focused"
+    assert sent[0][2]["owner_id"] == gateway.server.esp32.owner_id
+
+
+def test_expression_clip_sync_rejects_missing_c6_confirmation(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    create_expression_clip(
+        clip_id="focused",
+        expression="focused",
+        source_bytes=_png_sprite_sheet(),
+        filename="focused.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+    )
+
+    async def fake_proxy_post_bytes(*_args, **_kwargs):
+        return 200, {"ok": True, "action": "upload"}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/device/expression-clips/sync", json={"clip_id": "focused"})
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "C6 did not confirm clip sync"
