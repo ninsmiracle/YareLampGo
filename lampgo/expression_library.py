@@ -30,7 +30,7 @@ MAX_PRESET_BYTES = 1024
 PRESET_BUDGET_BYTES = 64 * 1024
 
 ALLOWED_ROLES = {"mouth", "symbol", "direction", "accent"}
-ALLOWED_TEMPLATES = {"mouth", "arrow", "heart", "pulse"}
+ALLOWED_TEMPLATES = {"mouth", "arrow", "heart", "pulse", "codex"}
 ALLOWED_PLAYBACK = {"once", "loop"}
 ALLOWED_DIRECTIONS = {"left", "right", "up", "down"}
 ALLOWED_MOUTH_VARIANTS = {"smile", "open", "flat", "dizzy"}
@@ -215,6 +215,26 @@ def _virtual_effects() -> list[dict[str, Any]]:
             },
         }
     )
+    effects.append(
+        {
+            "effect_id": "codex",
+            "label": "CODEX 闪烁字标",
+            "role": "symbol",
+            "source": "template",
+            "animated": True,
+            "program": {
+                "version": 1,
+                "template": "codex",
+                "defaults": {
+                    "color": "#f4f4f4",
+                    "secondary_color": "#00d8ff",
+                    "brightness": 64,
+                    "intensity": 1.0,
+                },
+            },
+            "parameter_schema": _template_parameter_schema("codex"),
+        }
+    )
     if any(eye["storage_clip_id"] == "dizzy" for eye in list_eyes()):
         effects.append(
             {
@@ -322,7 +342,7 @@ def save_led_effect(raw: dict[str, Any]) -> dict[str, Any]:
         "label": label,
         "role": role,
         "source": "custom",
-        "animated": program["template"] in {"mouth", "heart", "pulse"},
+        "animated": program["template"] in {"mouth", "heart", "pulse", "codex"},
         "program": program,
         "parameter_schema": _template_parameter_schema(program["template"]),
     }

@@ -109,6 +109,30 @@ def test_many_to_many_presets_reuse_assets(monkeypatch, tmp_path):
     assert [item["effect_id"] for item in list_led_effects()].count("soft_mouth") == 1
 
 
+def test_codex_led_effect_is_available_without_an_eye(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+
+    effect = next(item for item in list_led_effects() if item["effect_id"] == "codex")
+    resolved = resolve_expression({"led_effect_id": "codex", "playback": "loop"})
+
+    assert effect["label"] == "CODEX 闪烁字标"
+    assert effect["animated"] is True
+    assert effect["program"] == {
+        "version": 1,
+        "template": "codex",
+        "defaults": {
+            "color": "#f4f4f4",
+            "secondary_color": "#00d8ff",
+            "brightness": 64,
+            "intensity": 1.0,
+        },
+    }
+    assert resolved["eye_clip_id"] is None
+    assert resolved["led_effect_id"] == "codex"
+    assert resolved["led_effect"]["program"]["template"] == "codex"
+    assert resolved["playback"] == "loop"
+
+
 def test_dizzy_legacy_asset_migrates_without_copy(monkeypatch, tmp_path):
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     _create_eye("dizzy")

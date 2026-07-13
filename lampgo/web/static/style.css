@@ -3514,6 +3514,12 @@ button.device-chip.is-active {
   color: var(--text-soft);
 }
 
+.record-dialog-hint {
+  color: var(--text-muted, #a08b80);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 .record-dialog-select {
   width: 100%;
 }

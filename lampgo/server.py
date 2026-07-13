@@ -395,6 +395,7 @@ class LampgoServer:
                 overwrite=bool(data.get("overwrite", False)),
                 description=str(data.get("description", "") or data.get("prompt", "")),
                 expression=str(data.get("expression", "")),
+                expression_preset=str(data.get("expression_preset", "") or data.get("preset_id", "")),
             )
 
         if cmd == "recording_discard":
@@ -573,6 +574,7 @@ class LampgoServer:
         overwrite: bool = False,
         description: str = "",
         expression: str = "",
+        expression_preset: str = "",
     ) -> dict[str, Any]:
         """Persist buffered recording frames to <recordings_dir>/user/<name>.csv."""
         async with self._record_lock:
@@ -600,7 +602,7 @@ class LampgoServer:
                 }
 
             path = rec.save(name)
-            write_recording_description(Path(path), description, expression)
+            write_recording_description(Path(path), description, expression, expression_preset)
             frames = rec.frame_count
             self._record_recorder = None
             self._record_started_at = 0.0
@@ -615,6 +617,7 @@ class LampgoServer:
                     "path": str(path),
                     "description": description,
                     "expression": expression,
+                    "expression_preset": expression_preset,
                     "frames": frames,
                     "record_playback_notes": {
                         "record": "samples HAL joint positions only (no style interpolation)",

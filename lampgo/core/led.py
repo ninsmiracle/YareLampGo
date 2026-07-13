@@ -238,6 +238,10 @@ class LEDController:
             payload["led_program"] = effect["program"]
         return self._send_remote_path("/device/expressions/play", payload, reason="expression_play"), composition
 
+    def stop_expression(self) -> bool:
+        """Stop a composed eye/LED expression on the paired device."""
+        return self._send_remote_path("/device/expressions/stop", {}, reason="expression_stop")
+
     def _send(self, command: str) -> bool:
         if self._serial is None:
             logger.debug("led.send_skipped (not connected)", cmd=command.strip())

@@ -220,6 +220,7 @@
 
   const expressionMetaByName = new Map();
   const recordingExpressionByName = new Map();
+  const recordingExpressionPresetByName = new Map();
   let expressionEyes = [];
   let expressionLedEffects = [];
   let expressionPresets = [];
@@ -236,6 +237,50 @@
   function expressionLabel(name) {
     const meta = expressionMeta(name);
     return (meta && meta.label) || EXPRESSION_LABELS_CN[name] || name;
+  }
+
+  function expressionPresetById(presetId) {
+    const id = String(presetId || "").trim();
+    if (!id) return null;
+    return expressionPresets.find((preset) => String(preset.preset_id || "") === id) || null;
+  }
+
+  function expressionPresetLabel(presetId) {
+    const id = String(presetId || "").trim();
+    const preset = expressionPresetById(id);
+    return (preset && (preset.label || preset.preset_id)) || id;
+  }
+
+  function normalizeRecordingExpressionChoice(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (raw.startsWith("preset:") || raw.startsWith("led:")) return raw;
+    return expressionPresetById(raw) ? `preset:${raw}` : `led:${raw}`;
+  }
+
+  function splitRecordingExpressionChoice(value) {
+    const normalized = normalizeRecordingExpressionChoice(value);
+    if (normalized.startsWith("preset:")) {
+      return { expression_preset: normalized.slice("preset:".length), expression: "" };
+    }
+    if (normalized.startsWith("led:")) {
+      return { expression_preset: "", expression: normalized.slice("led:".length) };
+    }
+    return { expression_preset: "", expression: "" };
+  }
+
+  function recordingExpressionChoiceValue(recording) {
+    const expressionPreset = getRecordingExpressionPreset(recording);
+    if (expressionPreset) return `preset:${expressionPreset}`;
+    const expression = getRecordingExpression(recording);
+    return expression ? `led:${expression}` : "";
+  }
+
+  function recordingExpressionChoiceLabel(recording) {
+    const expressionPreset = getRecordingExpressionPreset(recording);
+    if (expressionPreset) return `组合 ${expressionPresetLabel(expressionPreset)}`;
+    const expression = getRecordingExpression(recording);
+    return `表情 ${expressionLabel(expression)}`;
   }
 
   function normalizeExpressionEntries(entries) {
@@ -273,23 +318,47 @@
 
   function populateExpressionSelect(selectEl, preferred) {
     if (!selectEl) return;
-    const selected = String(preferred || selectEl.value || "smiley").trim();
+    const selected = normalizeRecordingExpressionChoice(preferred || selectEl.value || "");
     const names = latestExpressions.length ? latestExpressions : Object.keys(EXPRESSION_LABELS_CN);
     selectEl.innerHTML = "";
-    names.forEach((name) => {
+    const values = [];
+    function appendOption(parent, value, text) {
       const option = document.createElement("option");
-      option.value = name;
+      option.value = value;
+      option.textContent = text;
+      parent.appendChild(option);
+      values.push(value);
+    }
+    if (expressionPresets.length) {
+      const group = document.createElement("optgroup");
+      group.label = "组合表情（眼睛 + LED）";
+      expressionPresets.forEach((preset) => {
+        const presetId = String(preset.preset_id || "").trim();
+        if (!presetId) return;
+        const pair = `${preset.eye_clip_id || "无眼睛"} + ${preset.led_effect_id || "无 LED"}`;
+        appendOption(group, `preset:${presetId}`, `${preset.label || presetId}（${presetId} · ${pair}）`);
+      });
+      if (group.children.length) selectEl.appendChild(group);
+    }
+    const ledGroup = document.createElement("optgroup");
+    ledGroup.label = "仅 LED 灯板";
+    names.forEach((name) => {
       const meta = expressionMeta(name);
       const modeText = meta && meta.mode !== null && meta.mode !== undefined ? ` · m${meta.mode}` : "";
-      option.textContent = `${expressionLabel(name)}（${name}${modeText}）`;
-      selectEl.appendChild(option);
+      appendOption(ledGroup, `led:${name}`, `${expressionLabel(name)}（${name}${modeText}）`);
     });
-    if (names.includes(selected)) {
+    if (ledGroup.children.length) selectEl.appendChild(ledGroup);
+    if (selected && !values.includes(selected)) {
+      const id = selected.split(":", 2)[1] || selected;
+      const prefix = selected.startsWith("preset:") ? "组合" : "LED";
+      appendOption(selectEl, selected, `${prefix} ${id}`);
+    }
+    if (values.includes(selected)) {
       selectEl.value = selected;
-    } else if (names.includes("smiley")) {
-      selectEl.value = "smiley";
-    } else if (names.length) {
-      selectEl.value = names[0];
+    } else if (values.includes("led:smiley")) {
+      selectEl.value = "led:smiley";
+    } else if (values.length) {
+      selectEl.value = values[0];
     }
   }
 
@@ -3149,14 +3218,15 @@
   function normalizeRecordingEntry(entry) {
     if (typeof entry === "string") {
       const name = entry.trim();
-      return { name, source: "builtin", description: "", expression: RECORDING_EXPRESSIONS[name] || "smiley" };
+      return { name, source: "builtin", description: "", expression: RECORDING_EXPRESSIONS[name] || "smiley", expression_preset: "" };
     }
-    if (!entry || typeof entry !== "object") return { name: "", source: "builtin", description: "", expression: "" };
+    if (!entry || typeof entry !== "object") return { name: "", source: "builtin", description: "", expression: "", expression_preset: "" };
     const name = String(entry.name || "").trim();
     const source = String(entry.source || "builtin").trim() || "builtin";
     const description = String(entry.description || "").trim();
     const expression = String(entry.expression || RECORDING_EXPRESSIONS[name] || "smiley").trim();
-    return { name, source, description, expression };
+    const expressionPreset = String(entry.expression_preset || entry.expressionPreset || "").trim();
+    return { name, source, description, expression, expression_preset: expressionPreset };
   }
 
   function renderSkills(skills) {
@@ -3361,8 +3431,10 @@
     if (Array.isArray(recordings)) {
       latestRecordings = recordings.map(normalizeRecordingEntry).filter((r) => r.name);
       recordingExpressionByName.clear();
+      recordingExpressionPresetByName.clear();
       latestRecordings.forEach((recording) => {
         recordingExpressionByName.set(recording.name, recording.expression || "smiley");
+        recordingExpressionPresetByName.set(recording.name, recording.expression_preset || "");
       });
     }
     recordingGrid.innerHTML = "";
@@ -3371,26 +3443,28 @@
       ? latestRecordings.filter((recording) => {
           const name = recording.name;
           const expr = getRecordingExpression(recording) || "";
+          const preset = getRecordingExpressionPreset(recording) || "";
           const labelCn = recordingLabel(name);
           const exprCn = expressionLabel(expr);
+          const presetCn = expressionPresetLabel(preset);
           const description = recording.description || "";
           return (
             name.toLowerCase().includes(q) ||
             expr.toLowerCase().includes(q) ||
+            preset.toLowerCase().includes(q) ||
             labelCn.toLowerCase().includes(q) ||
             exprCn.toLowerCase().includes(q) ||
+            presetCn.toLowerCase().includes(q) ||
             description.toLowerCase().includes(q)
           );
         })
       : latestRecordings;
     filtered.forEach((recording) => {
       const name = recording.name;
-      const expression = getRecordingExpression(recording);
       const labelCn = recordingLabel(name);
-      const exprCn = expressionLabel(expression);
       const isUserRecording = recording.source === "user";
       const sourceLabel = isUserRecording ? "我的录制" : "内置动作";
-      const expressionMeta = `表情 ${exprCn}`;
+      const expressionMeta = recordingExpressionChoiceLabel(recording);
       const description = recording.description || "";
       const card = makeSkillCard({
         title: labelCn,
@@ -3398,8 +3472,8 @@
           ? `${sourceLabel} · ${expressionMeta} · ${description}`
           : `${sourceLabel} · ${expressionMeta}`,
         tooltip: description
-          ? `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn} · ${description}`
-          : `播放录制动作：${labelCn}（${name}） · 推荐表情：${exprCn}`,
+          ? `播放录制动作：${labelCn}（${name}） · 配套表情：${expressionMeta} · ${description}`
+          : `播放录制动作：${labelCn}（${name}） · 配套表情：${expressionMeta}`,
         onClick: () => invokeRecording(name),
       });
       if (isUserRecording) {
@@ -3407,7 +3481,7 @@
         const edit = document.createElement("button");
         edit.className = "skill-card-action skill-card-action--edit";
         edit.type = "button";
-        edit.title = "编辑推荐表情和动作说明";
+        edit.title = "编辑配套表情和动作说明";
         edit.textContent = "✎";
         edit.addEventListener("click", (ev) => {
           ev.stopPropagation();
@@ -3437,10 +3511,10 @@
     if (!recordEditDialog || !recording || !recording.name) return;
     recordEditDialog.dataset.recordingName = recording.name;
     if (recordEditDesc) {
-      recordEditDesc.textContent = `编辑 ${recordingLabel(recording.name)}（${recording.name}）的推荐表情和动作说明；不会改动录制动作轨迹。`;
+      recordEditDesc.textContent = `编辑 ${recordingLabel(recording.name)}（${recording.name}）的绑定表情和动作说明；不会改动录制动作轨迹。`;
     }
     if (recordEditDescriptionInput) recordEditDescriptionInput.value = recording.description || "";
-    populateExpressionSelect(recordEditExpressionSelect, getRecordingExpression(recording));
+    populateExpressionSelect(recordEditExpressionSelect, recordingExpressionChoiceValue(recording));
     if (recordEditError) recordEditError.textContent = "";
     recordEditDialog.showModal();
     if (recordEditDescriptionInput) recordEditDescriptionInput.focus();
@@ -3452,11 +3526,12 @@
     recordEditDialog.close();
   }
 
-  async function updateRecordingMetadata(name, description, expression) {
+  async function updateRecordingMetadata(name, description, expressionChoice) {
+    const pairing = splitRecordingExpressionChoice(expressionChoice);
     const resp = await fetch("/api/recordings/update", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, description, expression }),
+      body: JSON.stringify({ name, description, ...pairing }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || !data.ok) {
@@ -3509,6 +3584,7 @@
     if (Array.isArray(result.led_effects)) expressionLedEffects = result.led_effects;
     if (Array.isArray(result.presets)) expressionPresets = result.presets;
     renderExpressionStudio();
+    renderRecordings();
   }
 
   function expressionResource(title, meta, actions = []) {
@@ -3627,6 +3703,7 @@
         mode: effect.mode,
         animated: effect.animated,
       })));
+      renderRecordings();
       const library = capacity.library;
       const device = capacity.device;
       if (expressionCapacityEl && library) {
@@ -4441,18 +4518,26 @@
     clearEmptyState();
     const requestId = nextId();
     const bubble = addAssistantBubble(requestId);
-    const expression = getRecordingExpression(name);
+    const recording = latestRecordings.find((entry) => entry.name === name) || { name };
+    const expressionPreset = getRecordingExpressionPreset(recording);
+    const expression = expressionPreset ? "" : getRecordingExpression(recording);
     const labelCn = recordingLabel(name);
-    const exprCn = expressionLabel(expression);
+    const pairingLabel = recordingExpressionChoiceLabel(recording);
+    const params = { name, playback_mode: playbackMode };
+    if (expressionPreset) {
+      params.expression_preset = expressionPreset;
+    } else {
+      params.expression = expression;
+    }
     addStep(
       getPreludeArea(ensureActivityLog(bubble)),
-      `播放录制动作 ${labelCn}（${name}） · 模式 ${playbackModeLabel(playbackMode)} · 表情 ${exprCn}`,
+      `播放录制动作 ${labelCn}（${name}） · 模式 ${playbackModeLabel(playbackMode)} · ${pairingLabel}`,
       "active"
     );
     send({
       type: "invoke",
       skill_id: "play_recording",
-      params: { name, expression, playback_mode: playbackMode },
+      params,
       wait: true,
       request_id: requestId,
     });
@@ -4529,7 +4614,7 @@
     recordNameError.textContent = "";
     recordNameInput.value = "";
     if (recordDescriptionInput) recordDescriptionInput.value = "";
-    populateRecordingExpressionSelect("smiley");
+    populateRecordingExpressionSelect();
     if (btnRecordSave) btnRecordSave.textContent = "保存";
     recordNameDialog.showModal();
     recordNameInput.focus();
@@ -4542,8 +4627,9 @@
     recordNameDialog.close();
   }
 
-  function saveMotionRecording(name, description, expression, overwrite = false) {
-    send({ type: "recording_save", name, description, expression, overwrite, request_id: nextId() });
+  function saveMotionRecording(name, description, expressionChoice, overwrite = false) {
+    const pairing = splitRecordingExpressionChoice(expressionChoice);
+    send({ type: "recording_save", name, description, ...pairing, overwrite, request_id: nextId() });
   }
 
   function discardMotionRecording() {
@@ -6815,14 +6901,14 @@
         if (recordDescriptionInput) recordDescriptionInput.focus();
         return;
       }
-      const expression = ((recordExpressionSelect && recordExpressionSelect.value) || "").trim();
-      if (!expression) {
-        recordNameError.textContent = "请选择推荐表情";
+      const expressionChoice = ((recordExpressionSelect && recordExpressionSelect.value) || "").trim();
+      if (!expressionChoice) {
+        recordNameError.textContent = "请选择配套表情";
         if (recordExpressionSelect) recordExpressionSelect.focus();
         return;
       }
       recordNameError.textContent = "";
-      saveMotionRecording(name, description, expression, pendingOverwriteSave);
+      saveMotionRecording(name, description, expressionChoice, pendingOverwriteSave);
     });
   }
 
@@ -6831,7 +6917,7 @@
       e.preventDefault();
       const name = (recordEditDialog && recordEditDialog.dataset.recordingName) || "";
       const description = ((recordEditDescriptionInput && recordEditDescriptionInput.value) || "").trim();
-      const expression = ((recordEditExpressionSelect && recordEditExpressionSelect.value) || "").trim();
+      const expressionChoice = ((recordEditExpressionSelect && recordEditExpressionSelect.value) || "").trim();
       if (!name) {
         if (recordEditError) recordEditError.textContent = "缺少动作名称";
         return;
@@ -6841,16 +6927,16 @@
         if (recordEditDescriptionInput) recordEditDescriptionInput.focus();
         return;
       }
-      if (!expression) {
-        if (recordEditError) recordEditError.textContent = "请选择推荐表情";
+      if (!expressionChoice) {
+        if (recordEditError) recordEditError.textContent = "请选择配套表情";
         if (recordEditExpressionSelect) recordEditExpressionSelect.focus();
         return;
       }
       if (recordEditError) recordEditError.textContent = "";
-      updateRecordingMetadata(name, description, expression)
+      updateRecordingMetadata(name, description, expressionChoice)
         .then(() => {
           closeEditRecordingDialog();
-          addSystemMessage(`录制动作已更新：${recordingLabel(name)}（${name}） · 表情 ${expressionLabel(expression)}`);
+          addSystemMessage(`录制动作已更新：${recordingLabel(name)}（${name}） · ${recordingExpressionChoiceLabel({ name, ...splitRecordingExpressionChoice(expressionChoice) })}`);
         })
         .catch((err) => {
           if (recordEditError) recordEditError.textContent = `保存失败：${err && err.message ? err.message : err}`;
@@ -6972,6 +7058,16 @@
   function nextId() {
     reqCounter += 1;
     return `r${reqCounter}_${Date.now().toString(36)}`;
+  }
+
+  function getRecordingExpressionPreset(recordingOrName) {
+    if (recordingOrName && typeof recordingOrName === "object") {
+      const expressionPreset = String(recordingOrName.expression_preset || recordingOrName.expressionPreset || "").trim();
+      if (expressionPreset) return expressionPreset;
+      return getRecordingExpressionPreset(recordingOrName.name);
+    }
+    const name = String(recordingOrName || "");
+    return recordingExpressionPresetByName.get(name) || "";
   }
 
   function getRecordingExpression(recordingOrName) {

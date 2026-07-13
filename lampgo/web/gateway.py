@@ -724,6 +724,7 @@ class WebGateway:
         name = str(body.get("name", "")).strip()
         description = str(body.get("description", "") or body.get("prompt", "")).strip()
         expression = str(body.get("expression", "")).strip()
+        expression_preset = str(body.get("expression_preset", "") or body.get("preset_id", "")).strip()
         if not name or not re.match(r"^[\w\-]+$", name):
             return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
 
@@ -735,7 +736,7 @@ class WebGateway:
                 return JSONResponse({"ok": False, "error": "built-in recording cannot be edited"}, status_code=400)
             return JSONResponse({"ok": False, "error": "user recording not found"}, status_code=404)
 
-        write_recording_description(csv_path, description, expression)
+        write_recording_description(csv_path, description, expression, expression_preset)
         self.server._refresh_llm_skill_tools()
         return JSONResponse(
             {
@@ -746,6 +747,7 @@ class WebGateway:
                     "path": str(csv_path),
                     "description": description or None,
                     "expression": expression or None,
+                    "expression_preset": expression_preset or None,
                     "recordings": self._list_recordings(),
                 },
             }
@@ -765,6 +767,7 @@ class WebGateway:
         alias = str(body.get("alias", "")).strip()
         description = str(body.get("description", "") or body.get("prompt", "")).strip()
         expression = str(body.get("expression", "")).strip()
+        expression_preset = str(body.get("expression_preset", "") or body.get("preset_id", "")).strip()
 
         if not name or not re.match(r"^[\w\-]+$", name):
             return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
@@ -776,7 +779,7 @@ class WebGateway:
         user_dir.mkdir(parents=True, exist_ok=True)
         csv_path = user_dir / f"{name}.csv"
         csv_path.write_text(csv_content, encoding="utf-8")
-        write_recording_description(csv_path, description, expression)
+        write_recording_description(csv_path, description, expression, expression_preset)
 
         if alias:
             alias_path = recordings_dir / "aliases.json"
@@ -798,6 +801,7 @@ class WebGateway:
                     "alias": alias or None,
                     "description": description or None,
                     "expression": expression or None,
+                    "expression_preset": expression_preset or None,
                     "recordings": self._list_recordings(),
                 },
             }
@@ -3838,6 +3842,7 @@ class WebGateway:
                 overwrite=bool(msg.get("overwrite", False)),
                 description=str(msg.get("description", "") or msg.get("prompt", "")),
                 expression=str(msg.get("expression", "")),
+                expression_preset=str(msg.get("expression_preset", "") or msg.get("preset_id", "")),
             )
             result["request_id"] = request_id
             await ws.send_json(result)

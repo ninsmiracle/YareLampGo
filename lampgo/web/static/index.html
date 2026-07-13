@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YareLampGo 控制台</title>
   <link rel="icon" href="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg">
-  <link rel="stylesheet" href="/style.css?v=brand-yarelampgo-20260604b">
+  <link rel="stylesheet" href="/style.css?v=recording-expression-presets-20260710">
   <link rel="stylesheet" href="/setup.css?v=secret-inputs-20260602">
 </head>
 <body>
@@ -1218,7 +1218,7 @@
   <dialog id="record-name-dialog" class="record-dialog">
     <form id="record-name-form" method="dialog" class="record-dialog-card">
       <div class="record-dialog-title">保存录制动作</div>
-      <div class="record-dialog-desc">请输入动作名称、动作说明和推荐表情，AI 会把它们作为选择和播放这个动作时的参考。</div>
+      <div class="record-dialog-desc">请输入动作名称、动作说明，并绑定播放时要同步触发的表情。</div>
       <input
         id="record-name-input"
         class="record-dialog-input"
@@ -1234,8 +1234,9 @@
         placeholder="例如：开心打招呼、看见用户靠近时挥动灯头，适合回应问候或活跃气氛。"
       ></textarea>
       <label class="record-dialog-field">
-        <span class="record-dialog-label">推荐表情</span>
+        <span class="record-dialog-label">绑定组合表情（眼睛 + LED）</span>
         <select id="record-expression-select" class="record-dialog-input record-dialog-select"></select>
+        <span class="record-dialog-hint">组合表情会在整个动作期间循环播放 C6 眼睛与 S3 LED；也可在下拉框中选择仅 LED 效果。</span>
       </label>
       <div id="record-name-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
@@ -1249,7 +1250,7 @@
   <dialog id="record-edit-dialog" class="record-dialog">
     <form id="record-edit-form" method="dialog" class="record-dialog-card">
       <div class="record-dialog-title">编辑录制动作</div>
-      <div id="record-edit-desc" class="record-dialog-desc">只会修改推荐表情和动作说明，不会改动录制动作轨迹。</div>
+      <div id="record-edit-desc" class="record-dialog-desc">只会修改绑定表情和动作说明，不会改动录制动作轨迹。</div>
       <textarea
         id="record-edit-description-input"
         class="record-dialog-input record-dialog-textarea"
@@ -1257,8 +1258,9 @@
         placeholder="例如：开心打招呼、看见用户靠近时挥动灯头，适合回应问候或活跃气氛。"
       ></textarea>
       <label class="record-dialog-field">
-        <span class="record-dialog-label">推荐表情</span>
+        <span class="record-dialog-label">绑定组合表情（眼睛 + LED）</span>
         <select id="record-edit-expression-select" class="record-dialog-input record-dialog-select"></select>
+        <span class="record-dialog-hint">组合表情会在整个动作期间循环播放；“仅 LED 灯板”分组不会改变当前眼睛画面。</span>
       </label>
       <div id="record-edit-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
@@ -1425,7 +1427,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=expression-led-only-20260710"></script>
+  <script src="/app.js?v=recording-expression-presets-20260710"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>
