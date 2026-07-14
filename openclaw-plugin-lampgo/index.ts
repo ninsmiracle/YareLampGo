@@ -111,8 +111,9 @@ const plugin: OpenClawPluginModule = {
 
     api.registerTool({
       name: "lampgo_expression",
-      label: "Set lampgo LED expression",
-      description: "Set lampgo LED expression.",
+      label: "Play lampgo expression",
+      description:
+        "Play a saved expression preset, C6 eye clip, or S3 LED effect. Query lampgo_expression_catalog before choosing dynamic ids.",
       parameters: Type.Object({
         mode: Type.String({ description: "LED expression mode key, e.g. smiley/heart/focused/wink/myu7gt." }),
         wait: Type.Optional(Type.Boolean({ description: "Wait for completion (default true)." })),
@@ -126,6 +127,98 @@ const plugin: OpenClawPluginModule = {
         });
         if (!result.ok) throw new Error(result.error || "lampgo invoke failed");
         return toolOk("ok");
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_expression_catalog",
+      label: "List lampgo expressions",
+      description: "List currently available eye clips, LED effects, presets, and device capacity.",
+      parameters: Type.Object({}),
+      async execute() {
+        const base = getBase();
+        const [catalog, capacity] = await Promise.all([
+          getJson<unknown>(`${base}/api/expressions`),
+          getJson<unknown>(`${base}/api/device/expression-capabilities`),
+        ]);
+        return toolOk(JSON.stringify({ catalog, capacity }, null, 2));
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_compose_expression",
+      label: "Play transient lampgo composition",
+      description:
+        "Temporarily combine a discovered C6 eye clip and S3 LED effect. This does not save a preset.",
+      parameters: Type.Object({
+        eyeClipId: Type.Optional(Type.String({ description: "Eye id from lampgo_expression_catalog." })),
+        ledEffectId: Type.Optional(Type.String({ description: "LED effect id from lampgo_expression_catalog." })),
+        color: Type.Optional(Type.String({ description: "LED #RRGGBB color override." })),
+        brightness: Type.Optional(Type.Integer({ minimum: 1, maximum: 96 })),
+        intensity: Type.Optional(Type.Number({ minimum: 0.1, maximum: 1.0 })),
+        direction: Type.Optional(Type.Union([
+          Type.Literal("left"), Type.Literal("right"), Type.Literal("up"), Type.Literal("down"),
+        ])),
+        playback: Type.Optional(Type.Union([Type.Literal("once"), Type.Literal("loop")])),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const result = await postJson<{ ok: boolean; error?: string }>(`${base}/api/expressions/play`, {
+          eye_clip_id: params.eyeClipId ?? null,
+          led_effect_id: params.ledEffectId ?? null,
+          led_params: {
+            color: params.color ?? "#ffffff",
+            brightness: params.brightness ?? 64,
+            intensity: params.intensity ?? 1.0,
+            direction: params.direction ?? "right",
+          },
+          playback: params.playback ?? "once",
+          duration_ms: 3000,
+        });
+        if (!result.ok) throw new Error(result.error || "lampgo expression play failed");
+        return toolOk("ok (transient; not saved)");
+      },
+    });
+
+    api.registerTool({
+      name: "lampgo_save_expression_preset",
+      label: "Save lampgo expression preset",
+      description:
+        "Save a confirmed eye + LED composition. Set confirmed=true only after the user explicitly asks to save it.",
+      parameters: Type.Object({
+        presetId: Type.String({ description: "Stable lowercase preset id." }),
+        label: Type.String({ description: "User-facing preset name." }),
+        eyeClipId: Type.Optional(Type.String()),
+        ledEffectId: Type.Optional(Type.String()),
+        color: Type.Optional(Type.String()),
+        brightness: Type.Optional(Type.Integer({ minimum: 1, maximum: 96 })),
+        intensity: Type.Optional(Type.Number({ minimum: 0.1, maximum: 1.0 })),
+        direction: Type.Optional(Type.Union([
+          Type.Literal("left"), Type.Literal("right"), Type.Literal("up"), Type.Literal("down"),
+        ])),
+        playback: Type.Optional(Type.Union([Type.Literal("once"), Type.Literal("loop")])),
+        confirmed: Type.Boolean({ description: "Must be true only after explicit user confirmation." }),
+      }),
+      async execute(_toolCallId, params) {
+        const base = getBase();
+        const result = await postJson<{ ok: boolean; error?: string }>(`${base}/api/expression-presets`, {
+          preset_id: params.presetId,
+          label: params.label,
+          eye_clip_id: params.eyeClipId ?? null,
+          led_effect_id: params.ledEffectId ?? null,
+          led_params: {
+            color: params.color ?? "#ffffff",
+            brightness: params.brightness ?? 64,
+            intensity: params.intensity ?? 1.0,
+            direction: params.direction ?? "right",
+          },
+          playback: params.playback ?? "once",
+          duration_ms: 3000,
+          confirmed: params.confirmed,
+          source: "openclaw",
+        });
+        if (!result.ok) throw new Error(result.error || "lampgo preset save failed");
+        return toolOk("saved");
       },
     });
 

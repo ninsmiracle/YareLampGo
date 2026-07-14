@@ -23,13 +23,18 @@ metadata:
 
 # lampgo — Intelligent Desk Lamp Robot
 
-Control a 5-DOF desk lamp robot: 37 pre-recorded actions + 34 LED expressions + smooth joint control + teach recording + camera vision + visual servoing.
+Control a 5-DOF desk lamp robot with dynamic C6 eye clips, reusable S3 LED
+effects, saved expression presets, smooth joint control, teach recording,
+camera vision, and visual servoing.
 
 Use the OpenClaw plugin tools (preferred, keeps all interactions inside OpenClaw):
 
 - `lampgo_move` (joint move via `move_to`)
 - `lampgo_play` (play recording via `play_recording`)
-- `lampgo_expression` (LED expression via `set_expression`)
+- `lampgo_expression_catalog` (live eyes, LED effects, presets, and capacity)
+- `lampgo_expression` (play a discovered expression id via `set_expression`)
+- `lampgo_compose_expression` (play an unsaved eye + LED combination)
+- `lampgo_save_expression_preset` (save only after explicit user confirmation)
 - `lampgo_camera_snap` (take a photo)
 - `lampgo_ask_user` (ask the user a question with TTS)
 - `lampgo_save_recording` (save a new CSV recording)

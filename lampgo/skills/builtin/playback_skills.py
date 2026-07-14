@@ -94,6 +94,12 @@ class PlayRecordingSkill(Skill):
             required=False,
             description="Optional LED expression to apply before playback",
         ),
+        "expression_preset": ParameterSpec(
+            name="expression_preset",
+            type="str",
+            required=False,
+            description="Optional ExpressionPreset id looped on C6 eyes and S3 LED for the full recording playback",
+        ),
         "playback_mode": ParameterSpec(
             name="playback_mode",
             type="str",
@@ -103,17 +109,36 @@ class PlayRecordingSkill(Skill):
         ),
     }
 
-    _motion = None
-
     def __init__(self, recordings_dir: Path) -> None:
         self._recordings_dir = recordings_dir
+        self._motion = None
+        self._expression_controller = None
+
+    def _stop_bound_expression(self, *, name: str = "") -> None:
+        controller = self._expression_controller
+        self._expression_controller = None
+        if controller is None:
+            return
+        stop_expression = getattr(controller, "stop_expression", None)
+        if not callable(stop_expression):
+            logger.warning("playback.expression_preset_stop_unavailable", name=name)
+            return
+        try:
+            if stop_expression():
+                logger.info("playback.expression_preset_stopped", name=name)
+            else:
+                logger.warning("playback.expression_preset_stop_failed", name=name)
+        except Exception:
+            logger.exception("playback.expression_preset_stop_error", name=name)
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
-        self._motion = ctx.motion
+        self._motion = None
+        self._expression_controller = None
         name = params.get("name", "")
         if not name:
             return SkillResult(status="error", message="Recording name required")
         expression = str(params.get("expression", "")).strip()
+        expression_preset = str(params.get("expression_preset", "") or params.get("preset_id", "")).strip()
         raw_mode = params.get("playback_mode")
         if raw_mode is None or not str(raw_mode).strip():
             # Fall back to the server-wide default configured via Web UI /
@@ -147,15 +172,40 @@ class PlayRecordingSkill(Skill):
         fps = int(params.get("fps", 0)) or DEFAULT_RECORDING_FPS_OVERRIDES.get(name, detected_fps)
         logger.info("playback.start", name=name, frames=len(frames), fps=fps, playback_mode=playback_mode)
 
-        if expression:
-            if ctx.led.is_connected:
-                if not ctx.led.set_mode(expression):
-                    return SkillResult(status="error", message=f"Unknown expression: {expression}")
-                logger.info("playback.expression_applied", name=name, expression=expression)
-            else:
-                logger.warning("playback.expression_skipped_led_disconnected", name=name, expression=expression)
-
         try:
+            if expression_preset:
+                play_expression = getattr(ctx.led, "play_expression", None)
+                if not callable(play_expression):
+                    return SkillResult(
+                        status="error",
+                        message="Expression presets require an LED/expression controller",
+                    )
+                ok, composition = play_expression(expression_preset, playback="loop")
+                if composition is None:
+                    return SkillResult(status="error", message=f"Unknown expression preset: {expression_preset}")
+                if ok:
+                    self._expression_controller = ctx.led
+                    logger.info(
+                        "playback.expression_preset_applied",
+                        name=name,
+                        expression_preset=expression_preset,
+                        playback="loop",
+                    )
+                else:
+                    logger.warning(
+                        "playback.expression_preset_skipped_device_unavailable",
+                        name=name,
+                        expression_preset=expression_preset,
+                    )
+            elif expression:
+                if ctx.led.is_connected:
+                    if not ctx.led.set_mode(expression):
+                        return SkillResult(status="error", message=f"Unknown expression: {expression}")
+                    logger.info("playback.expression_applied", name=name, expression=expression)
+                else:
+                    logger.warning("playback.expression_skipped_led_disconnected", name=name, expression=expression)
+
+            self._motion = ctx.motion
             # Trajectory-based: stream the full frame sequence at original FPS.
             # The recorded human motion already contains natural acceleration/deceleration;
             # no style easing is applied on top.
@@ -164,32 +214,35 @@ class PlayRecordingSkill(Skill):
             if not await _await_done(done, timeout=timeout):
                 logger.warning("playback.timeout", name=name, frames=len(frames), fps=fps)
                 return SkillResult(status="error", message=f"Playback '{name}' timed out")
+
+            # Return to safe: goal-based (only the target pose is known).
+            safe = get_safe_position()
+            logger.info("playback.return_safe_start", name=name, target=safe)
+            return_done = ctx.motion.move_to(
+                MotionTarget(joints=dict(safe), max_velocity=60.0, anticipation=False)
+            )
+            if not await _await_done(return_done, timeout=RETURN_SAFE_TIMEOUT_S):
+                logger.warning("playback.return_safe_timeout", name=name, target=safe)
+                return SkillResult(status="error", message=f"Playback '{name}' finished but return_safe timed out")
+            logger.info("playback.return_safe_done", name=name)
+
+            return SkillResult(
+                status="ok",
+                data={
+                    "name": name,
+                    "frames": len(frames),
+                    "fps": fps,
+                    "playback_mode": playback_mode,
+                    "expression": expression or None,
+                    "expression_preset": expression_preset or None,
+                    "returned_safe": True,
+                },
+            )
         finally:
             self._motion = None
-
-        # Return to safe: goal-based (only the target pose is known).
-        safe = get_safe_position()
-        logger.info("playback.return_safe_start", name=name, target=safe)
-        return_done = ctx.motion.move_to(
-            MotionTarget(joints=dict(safe), max_velocity=60.0, anticipation=False)
-        )
-        if not await _await_done(return_done, timeout=RETURN_SAFE_TIMEOUT_S):
-            logger.warning("playback.return_safe_timeout", name=name, target=safe)
-            return SkillResult(status="error", message=f"Playback '{name}' finished but return_safe timed out")
-        logger.info("playback.return_safe_done", name=name)
-
-        return SkillResult(
-            status="ok",
-            data={
-                "name": name,
-                "frames": len(frames),
-                "fps": fps,
-                "playback_mode": playback_mode,
-                "expression": expression or None,
-                "returned_safe": True,
-            },
-        )
+            self._stop_bound_expression(name=name)
 
     async def cancel(self) -> None:
         if self._motion is not None:
             self._motion.stop_immediate()
+        self._stop_bound_expression()

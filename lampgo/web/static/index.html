@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YareLampGo 控制台</title>
   <link rel="icon" href="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg">
-  <link rel="stylesheet" href="/style.css?v=brand-yarelampgo-20260604b">
+  <link rel="stylesheet" href="/style.css?v=recording-expression-presets-20260710">
   <link rel="stylesheet" href="/setup.css?v=secret-inputs-20260602">
 </head>
 <body>
@@ -343,16 +343,95 @@
           <div class="skill-section">
             <div class="skill-section-head">
               <div>
-                <div class="skill-section-title">灯光表情</div>
-                <div class="skill-section-desc">通过 LED 灯阵呈现的情绪表达。</div>
+                <div class="skill-section-title">表情工作台</div>
+                <div class="skill-section-desc">组合 C6 眼睛动画与 S3 LED 嘴巴、符号和方向效果。</div>
               </div>
               <div class="skill-section-count" id="expression-count">0</div>
             </div>
-            <div class="skill-section-search">
-              <input id="expression-search" type="search" class="skill-search-input" placeholder="搜索灯光表情" autocomplete="off" />
-              <button type="button" class="skill-search-clear" data-target="expression-search" aria-label="清空搜索">×</button>
+            <div class="expression-tabs" role="tablist" aria-label="表情工作区">
+              <button type="button" class="expression-tab is-active" data-expression-tab="eyes" role="tab">眼睛素材</button>
+              <button type="button" class="expression-tab" data-expression-tab="led" role="tab">LED 效果</button>
+              <button type="button" class="expression-tab" data-expression-tab="compose" role="tab">组合表情</button>
             </div>
-            <div id="expression-grid" class="skill-card-grid"></div>
+            <div id="expression-capacity" class="expression-capacity" aria-live="polite"></div>
+
+            <div class="expression-panel" data-expression-panel="eyes">
+              <div class="expression-toolbar">
+                <input id="eye-upload-file" type="file" accept="image/png,image/gif,image/jpeg,video/mp4,application/zip" />
+                <input id="eye-upload-id" type="text" placeholder="素材 ID" maxlength="32" />
+                <label>行 <input id="eye-upload-rows" type="number" min="1" max="30" value="5" /></label>
+                <label>列 <input id="eye-upload-cols" type="number" min="1" max="30" value="6" /></label>
+                <label>FPS <input id="eye-upload-fps" type="number" min="8" max="12" value="10" /></label>
+                <button id="btn-eye-upload" class="primary-button" type="button">上传眼睛</button>
+              </div>
+              <div id="eye-grid" class="expression-resource-list"></div>
+            </div>
+
+            <div class="expression-panel hidden" data-expression-panel="led">
+              <div class="skill-section-search">
+                <input id="expression-search" type="search" class="skill-search-input" placeholder="搜索 LED 效果" autocomplete="off" />
+                <button type="button" class="skill-search-clear" data-target="expression-search" aria-label="清空搜索">×</button>
+              </div>
+              <div id="expression-grid" class="skill-card-grid"></div>
+              <form id="led-effect-form" class="expression-editor-row">
+                <input id="led-effect-id" type="text" maxlength="32" placeholder="效果 ID" required />
+                <input id="led-effect-label" type="text" maxlength="64" placeholder="显示名称" required />
+                <select id="led-effect-role" aria-label="LED 用途">
+                  <option value="mouth">嘴巴</option>
+                  <option value="symbol">符号</option>
+                  <option value="direction">方向</option>
+                  <option value="accent">气氛</option>
+                </select>
+                <select id="led-effect-template" aria-label="程序模板">
+                  <option value="mouth">嘴巴</option>
+                  <option value="arrow">箭头</option>
+                  <option value="heart">爱心</option>
+                  <option value="pulse">脉冲</option>
+                </select>
+                <input id="led-effect-color" type="color" value="#ffffff" title="默认颜色" />
+                <button class="primary-button" type="submit">保存 LED 效果</button>
+              </form>
+            </div>
+
+            <div class="expression-panel hidden" data-expression-panel="compose">
+              <div class="expression-composer">
+                <div class="expression-preview" aria-label="三秒同步预览">
+                  <canvas id="expression-eye-preview" width="320" height="172"></canvas>
+                  <div id="expression-led-preview" class="expression-led-matrix"></div>
+                  <div id="expression-preview-status" class="expression-preview-status">等待预览</div>
+                </div>
+                <div class="expression-controls">
+                  <label>眼睛<select id="composer-eye"><option value="">无眼睛</option></select></label>
+                  <label>LED<select id="composer-led"><option value="">无 LED</option></select></label>
+                  <label>颜色<input id="composer-color" type="color" value="#ffffff" /></label>
+                  <label>亮度<input id="composer-brightness" type="range" min="1" max="96" value="64" /></label>
+                  <label>强度<input id="composer-intensity" type="range" min="10" max="100" value="100" /></label>
+                  <div class="expression-direction" role="group" aria-label="方向">
+                    <button type="button" data-direction="left" title="向左">←</button>
+                    <button type="button" data-direction="up" title="向上">↑</button>
+                    <button type="button" data-direction="down" title="向下">↓</button>
+                    <button type="button" class="is-active" data-direction="right" title="向右">→</button>
+                  </div>
+                  <div class="expression-playback" role="group" aria-label="播放方式">
+                    <button type="button" class="is-active" data-playback="once">单次</button>
+                    <button type="button" data-playback="loop">循环</button>
+                  </div>
+                  <div class="expression-command-row">
+                    <button id="btn-expression-preview" class="ghost-button" type="button" title="本地预览">▶ 预览</button>
+                    <button id="btn-expression-sync" class="ghost-button" type="button">同步眼睛</button>
+                    <button id="btn-expression-set-default" class="ghost-button" type="button">设为默认搭配</button>
+                    <button id="btn-expression-play" class="primary-button" type="button">▶ 播放</button>
+                    <button id="btn-expression-stop" class="ghost-button" type="button" title="停止播放">■</button>
+                  </div>
+                  <div class="expression-save-row">
+                    <input id="composer-preset-id" type="text" maxlength="32" placeholder="组合 ID" />
+                    <input id="composer-preset-label" type="text" maxlength="64" placeholder="组合名称" />
+                    <button id="btn-expression-save" class="ghost-button" type="button">保存组合</button>
+                  </div>
+                </div>
+              </div>
+              <div id="expression-preset-grid" class="expression-resource-list"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -1139,7 +1218,7 @@
   <dialog id="record-name-dialog" class="record-dialog">
     <form id="record-name-form" method="dialog" class="record-dialog-card">
       <div class="record-dialog-title">保存录制动作</div>
-      <div class="record-dialog-desc">请输入动作名称、动作说明和推荐表情，AI 会把它们作为选择和播放这个动作时的参考。</div>
+      <div class="record-dialog-desc">请输入动作名称、动作说明，并绑定播放时要同步触发的表情。</div>
       <input
         id="record-name-input"
         class="record-dialog-input"
@@ -1155,8 +1234,9 @@
         placeholder="例如：开心打招呼、看见用户靠近时挥动灯头，适合回应问候或活跃气氛。"
       ></textarea>
       <label class="record-dialog-field">
-        <span class="record-dialog-label">推荐表情</span>
+        <span class="record-dialog-label">绑定组合表情（眼睛 + LED）</span>
         <select id="record-expression-select" class="record-dialog-input record-dialog-select"></select>
+        <span class="record-dialog-hint">组合表情会在整个动作期间循环播放 C6 眼睛与 S3 LED；也可在下拉框中选择仅 LED 效果。</span>
       </label>
       <div id="record-name-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
@@ -1170,7 +1250,7 @@
   <dialog id="record-edit-dialog" class="record-dialog">
     <form id="record-edit-form" method="dialog" class="record-dialog-card">
       <div class="record-dialog-title">编辑录制动作</div>
-      <div id="record-edit-desc" class="record-dialog-desc">只会修改推荐表情和动作说明，不会改动录制动作轨迹。</div>
+      <div id="record-edit-desc" class="record-dialog-desc">只会修改绑定表情和动作说明，不会改动录制动作轨迹。</div>
       <textarea
         id="record-edit-description-input"
         class="record-dialog-input record-dialog-textarea"
@@ -1178,8 +1258,9 @@
         placeholder="例如：开心打招呼、看见用户靠近时挥动灯头，适合回应问候或活跃气氛。"
       ></textarea>
       <label class="record-dialog-field">
-        <span class="record-dialog-label">推荐表情</span>
+        <span class="record-dialog-label">绑定组合表情（眼睛 + LED）</span>
         <select id="record-edit-expression-select" class="record-dialog-input record-dialog-select"></select>
+        <span class="record-dialog-hint">组合表情会在整个动作期间循环播放；“仅 LED 灯板”分组不会改变当前眼睛画面。</span>
       </label>
       <div id="record-edit-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
@@ -1346,7 +1427,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=livekit-audio-output-20260602"></script>
+  <script src="/app.js?v=recording-expression-presets-20260710"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

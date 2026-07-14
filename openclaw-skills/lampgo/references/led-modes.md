@@ -1,4 +1,13 @@
-# LED Expression Keys (34 modes)
+# LED Expression Keys (34 built-in modes)
+
+This table is only the firmware built-in set. Call
+`lampgo_expression_catalog` before selecting a dynamic C6 eye clip, S3 LED
+effect, or saved preset, then pass the discovered id to `lampgo_expression`.
+
+The C6 renders eyes only. The S3 LED board renders mouths, symbols, directions,
+and accents. An LLM may play a transient combination, but must not save a new
+preset until the user explicitly confirms it. See
+`docs/guides/expression-authoring.md` for the authoring and capacity contract.
 
 Use the exact `Name` column in OpenClaw tool calls.
 

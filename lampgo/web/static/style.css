@@ -2544,6 +2544,225 @@ button.device-chip.is-active {
   box-shadow: 0 8px 20px rgba(221, 147, 136, 0.14);
 }
 
+/* ============= Expression studio ============= */
+
+.primary-button {
+  min-height: 32px;
+  padding: 7px 14px;
+  border: 1px solid #227c75;
+  border-radius: 7px;
+  background: #227c75;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.primary-button:hover { background: #19665f; }
+
+.expression-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.expression-tab {
+  min-height: 36px;
+  padding: 7px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.expression-tab.is-active {
+  border-bottom-color: #227c75;
+  color: #155f59;
+}
+
+.expression-capacity {
+  min-height: 28px;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  border-left: 3px solid #d14f73;
+  background: #f8f9fa;
+  color: #596169;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.expression-panel.hidden { display: none; }
+
+.expression-toolbar,
+.expression-editor-row,
+.expression-save-row,
+.expression-command-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.expression-toolbar,
+.expression-editor-row {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid #dce1e5;
+  background: #f8f9fa;
+}
+
+.expression-toolbar input[type="text"],
+.expression-toolbar input[type="number"],
+.expression-editor-row input[type="text"],
+.expression-editor-row select,
+.expression-controls input[type="text"],
+.expression-controls select {
+  min-height: 32px;
+  border: 1px solid #ccd3d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #30363b;
+  padding: 5px 8px;
+}
+
+.expression-toolbar input[type="number"] { width: 64px; }
+.expression-toolbar label { color: #596169; font-size: 12px; }
+
+.expression-resource-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.expression-resource {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid #dce1e5;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.expression-resource-title {
+  overflow: hidden;
+  color: #30363b;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.expression-resource-meta {
+  margin-top: 3px;
+  color: #717a82;
+  font-size: 11px;
+}
+
+.expression-resource-actions { display: flex; gap: 5px; }
+.expression-resource-actions button { min-width: 32px; padding: 5px 8px; }
+
+.expression-composer {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.4fr) minmax(250px, 0.8fr);
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.expression-preview {
+  position: relative;
+  min-width: 0;
+  padding: 12px;
+  background: #181b1f;
+  border: 1px solid #30363d;
+  border-radius: 7px;
+}
+
+#expression-eye-preview {
+  display: block;
+  width: 100%;
+  aspect-ratio: 320 / 172;
+  background: #000;
+  image-rendering: auto;
+}
+
+.expression-led-matrix {
+  display: grid;
+  grid-template-columns: repeat(51, minmax(0, 1fr));
+  gap: 1px;
+  width: 100%;
+  aspect-ratio: 51 / 9;
+  margin-top: 10px;
+}
+
+.expression-led-cell {
+  min-width: 0;
+  aspect-ratio: 1;
+  border-radius: 1px;
+  background: #30353a;
+}
+
+.expression-preview-status {
+  min-height: 19px;
+  margin-top: 8px;
+  color: #cdd5dc;
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.expression-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+
+.expression-controls > label {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #596169;
+  font-size: 12px;
+}
+
+.expression-direction,
+.expression-playback {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+}
+
+.expression-direction button,
+.expression-playback button {
+  min-height: 32px;
+  border: 1px solid #ccd3d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #596169;
+}
+
+.expression-direction button.is-active,
+.expression-playback button.is-active {
+  border-color: #227c75;
+  background: #e4f3f1;
+  color: #155f59;
+}
+
+.expression-save-row input { flex: 1 1 110px; min-width: 0; }
+
+@media (max-width: 860px) {
+  .expression-composer { grid-template-columns: 1fr; }
+  .expression-toolbar input[type="file"] { width: 100%; }
+  .expression-resource-list { grid-template-columns: 1fr; }
+}
+
 /* User-authored composed skills carry a subtle left-border tint so users
    can tell at a glance which skills they (or OpenClaw) can safely delete /
    modify, and which ones are factory-locked.  The accent colour matches
@@ -3293,6 +3512,12 @@ button.device-chip.is-active {
   font-size: 13px;
   font-weight: 700;
   color: var(--text-soft);
+}
+
+.record-dialog-hint {
+  color: var(--text-muted, #a08b80);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .record-dialog-select {

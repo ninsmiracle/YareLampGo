@@ -89,6 +89,31 @@ def test_preferred_fallback_keeps_pairing_probe_status(monkeypatch, tmp_path) ->
     assert [d["host"] for d in status["all_devices"]] == ["lampgo-cam-0834.local"]
 
 
+async def test_bulk_transfer_stays_online_and_skips_health_probe(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    manager = Esp32DeviceManager(DeviceEsp32Config(enabled=True))
+    device = _device("self.local", owner_id=manager.owner_id, paired=True)
+    device.last_health_ok = False
+    manager._devices = {"self": device}
+    manager._active_transfers = 1
+    probes = 0
+
+    async def fake_probe(_device):
+        nonlocal probes
+        probes += 1
+        return False
+
+    monkeypatch.setattr(manager, "_probe", fake_probe)
+
+    await manager._probe_all()
+    status = manager.get_status()
+
+    assert probes == 0
+    assert status["online"] is True
+    assert status["transfer_active"] is True
+    assert device.last_health_ok is True
+
+
 async def test_claim_owner_is_non_preemptive_and_sends_auth(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     manager = Esp32DeviceManager(DeviceEsp32Config(enabled=True))

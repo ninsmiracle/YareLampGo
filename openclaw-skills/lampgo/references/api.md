@@ -42,7 +42,18 @@ Connect to Unix socket `/tmp/lampgo.sock`, send one JSON line, receive one JSON 
 - `fps` (int, optional): playback FPS override
 
 ### set_expression
-- `mode` (str): exact LED mode key (see led-modes.md in lampgo skill), e.g. `smiley`, `heart`, `focused`, `wink`, `myu7gt`
+- `mode` (str): a live expression preset, eye clip, LED effect id, or built-in
+  mode. Query `GET /api/expressions` before choosing dynamic ids.
+
+### Expression HTTP API
+
+- `GET /api/eyes`
+- `GET /api/led-effects`
+- `GET /api/expression-presets`
+- `GET /api/device/expression-capabilities`
+- `POST /api/expressions/play` — saved preset or transient composition
+- `POST /api/expressions/stop`
+- `POST /api/expression-presets` — requires explicit `confirmed: true`
 
 ### nod / headshake
 - `count` (int): number of repetitions

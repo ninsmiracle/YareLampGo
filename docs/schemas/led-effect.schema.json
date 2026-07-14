@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lampgo.local/schemas/led-effect.schema.json",
+  "title": "LampGo LED Effect",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["effect_id", "role", "program"],
+  "properties": {
+    "effect_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+    "label": {"type": "string", "maxLength": 64},
+    "role": {"enum": ["mouth", "symbol", "direction", "accent"]},
+    "program": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "template"],
+      "properties": {
+        "version": {"const": 1},
+        "template": {"enum": ["mouth", "arrow", "heart", "pulse"]},
+        "variant": {"enum": ["smile", "open", "flat", "dizzy"]},
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
+            "secondary_color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
+            "brightness": {"type": "integer", "minimum": 1, "maximum": 96},
+            "intensity": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+            "direction": {"enum": ["left", "right", "up", "down"]}
+          }
+        }
+      }
+    }
+  }
+}

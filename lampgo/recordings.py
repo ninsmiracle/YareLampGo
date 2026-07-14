@@ -8,10 +8,12 @@ name.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 MAX_RECORDING_DESCRIPTION_CHARS = 500
+_SAFE_PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 LED_EXPRESSION_KEYS = (
     "off",
     "red",
@@ -79,6 +81,11 @@ def _normalize_expression(value: Any) -> str:
     return key if key in LED_EXPRESSION_KEYS else ""
 
 
+def _normalize_expression_preset(value: Any) -> str:
+    preset_id = str(value or "").strip().lower()
+    return preset_id if _SAFE_PRESET_ID_RE.match(preset_id) else ""
+
+
 def normalize_recording_description(value: Any) -> str:
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     lines = [line.strip() for line in text.split("\n") if line.strip()]
@@ -94,6 +101,7 @@ def parse_recording_metadata(text: str) -> dict[str, str]:
     """Parse optional recording sidecar metadata, preserving old plain text files."""
     description_parts: list[str] = []
     expression = ""
+    expression_preset = ""
 
     for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = raw_line.strip()
@@ -103,6 +111,8 @@ def parse_recording_metadata(text: str) -> dict[str, str]:
         normalized_key = key.strip().lower()
         if sep and normalized_key == "expression":
             expression = _normalize_expression(value) or expression
+        elif sep and normalized_key in {"expression_preset", "preset", "preset_id"}:
+            expression_preset = _normalize_expression_preset(value) or expression_preset
         elif sep and normalized_key in {"prompt", "description"}:
             description_parts.append(value.strip())
         else:
@@ -111,28 +121,37 @@ def parse_recording_metadata(text: str) -> dict[str, str]:
     return {
         "description": normalize_recording_description("\n".join(description_parts)),
         "expression": expression,
+        "expression_preset": expression_preset,
     }
 
 
 def read_recording_metadata(csv_path: Path) -> dict[str, str]:
     path = recording_description_path(csv_path)
     if not path.exists():
-        return {"description": "", "expression": ""}
+        return {"description": "", "expression": "", "expression_preset": ""}
     try:
         return parse_recording_metadata(path.read_text(encoding="utf-8"))
     except Exception:
-        return {"description": "", "expression": ""}
+        return {"description": "", "expression": "", "expression_preset": ""}
 
 
 def read_recording_description(csv_path: Path) -> str:
     return read_recording_metadata(csv_path)["description"]
 
 
-def write_recording_description(csv_path: Path, description: str, expression: str = "") -> None:
+def write_recording_description(
+    csv_path: Path,
+    description: str,
+    expression: str = "",
+    expression_preset: str = "",
+) -> None:
     text = normalize_recording_description(description)
     expression = _normalize_expression(expression)
+    expression_preset = _normalize_expression_preset(expression_preset)
     path = recording_description_path(csv_path)
     lines = []
+    if expression_preset:
+        lines.append(f"expression_preset={expression_preset}")
     if expression:
         lines.append(f"expression={expression}")
     if text:
@@ -187,6 +206,7 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
             "path": str(csv_path),
             "description": metadata["description"],
             "expression": metadata["expression"],
+            "expression_preset": metadata["expression_preset"],
         }
     user_dir = recordings_dir / "user"
     if user_dir.is_dir():
@@ -198,6 +218,7 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
                 "path": str(csv_path),
                 "description": metadata["description"],
                 "expression": metadata["expression"],
+                "expression_preset": metadata["expression_preset"],
             }
     _assign_catalog_expressions(entries)
     return [entries[name] for name in sorted(entries)]
@@ -211,8 +232,8 @@ def build_recording_actions_prompt(recordings_dir: Path) -> str:
         "Recorded action library (dynamic; loaded from CSV/TXT files):",
         "- Use `play_recording` with the exact `name` when the user's request, camera scene, emotion, "
         "or conversation context matches an action description.",
-        "- If a listed recording includes an `expression=...` hint, prefer that expression before or "
-        "alongside the action unless the user explicitly asked for a different mood.",
+        "- If a listed recording includes `expression_preset=...`, pass it to `play_recording` so C6 eyes "
+        "and the S3 LED panel start together. Otherwise use `expression=...` as the LED-only fallback.",
         "- Do not invent recording names. If no listed action fits, use another tool or speak instead.",
     ]
     if not catalog:
@@ -223,7 +244,13 @@ def build_recording_actions_prompt(recordings_dir: Path) -> str:
         source = "我的录制" if item.get("source") == "user" else "内置动作"
         desc = item.get("description") or "暂无动作说明；仅在用户明确点名该动作名时使用。"
         expression = item.get("expression")
-        if expression:
+        expression_preset = item.get("expression_preset")
+        if expression_preset:
+            fallback = f" | expression={expression}" if expression else ""
+            lines.append(
+                f"- name={name} | source={source} | expression_preset={expression_preset}{fallback} | prompt={desc}"
+            )
+        elif expression:
             lines.append(f"- name={name} | source={source} | expression={expression} | prompt={desc}")
         else:
             lines.append(f"- name={name} | source={source} | prompt={desc}")
