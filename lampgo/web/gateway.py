@@ -10,7 +10,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -189,6 +189,7 @@ class WebGateway:
         self._status_task: asyncio.Task | None = None
         self._pet_pose_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
+        self._background_ws_tasks: set[asyncio.Task[None]] = set()
         self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
         self._esp32_speaker_clients: set[WebSocket] = set()
         self._esp32_capture_active = False
@@ -304,6 +305,11 @@ class WebGateway:
                     await task
                 except asyncio.CancelledError:
                     pass
+            background_tasks = list(self._background_ws_tasks)
+            for task in background_tasks:
+                task.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+            self._background_ws_tasks.clear()
 
         app = Starlette(routes=routes, lifespan=lifespan)
         app.add_middleware(BaseHTTPMiddleware, dispatch=self._http_security_middleware)
@@ -3537,6 +3543,9 @@ class WebGateway:
                     await ws.send_json({"ok": False, "error": "invalid json"})
                     continue
                 msg_type = msg.get("type", "")
+                if msg_type == "cancel_agent_task":
+                    self._spawn_ws_background_task(self._handle_ws_message(ws, msg))
+                    continue
                 # Long-running messages must not block the receive loop; otherwise
                 # urgent commands like `estop` cannot be processed until completion.
                 run_async = msg_type in ("text", "audio", "recording_save") or (msg_type == "invoke" and bool(msg.get("wait", True)))
@@ -3571,6 +3580,19 @@ class WebGateway:
     def _clear_active_request_task(self, ws: WebSocket, task: asyncio.Task) -> None:
         if self._active_request_tasks.get(ws) is task:
             self._active_request_tasks.pop(ws, None)
+
+    def _spawn_ws_background_task(self, coro: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coro)
+        self._background_ws_tasks.add(task)
+        task.add_done_callback(self._clear_ws_background_task)
+
+    def _clear_ws_background_task(self, task: asyncio.Task[None]) -> None:
+        self._background_ws_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("web.ws_background_task_failed", error=str(error))
 
     async def _stop_all_ws_work(self, *, request_id: str = "", ws: WebSocket | None = None) -> dict[str, int]:
         cancelled_ws = 0

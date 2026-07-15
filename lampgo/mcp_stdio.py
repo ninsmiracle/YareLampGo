@@ -18,6 +18,10 @@ import httpx
 
 from lampgo import personastore
 
+_DEFAULT_DAEMON_TIMEOUT_S = 135.0
+_SKILL_INVOKE_TIMEOUT_S = 310.0
+_REQUEST_CANCELLED_CODE = -32800
+
 _TOOLS: list[dict[str, Any]] = [
     {
         "name": "lampgo_status",
@@ -99,7 +103,7 @@ async def _daemon_request(
     path: str,
     payload: dict[str, Any] | None = None,
     *,
-    timeout_s: float = 135.0,
+    timeout_s: float = _DEFAULT_DAEMON_TIMEOUT_S,
 ) -> dict[str, Any]:
     token = personastore.get_or_create_local_api_token()
     headers = {"authorization": f"Bearer {token}"}
@@ -133,10 +137,12 @@ async def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         if not skill_id:
             return {"ok": False, "error": "skill_id is required"}
         params = args.get("params") if isinstance(args.get("params"), dict) else {}
+        wait = bool(args.get("wait", True))
         return await _daemon_request(
             "POST",
             "/api/invoke",
-            {"skill_id": skill_id, "params": params, "wait": bool(args.get("wait", True))},
+            {"skill_id": skill_id, "params": params, "wait": wait},
+            timeout_s=_SKILL_INVOKE_TIMEOUT_S if wait else _DEFAULT_DAEMON_TIMEOUT_S,
         )
     if name == "lampgo_camera_snap":
         return await _daemon_request("GET", "/api/camera/snap")
@@ -205,25 +211,83 @@ async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
     return _error(request_id, -32601, f"method not found: {method}")
 
 
+async def _cancel_inflight_tool(message: dict[str, Any]) -> None:
+    if message.get("method") != "tools/call":
+        return
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    if params.get("name") == "lampgo_invoke":
+        await _daemon_request("POST", "/api/cancel", timeout_s=10.0)
+
+
 async def run_mcp_stdio() -> None:
-    """Serve MCP until Codex closes stdin."""
-    while True:
-        line = await asyncio.to_thread(sys.stdin.buffer.readline)
-        if not line:
-            return
-        try:
-            message = json.loads(line)
-            if not isinstance(message, dict):
-                raise ValueError("request must be an object")
-            response = await _handle(message)
-        except (json.JSONDecodeError, ValueError) as exc:
-            response = _error(None, -32700, str(exc))
-        except Exception as exc:  # noqa: BLE001
-            response = _error(message.get("id") if isinstance(message, dict) else None, -32603, str(exc))
-        if response is not None:
-            data = json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n"
+    """Serve concurrent MCP requests until Codex closes stdin."""
+    pending: dict[str | int, asyncio.Task[None]] = {}
+    write_lock = asyncio.Lock()
+
+    async def write_response(response: dict[str, Any]) -> None:
+        data = json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n"
+        async with write_lock:
             sys.stdout.buffer.write(data.encode("utf-8"))
             sys.stdout.buffer.flush()
+
+    async def run_request(message: dict[str, Any], request_id: str | int) -> None:
+        try:
+            try:
+                response = await _handle(message)
+            except asyncio.CancelledError:
+                try:
+                    await _cancel_inflight_tool(message)
+                except Exception:
+                    pass
+                response = _error(request_id, _REQUEST_CANCELLED_CODE, "request cancelled")
+            except Exception as exc:  # noqa: BLE001
+                response = _error(request_id, -32603, str(exc))
+            if response is not None:
+                await write_response(response)
+        finally:
+            if pending.get(request_id) is asyncio.current_task():
+                pending.pop(request_id, None)
+
+    try:
+        while True:
+            line = await asyncio.to_thread(sys.stdin.buffer.readline)
+            if not line:
+                break
+            try:
+                message = json.loads(line)
+                if not isinstance(message, dict):
+                    raise ValueError("request must be an object")
+            except (json.JSONDecodeError, ValueError) as exc:
+                await write_response(_error(None, -32700, str(exc)))
+                continue
+
+            method = str(message.get("method") or "")
+            params = message.get("params") if isinstance(message.get("params"), dict) else {}
+            if method == "notifications/cancelled":
+                cancelled_id = params.get("requestId")
+                if isinstance(cancelled_id, (str, int)):
+                    task = pending.get(cancelled_id)
+                    if task is not None and not task.done():
+                        task.cancel()
+                continue
+
+            request_id = message.get("id")
+            if request_id is None:
+                continue
+            if not isinstance(request_id, (str, int)):
+                await write_response(_error(None, -32600, "request id must be a string or integer"))
+                continue
+            if request_id in pending:
+                await write_response(_error(request_id, -32600, "duplicate request id"))
+                continue
+            task = asyncio.create_task(run_request(message, request_id))
+            pending[request_id] = task
+            await asyncio.sleep(0)
+    finally:
+        tasks = list(pending.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main() -> None:

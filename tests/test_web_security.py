@@ -91,6 +91,31 @@ def test_loopback_ui_bootstrap_cookie_allows_api(monkeypatch, tmp_path):
     assert response.status_code == 200
 
 
+def test_cancel_agent_task_does_not_block_websocket_receive_loop(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    class BlockingAgent:
+        async def cancel_task(self, _task_id: str) -> bool:
+            await __import__("asyncio").Event().wait()
+            return True
+
+        def list_tasks(self):
+            return [{"task_id": "still-responsive", "status": "running"}]
+
+        def get_task(self, _task_id: str):
+            return None
+
+    gateway.server.agent = BlockingAgent()
+
+    with TestClient(gateway.app) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "cancel_agent_task", "task_id": "slow", "request_id": "cancel"})
+        ws.send_json({"type": "agent_tasks", "request_id": "status"})
+        response = ws.receive_json()
+
+    assert response["request_id"] == "status"
+    assert response["result"]["agent_tasks"][0]["task_id"] == "still-responsive"
+
+
 def test_cross_site_origin_is_rejected(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
     token = personastore.get_or_create_local_api_token()
