@@ -1,7 +1,7 @@
 # Hardware and Asset Scope
 
 This repository primarily publishes the YareLampGo software runtime, Web UI, CLI,
-OpenClaw integration, examples, and public documentation.
+Codex integration, examples, and public documentation.
 
 ## License Boundaries
 

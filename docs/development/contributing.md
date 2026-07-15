@@ -28,7 +28,7 @@ uv run lampgo run --web --no-hw
 
 ## 提交建议
 
-- 一个 PR 聚焦一个主题，例如动作技能、Web UI、OpenClaw 工具或文档。
+- 一个 PR 聚焦一个主题，例如动作技能、Web UI、Codex 工具或文档。
 - 涉及硬件行为时说明设备型号、串口、校准文件和测试动作。
 - 修改配置字段时同步更新 `lampgo.toml.example`、README 和相关 docs。
 - 新增用户可见命令时同步更新 `uv run lampgo help` 的输出测试。
@@ -39,11 +39,11 @@ uv run lampgo run --web --no-hw
 | 路径 | 说明 |
 | --- | --- |
 | `lampgo/core/` | 底层运动、安全、配置、事件和硬件抽象。 |
-| `lampgo/skills/` | 可被 CLI、Web、LLM、OpenClaw 共享调用的技能系统。 |
+| `lampgo/skills/` | 可被 CLI、Web、本地 LLM、Codex 共享调用的技能系统。 |
 | `lampgo/perception/` | 意图路由、摄像头和 LLM 工具调用。 |
 | `lampgo/voice/` | 音频输入输出、STT、TTS、VAD 和唤醒词。 |
 | `lampgo/web/` | 本地 Web 控制台、REST API 和 WebSocket。 |
-| `lampgo/bridge/` | OpenClaw 和外部生态桥接。 |
+| `lampgo/agent/` | 本机 Codex 的发现、注册和复杂任务执行。 |
 | `tests/` | CLI、安装器、Web 配置等测试。 |
 
 ## 运动与硬件改动原则

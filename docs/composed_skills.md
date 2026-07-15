@@ -5,7 +5,7 @@ YareLampGo 的技能分成三类，彼此来源和可操作性不同：
 | 类别 | 存储位置 | 创建方式 | 可编辑 / 删除？ | 在 Web UI 上的位置 |
 |------|---------|---------|---------------|------------------|
 | **出厂技能** | Python 代码 `lampgo/skills/builtin/` | 仓库内置 | ❌ | 「技能 → 出厂技能」板块 |
-| **我的技能** | `~/.lampgo/skills/user/<skill_id>.json` | OpenClaw / Web UI 运行时创建 | ✅ | 「技能 → 我的技能」板块 |
+| **我的技能** | `~/.lampgo/skills/user/<skill_id>.json` | Codex / Web UI 运行时创建 | ✅ | 「技能 → 我的技能」板块 |
 | **录制动作** | `~/.lampgo/recordings/user/<name>.csv` | 手动示教录制 | ✅ | 「录制动作」板块 |
 
 这篇文档讲的是中间一层——**组合技能**，也就是 UI 里「我的技能」对应的那种。
@@ -22,7 +22,7 @@ YareLampGo 的技能分成三类，彼此来源和可操作性不同：
 两种可以**混用**。比如「欢迎回家」= `set_expression(smiley)` → `nod × 2` → 一段自定义 yaw/pitch 摆动轨迹 → `play_recording('wave')`。
 
 你不用写 Python、不用重启守护进程，文件落到 `~/.lampgo/skills/user/` 就会被自动识别并注册成一个正式的 skill，
-立刻就能被 LLM agent、OpenClaw、Web UI 的卡片点击等所有入口调用。
+立刻就能被本地 LLM、Codex、Web UI 的卡片点击等所有入口调用。
 
 ## 什么时候用 Level 2（自定义轨迹）？
 
@@ -35,8 +35,8 @@ YareLampGo 的技能分成三类，彼此来源和可操作性不同：
 
 ## 谁会创建这种技能？
 
-主要是 **OpenClaw**：当用户说「帮我攒一个 XX 技能」，OpenClaw 会先调 `lampgo_list_skills` 看清楚有哪些出厂原子能力，
-然后调 `lampgo_save_skill` 把组合方案写进 JSON。
+主要是 **Codex**：当用户说「帮我攒一个 XX 技能」，Codex 会先调 `lampgo_list_skills` 看清楚有哪些出厂原子能力，
+再通过 LampGo API 或项目文件生成组合方案。
 高级用户也可以直接手写 JSON 丢进目录，点一下 Web UI 的「重新加载」就生效。
 
 ## JSON 结构
@@ -129,5 +129,5 @@ YareLampGo 的技能分成三类，彼此来源和可操作性不同：
 - `lampgo/skills/loader.py` — JSON 校验 / 落盘 / 扫描
 - `lampgo/skills/registry.py` — 新增 `unregister()`，只允许移除 user 级技能
 - `lampgo/web/gateway.py` — `/api/skills/save`、`/api/skills/delete`、`/api/skills/reload`
-- `openclaw-plugin-lampgo/index.ts` — `lampgo_save_skill` / `lampgo_delete_skill` / `lampgo_list_skills`
+- `lampgo/mcp_stdio.py` — Codex 可用的 LampGo MCP 工具入口
 - `tests/test_user_skill_loader.py` + `tests/test_composed_skill.py` — 回归测试

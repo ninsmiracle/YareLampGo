@@ -55,7 +55,7 @@ uv run lampgo onboard
 | `hardware` | 配置电机串口、摄像头、麦克风和 ESP32 无线设备，支持自动探测。 |
 | `llm` | 配置 LLM provider、模型、Base URL 和 API key。 |
 | `persona_memory` | 导入默认或自定义人设与记忆文件。 |
-| `openclaw_plugin` | 检测到 OpenClaw 时提示安装 `lampgo` 插件和 AgentSkill。 |
+| `codex` | 自动发现本机 Codex、检查登录并注册 LampGo MCP 工具。 |
 
 配置默认写入：
 
@@ -144,4 +144,4 @@ uv run lampgo clear
 
 - 阅读 [配置说明](configuration.md) 理解配置来源和凭证管理。
 - 阅读 [动作与表情](../guides/motion-and-expression.md) 学习录制、回放和 LED 控制。
-- 阅读 [OpenClaw 集成](../guides/openclaw-integration.md) 将台灯接入 Agent 工作流。
+- 阅读 [Codex 集成](../guides/codex-integration.md) 将台灯接入本机复杂任务工作流。

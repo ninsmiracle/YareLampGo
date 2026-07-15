@@ -12,20 +12,20 @@ YareLampGo 的目标很简单：降低机械臂和具身智能的使用门槛，
 过去这种 5 自由度机械臂更像实验室设备，普通人很难上手；
 YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本地软件系统，让开发者、创作者和普通玩家可以用网页、命令行、自然语言或 Agent 快速做出有趣的桌面互动。
 
-仓库内的 `lampgo` 仍作为 **YareLampGo** 项目的内部简称，用于简化 Python 包名、CLI 命令、配置目录和 OpenClaw 插件标识使用。
+仓库内的 `lampgo` 仍作为 **YareLampGo** 项目的内部简称，用于简化 Python 包名、CLI 命令和配置目录。
 
 > 图片占位：这里放一张当前开源版本的真实桌面演示图或动图，建议路径 `docs/images/readme/hero-demo.gif`。
 
-项目默认提供本地 Web 控制台、CLI、HTTP / WebSocket 接口和 OpenClaw 插件，也支持无硬件模式。你可以先把软件玩法跑通，再接真实设备。
+项目默认提供本地 Web 控制台、CLI、HTTP / WebSocket 接口和零配置 Codex 接入，也支持无硬件模式。你可以先把软件玩法跑通，再接真实设备。
 
 ## 主要亮点
 
 - **自然语言控制真实台灯**：一句“点个头”“看向我”“做个害羞表情”，就能触发动作、灯光、语音和 Agent 行动。
 - **Web 控制台开箱可用**：浏览器里完成聊天、动作播放、动作录制、表情切换、设备状态和配置管理。
 - **友好的机器校准流程**：第一次拿到机器、换电机或重装结构件后，先 `detect` 再 `calibrate`，减少新设备误动风险。
-- **动作可以录制和复用**：手动摆动台灯录制参数文件，之后可以通过 Web、CLI、自然语言或 OpenClaw 再次调用。
+- **动作可以录制和复用**：手动摆动台灯录制参数文件，之后可以通过 Web、CLI、自然语言或 Codex 再次调用。
 - **非技术用户也能扩展玩法**：可以用自然语言描述“欢迎回家”“被夸后害羞一下”这类场景，新增自己的原子动作或组合动作，并沉淀成适合自己的桌面 skill。
-- **Agent 可以调用真实硬件**：接入 OpenClaw 后，Agent 能读取状态、控制关节、切换 LED 表情、抓取摄像头画面并向用户确认。
+- **Codex 可以调用真实硬件**：LampGo 自动注册本机 MCP 工具，让 Codex 读取状态、控制关节、抓取摄像头画面并向用户确认。
 - **无硬件也能先开发**：没有真实台灯时使用 `--no-hw`，仍然可以调 Web UI、配置、技能、路由和 Agent 流程。
 
 > 图片占位：这里放 Web 控制台截图，建议路径 `docs/images/readme/web-console.png`。
@@ -65,7 +65,7 @@ uv sync
 uv run lampgo onboard
 ```
 
-引导流程会检查环境、配置硬件串口、写入模型凭证、导入人设，并在检测到 OpenClaw 时提示安装插件。配置文件默认写入 `~/.lampgo/`，敏感凭证保存在 `~/.lampgo/credentials.json`。
+引导流程会检查环境、配置硬件串口、写入模型凭证、创建人设文件，并自动发现和接通已登录的本机 Codex。配置文件默认写入 `~/.lampgo/`，敏感凭证保存在 `~/.lampgo/credentials.json`。
 
 ### 4. 新机器先校准
 
@@ -121,7 +121,7 @@ uv run lampgo clear                        # 清理进程并释放串口
 
 ```mermaid
 flowchart LR
-  user["用户 / Agent"] --> entry["Web UI / CLI / Voice / OpenClaw"]
+  user["用户 / Codex"] --> entry["Web UI / CLI / Voice / AgentHarness"]
   entry --> server["LampgoServer"]
   server --> skills["IntentRouter + SkillExecutor"]
   skills --> safety["MotionRuntime + SafetyKernel"]
@@ -138,26 +138,25 @@ flowchart LR
 | 分类   | 文档                                                                                                                  |
 | ---- | ------------------------------------------------------------------------------------------------------------------- |
 | 入门   | [文档中心](docs/README_zh.md)、[快速上手](docs/getting-started/quick-start.md)、[配置说明](docs/getting-started/configuration.md) |
-| 使用指南 | [动作与表情](docs/guides/motion-and-expression.md)、[OpenClaw 集成](docs/guides/openclaw-integration.md)                    |
+| 使用指南 | [动作与表情](docs/guides/motion-and-expression.md)、[Codex 集成](docs/guides/codex-integration.md)                         |
 | 硬件   | [硬件公开资料](docs/hardware/README.md)、[接线表](docs/hardware/wiring.md)、[结构件文件](assets/printable/README.md)                |
 | 架构   | [系统架构](docs/architecture.md)、[项目说明](docs/project_description.md)                                                    |
 | 开发   | [贡献指南](docs/development/contributing.md)、[示例代码](examples/)                                                          |
 
 
-## OpenClaw 集成
+## Codex 集成
 
-YareLampGo 可以作为 OpenClaw 的硬件配件运行，让 Agent 读取台灯状态、控制关节、播放动作、切换 LED 表情、抓取摄像头画面、写入记忆或向用户发起确认。
+Codex 已安装并登录时，启动 LampGo 会自动发现 CLI、注册 stdio MCP，并显示“Codex 已接通”。复杂任务由本机 Codex 执行，Codex 也能通过受控工具读取台灯状态、执行动作、抓取摄像头画面或向用户提问。
 
 ```bash
 uv run lampgo run --web
-uv run lampgo install-openclaw --yes
 ```
 
-集成细节见 [OpenClaw 集成指南](docs/guides/openclaw-integration.md)。
+不需要配置 token、端口或环境变量。集成细节见 [Codex 集成指南](docs/guides/codex-integration.md)。
 
 ## 参与贡献
 
-欢迎把你做出的动作、桌面互动 case、组合 skill 场景、OpenClaw 玩法、硬件适配和文档经验共享回本仓库。可以从这些入口开始：
+欢迎把你做出的动作、桌面互动 case、组合 skill 场景、Codex 玩法、硬件适配和文档经验共享回本仓库。可以从这些入口开始：
 
 - 动作资产：录制后整理为 `assets/recordings/` 下的 CSV，并补一份简短说明。
 - 使用案例和脚本：放到 `examples/` 或文档中，说明适合什么场景。

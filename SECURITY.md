@@ -15,7 +15,7 @@ If private reporting is not available yet, open a minimal public issue asking fo
 Security-sensitive areas include:
 
 - Web API authentication and local/remote access control.
-- OpenClaw plugin token handling.
+- Local API authentication and automatic token handling.
 - LLM, voice, RTC, and provider credential storage.
 - ESP32 provisioning and Wi-Fi handling.
 - Any behavior that can bypass `MotionRuntime` or `SafetyKernel`.

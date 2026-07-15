@@ -4,9 +4,9 @@
 
 This index collects public docs for open-source users. YareLampGo turns a robotic desk lamp from lab-style hardware into a desktop companion that developers, creators, and hobbyists can make listen, see, move, and respond.
 
-The public project name is **YareLampGo**. The `lampgo` name remains the internal short name for the CLI command, Python package, config directory, and OpenClaw plugin identifiers.
+The public project name is **YareLampGo**. The `lampgo` name remains the internal short name for the CLI command, Python package, and config directory.
 
-The root [README.md](../README.md) / [README.en.md](../README.en.md) is the quick landing page. Longer setup, configuration, motion, OpenClaw, and development notes live under `docs/`.
+The root [README.md](../README.md) / [README.en.md](../README.en.md) is the quick landing page. Longer setup, configuration, motion, Codex, and development notes live under `docs/`.
 
 Translation is being added gradually. Chinese is the default documentation language. English pages use the `README.en.md` filename convention, while deeper docs may remain Chinese until they are high enough priority to translate.
 
@@ -22,7 +22,7 @@ Translation is being added gradually. Chinese is the default documentation langu
 | Doc | Use it for |
 | --- | --- |
 | [Motion and Expression](guides/motion-and-expression.md) | Built-in motions, CSV recording/playback, LED expressions, and composed skills. |
-| [OpenClaw Integration](guides/openclaw-integration.md) | Connect YareLampGo to OpenClaw so Agents can call lamp capabilities. |
+| [Codex Integration](guides/codex-integration.md) | Zero-config local Codex handoff and LampGo MCP tools. |
 | [Public Hardware Docs](hardware/README.en.md) | Public component photos, wiring diagram, wiring table, and printable structure entry points. |
 
 ## Architecture And Background
@@ -42,8 +42,7 @@ Translation is being added gradually. Chinese is the default documentation langu
 | --- | --- |
 | [`examples/basic_motion.py`](../examples/basic_motion.py) | Basic motion control example. |
 | [`examples/custom_skill.py`](../examples/custom_skill.py) | Custom skill example. |
-| [`examples/openclaw_integration.py`](../examples/openclaw_integration.py) | OpenClaw integration example. |
-| [`openclaw-skills/lampgo/references/`](../openclaw-skills/lampgo/references/) | Agent-readable joint, motion, LED, and API references. |
+| [`lampgo/mcp_stdio.py`](../lampgo/mcp_stdio.py) | Local MCP entrypoint used by Codex to call lamp capabilities. |
 
 ## Translation Policy
 
