@@ -51,11 +51,11 @@
           </span>
           <span class="nav-label">技能</span>
         </button>
-        <button class="nav-item" type="button" data-view="openclaw">
+        <button class="nav-item" type="button" data-view="agent">
           <span class="nav-icon">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
           </span>
-          <span class="nav-label">OpenClaw</span>
+          <span class="nav-label">Codex</span>
         </button>
         <button class="nav-item" type="button" data-view="events">
           <span class="nav-icon">
@@ -295,7 +295,7 @@
               <div>
                 <div class="skill-section-title">我的技能</div>
                 <div class="skill-section-desc">
-                  由 OpenClaw 或你自己新建的组合技能（串联若干出厂技能）。
+                  由 Codex 或你自己新建的组合技能（串联若干出厂技能）。
                   让 AI 说"帮我造一个'欢迎回家'技能"，它就会出现在这里；点击卡片上的 ✕ 可以删除。
                 </div>
               </div>
@@ -436,50 +436,46 @@
         </div>
       </section>
 
-      <section class="view hidden" data-view="openclaw">
+      <section class="view hidden" data-view="agent">
         <div class="view-header">
           <div>
             <div class="view-title-row">
-              <div class="view-title">OpenClaw</div>
-              <button id="btn-openclaw-health-details" class="device-chip is-clickable" type="button" title="查看连接详情">
-                <span class="device-chip-dot" id="oc-health-dot"></span>
+              <div class="view-title">Codex</div>
+              <button id="btn-agent-health-details" class="device-chip is-clickable" type="button" title="查看连接详情">
+                <span class="device-chip-dot" id="codex-health-dot"></span>
                 <span class="device-chip-label">检测中…</span>
               </button>
             </div>
-            <div class="view-subtitle">复杂任务的规划、沉淀与执行历史</div>
+            <div class="view-subtitle">本机 Codex 复杂任务与实时执行状态</div>
           </div>
           <div class="view-header-actions">
-            <button id="btn-refresh-openclaw" class="ghost-button" type="button">刷新</button>
+            <button id="btn-refresh-agent" class="ghost-button" type="button">刷新</button>
           </div>
         </div>
 
-        <div id="openclaw-health-card" class="oc-health-card hidden"></div>
+        <div id="agent-health-card" class="codex-health-card hidden"></div>
 
-        <div class="openclaw-summary">
+        <div class="agent-summary">
           <div class="summary-card">
             <div class="summary-label">排队中</div>
-            <div class="summary-value" id="oc-count-queued">0</div>
+            <div class="summary-value" id="agent-count-queued">0</div>
           </div>
           <div class="summary-card">
             <div class="summary-label">进行中</div>
-            <div class="summary-value" id="oc-count-running">0</div>
+            <div class="summary-value" id="agent-count-running">0</div>
           </div>
           <div class="summary-card">
-            <div class="summary-label">待确认</div>
-            <div class="summary-value" id="oc-count-awaiting">0</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-label">已沉淀</div>
-            <div class="summary-value" id="oc-count-promoted">0</div>
+            <div class="summary-label">已完成</div>
+            <div class="summary-value" id="agent-count-completed">0</div>
           </div>
           <div class="summary-card">
             <div class="summary-label">失败</div>
-            <div class="summary-value" id="oc-count-failed">0</div>
+            <div class="summary-value" id="agent-count-failed">0</div>
           </div>
         </div>
 
-        <div id="openclaw-task-list" class="openclaw-task-list">
-          <div class="openclaw-empty">暂无复杂任务</div>
+        <div id="agent-task-list" class="agent-task-list">
+          <div class="agent-empty">暂无复杂任务</div>
         </div>
       </section>
 
@@ -770,7 +766,7 @@
                   <label class="settings-field" data-cfg-field="web.port">
                     <span class="settings-field-label">Web 端口 (web.port)</span>
                     <input class="settings-input" type="number" min="1" max="65535" step="1" placeholder="8420" data-cfg-input="web.port">
-                    <span class="settings-field-hint">OpenClaw 插件、外部脚本默认通过此端口访问 lampgo 守护进程。</span>
+                    <span class="settings-field-hint">Codex 插件、外部脚本默认通过此端口访问 lampgo 守护进程。</span>
                     <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="web.port"></span>
                   </label>
                 </div>
@@ -789,7 +785,6 @@
                 <div class="settings-persona-list-head">
                   <div class="settings-persona-list-title">人设文件</div>
                   <div class="settings-persona-list-head-actions">
-                    <button id="btn-persona-import" class="sidebar-mini-btn" type="button" title="从 OpenClaw 导入：只覆盖 PROFILE.md（关于主人的信息），保留台灯自己的 SOUL/AGENTS。记忆请在「记忆」页单独导入。">从 OpenClaw 导入</button>
                     <button id="btn-persona-reset" class="sidebar-mini-btn is-ghost" type="button" title="恢复为出厂默认模板（会先自动备份）">恢复默认</button>
                   </div>
                 </div>
@@ -826,9 +821,9 @@
               <aside class="settings-persona-list" role="tablist" aria-label="记忆分类">
                 <div class="settings-persona-list-head">
                   <div class="settings-persona-list-title">记忆</div>
-                  <label class="settings-toggle" title="每次组 prompt 时额外读取 OpenClaw 的 MEMORY.md 与近 3 天日记">
-                    <input id="cfg-share-openclaw-memory" type="checkbox">
-                    <span>共享 OpenClaw</span>
+                  <label class="settings-toggle" title="从本机 Codex memory_summary.md 选择少量相关内容，不读取完整记忆或会话日志">
+                    <input id="cfg-share-codex-memory" type="checkbox">
+                    <span>参考 Codex 摘要</span>
                   </label>
                 </div>
                 <button class="memory-section-item is-active" type="button" data-memory-section="core" role="tab">
@@ -851,7 +846,6 @@
                   <textarea id="memory-core-editor" class="settings-textarea" spellcheck="false" placeholder="# MEMORY.md — 长期记忆"></textarea>
                   <div class="settings-actions">
                     <span id="memory-core-status" class="settings-status" aria-live="polite"></span>
-                    <button id="btn-memory-core-import" class="ghost-button" type="button" title="从 ~/.openclaw/MEMORY.md 拷过来覆盖当前核心记忆（会先自动备份）">从 OpenClaw 导入</button>
                     <button id="btn-memory-core-reset" class="ghost-button" type="button" title="恢复为出厂默认模板（会先自动备份）">恢复默认</button>
                     <button id="btn-memory-core-save" class="send-button" type="button">保存</button>
                   </div>
@@ -879,7 +873,7 @@
                         <span id="memory-daily-title" class="memory-daily-col-label">选择日期查看</span>
                         <span id="memory-daily-source" class="memory-daily-col-meta"></span>
                       </div>
-                      <pre id="memory-daily-content" class="memory-daily-content">空闲 3 分钟后，今天的对话会被自动总结到这里。也可以让 OpenClaw 通过 lampgo_save_memory 写入。</pre>
+                      <pre id="memory-daily-content" class="memory-daily-content">空闲 3 分钟后，今天的对话会被自动总结到这里。也可以让 Codex 通过 lampgo_save_memory 写入。</pre>
                     </div>
                   </div>
                 </div>

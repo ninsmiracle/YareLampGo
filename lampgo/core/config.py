@@ -593,9 +593,9 @@ class LampgoConfig(BaseModel):
     web_enabled: bool = Field(default=False, description="Enable web UI on startup")
     home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
     no_hw: bool = Field(default=False, description="Skip hardware connections (motors/LED)")
-    share_openclaw_memory: bool = Field(
+    share_codex_memory: bool = Field(
         default=True,
-        description="When true, inject OpenClaw MEMORY.md + recent daily notes into lampgo prompts.",
+        description="When true, inject a bounded subset of Codex memory_summary.md into LampGo prompts.",
     )
 
 
@@ -795,10 +795,9 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
             if track:
                 changed.append(f"{section}.{field}")
 
-    # LAMPGO_API_BASE acts as a convenience for OpenClaw plugin alignment:
-    # a single URL (e.g. http://127.0.0.1:18790) determines BOTH where lampgo
-    # listens and where the OpenClaw plugin calls back. Individual LAMPGO_WEB_*
-    # vars still win if set, to allow split host/port override.
+    # LAMPGO_API_BASE is a convenience override for local integrations: one
+    # URL determines where LampGo listens. Individual LAMPGO_WEB_* vars still
+    # win when a caller needs a split host/port override.
     api_base = os.environ.get("LAMPGO_API_BASE", "").strip()
     if api_base:
         parsed = _parse_api_base(api_base)

@@ -90,7 +90,7 @@ class SkillResult:
 
 @dataclass
 class InvokeResult:
-    """Returned to external callers (OpenClaw / CLI) after skill invocation."""
+    """Returned to external callers (agents / CLI) after skill invocation."""
 
     invocation_id: str
     status: Literal["ok", "rejected", "cancelled", "error"]

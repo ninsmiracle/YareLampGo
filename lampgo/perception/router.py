@@ -3,7 +3,7 @@
 Routing strategy:
   1. Keyword match (zero latency) — greetings, known skill keywords
   2. Fast LLM fallback (optional, ~500ms) — gpt-4o-mini function calling
-  3. Fallback to COMPLEX intent — deferred to OpenClaw
+  3. Fallback to COMPLEX intent — deferred to the local agent harness
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ class RoutedIntent:
     detail: str | None = None
     matched_keyword: str | None = None
     end_conversation: bool = False
+    direct_agent: bool = False
 
 
 NORMALIZE_TABLE = str.maketrans(
@@ -51,6 +52,17 @@ NORMALIZE_TABLE = str.maketrans(
 )
 TRAILING_PUNCTUATION = " ,.?!;:()[]{}\"'`"
 COMPOSITE_MARKERS = ("然后", "再", "并且", "接着", "随后", "同时", "之后", ",", ";", "、")
+CODEX_SUMMON_PATTERNS = (
+    re.compile(r"(?:codex|你大哥|大哥)(?:给我)?(?:叫|喊|请|找|拉|召唤|调用|启动|请出)(?:一下|下)?(?:来|过来)?"),
+    re.compile(r"(?:叫|喊|请|找|拉|召唤|调用|启动|请出)(?:一下|下)?(?:codex|你大哥|大哥)(?:来|过来)?"),
+    re.compile(r"(?:交给|转给)(?:codex|你大哥|大哥)"),
+    re.compile(r"让(?:codex|你大哥|大哥)(?:来|过来|处理|接手|帮忙)"),
+    re.compile(r"(?:codex|你大哥|大哥)(?:来|过来)(?:处理|接手|帮忙)?"),
+)
+CODEX_SUMMON_NEGATION_RE = re.compile(
+    r"(?:不要|不用|无需|不必|先别|别)(?:把|叫|喊|请|找|拉|召唤|调用|启动|交给|转给)?(?:codex|你大哥|大哥)"
+    r"|(?:codex|你大哥|大哥)(?:先)?(?:别|不要|不用)(?:来|过来|处理|接手)?"
+)
 INLINE_PUNCTUATION_RE = re.compile(r"[,.;:!?、]+")
 LEADING_FILLER_RE = re.compile(
     r"^(?:(?:嗯+|呃+|额+|啊+|哦+|喔+|诶+|欸+|uh+|um+|erm+|mmm+|那个|就是)[,.;:!?、]*)+",
@@ -182,6 +194,22 @@ class IntentRouter:
 
     def _keyword_route(self, text: str) -> RoutedIntent:
         normalized = _strip_leading_fillers(_normalize_text(text))
+        codex_summon = _match_codex_summon(normalized)
+        if codex_summon:
+            logger.info(
+                "router.codex_summon_hit",
+                text=text,
+                normalized=normalized,
+                keyword=codex_summon,
+            )
+            return RoutedIntent(
+                intent_type=IntentType.COMPLEX,
+                source="keyword",
+                detail="用户明确点名调用本机 Codex",
+                matched_keyword=codex_summon,
+                direct_agent=True,
+            )
+
         greeting_keyword = _match_greeting_phrase(normalized)
         if greeting_keyword:
             logger.info("router.keyword_greeting_hit", text=text, normalized=normalized, keyword=greeting_keyword)
@@ -292,6 +320,17 @@ def _strip_leading_fillers(normalized: str) -> str:
 
 def _match_greeting_phrase(normalized: str) -> str | None:
     return _match_repeated_phrase(normalized, GREETING_PHRASES)
+
+
+def _match_codex_summon(normalized: str) -> str | None:
+    """Match an explicit summon, not a casual mention of Codex or 大哥."""
+    if CODEX_SUMMON_NEGATION_RE.search(normalized):
+        return None
+    for pattern in CODEX_SUMMON_PATTERNS:
+        match = pattern.search(normalized)
+        if match:
+            return match.group(0)
+    return None
 
 
 def _match_repeated_phrase(normalized: str, phrases: set[str]) -> str | None:

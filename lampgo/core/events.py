@@ -122,37 +122,17 @@ class AgentFinished(Event):
 
 
 @dataclass
-class OpenClawTaskUpdated(Event):
-    """OpenClaw task status changed."""
+class AgentTaskUpdated(Event):
+    """External agent task status changed."""
 
     request_id: str
     task: dict
+    progress: dict | None = None
 
 
 @dataclass
-class OpenClawPromotionRequested(Event):
-    """OpenClaw task requires manual promotion confirmation."""
-
-    request_id: str
-    task_id: str
-    proposal: dict
-    task: dict
-
-
-@dataclass
-class OpenClawPromotionDecision(Event):
-    """User approved or rejected a promotion proposal."""
-
-    request_id: str
-    task_id: str
-    proposal_id: str
-    decision: str
-    task: dict
-
-
-@dataclass
-class OpenClawAskRequested(Event):
-    """OpenClaw asked the user a question via lampgo."""
+class AgentAskRequested(Event):
+    """An external agent asked the user a question via LampGo."""
 
     ask_id: str
     question: str
@@ -161,8 +141,8 @@ class OpenClawAskRequested(Event):
 
 
 @dataclass
-class OpenClawAskResolved(Event):
-    """User replied to an OpenClaw question via lampgo."""
+class AgentAskResolved(Event):
+    """User replied to an external agent question via LampGo."""
 
     ask_id: str
     reply: str

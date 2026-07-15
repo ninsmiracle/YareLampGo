@@ -60,7 +60,7 @@
   const btnExpressionPlay = document.getElementById("btn-expression-play");
   const btnExpressionStop = document.getElementById("btn-expression-stop");
   const btnExpressionSave = document.getElementById("btn-expression-save");
-  const openclawTaskList = document.getElementById("openclaw-task-list");
+  const agentTaskList = document.getElementById("agent-task-list");
   const chipJoint = document.getElementById("chip-joint");
   const chipJointDot = document.getElementById("chip-joint-dot");
   const chipCamera = document.getElementById("chip-camera");
@@ -72,14 +72,13 @@
   const esp32VolumeControl = document.getElementById("esp32-volume-control");
   const esp32VolumeSlider = document.getElementById("esp32-volume-slider");
   const esp32VolumeValue = document.getElementById("esp32-volume-value");
-  const btnRefreshOpenclaw = document.getElementById("btn-refresh-openclaw");
-  const btnOpenclawHealth = document.getElementById("btn-openclaw-health-details");
-  const openclawHealthCard = document.getElementById("openclaw-health-card");
-  const ocCountQueued = document.getElementById("oc-count-queued");
-  const ocCountRunning = document.getElementById("oc-count-running");
-  const ocCountAwaiting = document.getElementById("oc-count-awaiting");
-  const ocCountPromoted = document.getElementById("oc-count-promoted");
-  const ocCountFailed = document.getElementById("oc-count-failed");
+  const btnRefreshAgent = document.getElementById("btn-refresh-agent");
+  const btnAgentHealth = document.getElementById("btn-agent-health-details");
+  const agentHealthCard = document.getElementById("agent-health-card");
+  const agentCountQueued = document.getElementById("agent-count-queued");
+  const agentCountRunning = document.getElementById("agent-count-running");
+  const agentCountCompleted = document.getElementById("agent-count-completed");
+  const agentCountFailed = document.getElementById("agent-count-failed");
   const eventLog = document.getElementById("event-log");
   const btnMic = document.getElementById("btn-mic");
   const btnVoiceCancel = document.getElementById("btn-voice-cancel");
@@ -416,8 +415,8 @@
   const SIDEBAR_WIDTH_KEY = "lampgo.sidebarWidth";
   const SESSION_STORAGE_KEY = "lampgo.sessions";
   const ACTIVE_SESSION_KEY = "lampgo.activeSession";
-  const OPENCLAW_TASK_SESSION_KEY = "lampgo.openclawTaskSessions";
-  const OPENCLAW_FOLLOWUP_KEY = "lampgo.openclawFollowups";
+  const AGENT_TASK_SESSION_KEY = "lampgo.agentTaskSessions";
+  const AGENT_FOLLOWUP_KEY = "lampgo.agentFollowups";
   const ESP32_VOLUME_KEY = "lampgo.esp32SpeakerVolume";
   const MAX_SESSIONS = 40;
   const DEFAULT_SIDEBAR_WIDTH = 232;
@@ -600,10 +599,12 @@
   const pendingUserEntries = new Map(); // requestId -> { session, entry } for live-transcribed messages
   const pendingAssistantEntries = new Map(); // requestId -> { session, entry } for live-persisted thinking
   const pendingSnapshotTimers = new Map(); // requestId -> timer id
-  const openclawTasks = new Map();
-  const openclawPrevStatus = new Map();
-  const openclawTaskSessions = loadTaskSessionMap();
-  const openclawFollowups = loadFollowupSet();
+  const agentTasks = new Map();
+  const agentPrevStatus = new Map();
+  const agentTaskSessions = loadTaskSessionMap();
+  const agentFollowups = loadFollowupSet();
+  let agentTaskPollTimer = null;
+  let agentTaskPollInFlight = false;
   const streamingState = new Map();
   let activeAgentRequestId = null;
   let callPreemptedAwaitingResponse = false;
@@ -628,11 +629,11 @@
     wrist_pitch: "腕部俯仰",
   };
 
-  /* ---- OpenClaw task <-> session persistence ---- */
+  /* ---- Codex task <-> session persistence ---- */
 
   function loadTaskSessionMap() {
     try {
-      const raw = localStorage.getItem(OPENCLAW_TASK_SESSION_KEY);
+      const raw = localStorage.getItem(AGENT_TASK_SESSION_KEY);
       if (!raw) return new Map();
       const obj = JSON.parse(raw);
       const map = new Map();
@@ -643,7 +644,7 @@
       }
       return map;
     } catch (err) {
-      console.warn("[openclaw] load task-session map failed:", err);
+      console.warn("[agent] load task-session map failed:", err);
       return new Map();
     }
   }
@@ -651,36 +652,36 @@
   function persistTaskSessionMap() {
     try {
       const obj = {};
-      openclawTaskSessions.forEach((v, k) => { obj[k] = v; });
-      localStorage.setItem(OPENCLAW_TASK_SESSION_KEY, JSON.stringify(obj));
+      agentTaskSessions.forEach((v, k) => { obj[k] = v; });
+      localStorage.setItem(AGENT_TASK_SESSION_KEY, JSON.stringify(obj));
     } catch (err) {
-      console.warn("[openclaw] persist task-session map failed:", err);
+      console.warn("[agent] persist task-session map failed:", err);
     }
   }
 
   function loadFollowupSet() {
     try {
-      const raw = localStorage.getItem(OPENCLAW_FOLLOWUP_KEY);
+      const raw = localStorage.getItem(AGENT_FOLLOWUP_KEY);
       if (!raw) return new Set();
       const arr = JSON.parse(raw);
       return new Set(Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : []);
     } catch (err) {
-      console.warn("[openclaw] load followup set failed:", err);
+      console.warn("[agent] load followup set failed:", err);
       return new Set();
     }
   }
 
   function persistFollowupSet() {
     try {
-      localStorage.setItem(OPENCLAW_FOLLOWUP_KEY, JSON.stringify(Array.from(openclawFollowups)));
+      localStorage.setItem(AGENT_FOLLOWUP_KEY, JSON.stringify(Array.from(agentFollowups)));
     } catch (err) {
-      console.warn("[openclaw] persist followup set failed:", err);
+      console.warn("[agent] persist followup set failed:", err);
     }
   }
 
-  function rememberOpenClawTaskSession(taskId, sessionId) {
+  function rememberCodexTaskSession(taskId, sessionId) {
     if (!taskId || !sessionId) return;
-    openclawTaskSessions.set(taskId, sessionId);
+    agentTaskSessions.set(taskId, sessionId);
     persistTaskSessionMap();
   }
 
@@ -1406,69 +1407,52 @@
       btn.classList.toggle("is-active", btn.dataset.view === name);
     });
     if (appShell) appShell.dataset.view = name;
-    if (name === "openclaw") {
-      send({ type: "openclaw_tasks" });
-      refreshOpenclawHealth();
-      startOpenclawHealthPolling();
+    if (name === "agent") {
+      send({ type: "agent_tasks" });
+      refreshAgentHealth();
+      startAgentHealthPolling();
     } else {
-      stopOpenclawHealthPolling();
+      stopAgentHealthPolling();
     }
     if (name === "settings") {
       initSettingsView();
     }
   }
 
-  /* ---- OpenClaw health ---- */
+  /* ---- Codex health ---- */
 
-  let openclawHealthTimer = null;
-  let openclawHealthLastStatus = null;
-  // Remember the unhealthy-state key the user manually dismissed; we won't auto
-  // re-expand the card for the same state again, but if the state transitions
-  // (e.g. basic -> partial after a partial install) we'll nag once more.
-  let openclawHealthDismissedKey = null;
-
-  const OC_HEALTH_LABELS = {
-    running: "运行中",
-    idle: "就绪",
-    ready: "就绪",
-    degraded: "gateway 离线",
-    not_installed: "未安装",
-    missing: "未安装",
-    partial: "未完全安装",
-    basic: "缺插件",
-    unknown: "检测中…",
-  };
-
-  function startOpenclawHealthPolling() {
-    stopOpenclawHealthPolling();
-    openclawHealthTimer = setInterval(refreshOpenclawHealth, 10000);
+  let agentHealthTimer = null;
+  let agentHealthLastStatus = null;
+  function startAgentHealthPolling() {
+    stopAgentHealthPolling();
+    agentHealthTimer = setInterval(refreshAgentHealth, 10000);
   }
 
-  function stopOpenclawHealthPolling() {
-    if (openclawHealthTimer) {
-      clearInterval(openclawHealthTimer);
-      openclawHealthTimer = null;
+  function stopAgentHealthPolling() {
+    if (agentHealthTimer) {
+      clearInterval(agentHealthTimer);
+      agentHealthTimer = null;
     }
   }
 
-  async function refreshOpenclawHealth() {
-    if (!btnOpenclawHealth) return;
+  async function refreshAgentHealth() {
+    if (!btnAgentHealth) return;
     try {
-      const resp = await fetch("/api/openclaw/health", { cache: "no-store" });
+      const resp = await fetch("/api/agent/health", { cache: "no-store" });
       if (!resp.ok) throw new Error("status " + resp.status);
       const data = await resp.json();
       if (!data || !data.ok) throw new Error(data && data.error || "bad response");
-      applyOpenclawHealth(data.result);
+      applyAgentHealth(data.result);
     } catch (err) {
-      applyOpenclawHealth(null, err);
+      applyAgentHealth(null, err);
     }
   }
 
-  function applyOpenclawHealth(result, err) {
-    openclawHealthLastStatus = result;
-    if (!btnOpenclawHealth) return;
-    const dot = document.getElementById("oc-health-dot");
-    const labelEl = btnOpenclawHealth.querySelector(".device-chip-label");
+  function applyAgentHealth(result, err) {
+    agentHealthLastStatus = result;
+    if (!btnAgentHealth) return;
+    const dot = document.getElementById("codex-health-dot");
+    const labelEl = btnAgentHealth.querySelector(".device-chip-label");
 
     const setDot = (state) => {
       if (!dot) return;
@@ -1481,250 +1465,50 @@
     if (err || !result) {
       setDot("offline");
       if (labelEl) labelEl.textContent = "检查失败";
-      btnOpenclawHealth.title = err ? String(err) : "无法获取 OpenClaw 健康状态";
+      btnAgentHealth.title = err ? String(err) : "无法获取 Codex 健康状态";
       return;
     }
 
-    const conn = result.connection || "unknown";
-    const integ = result.integration || {};
-    const overall = integ.overall || "unknown";
-
-    // Green only when fully wired up AND reachable (idle or running).
-    // Everything else (not_installed / basic / partial / missing) is red.
-    const isHealthy =
-      (conn === "running" || conn === "idle") && overall === "ready";
-
-    // Soft warning: 所有硬条件都满足了，只是 plugin 源码比安装版本新，
-    // 或者 token 没对上。这种情况下 dot 不标红，但用黄色提示用户刷新。
-    const needsRefresh =
-      isHealthy &&
-      ((integ.plugin_freshness && integ.plugin_freshness.ok === false) ||
-        (integ.plugin_token && integ.plugin_token.ok === false));
-
-    if (!isHealthy) setDot("offline");
-    else if (needsRefresh) setDot("warn");
-    else setDot("online");
-
-    let label;
-    if (!isHealthy) {
-      label = OC_HEALTH_LABELS[overall] || OC_HEALTH_LABELS[conn] || "未知";
-    } else if (needsRefresh) {
-      label = "需刷新";
-    } else {
-      label = OC_HEALTH_LABELS[conn] || "就绪";
+    {
+      const conn = result.connection || "unknown";
+      const healthy = conn === "connected";
+      const warning = conn === "provisioning";
+      setDot(healthy ? "online" : warning ? "warn" : "offline");
+      const labels = {
+        connected: result.running_tasks > 0 ? "运行中" : "已接通",
+        provisioning: "自动连接中",
+        login_required: "请登录 Codex",
+        not_installed: "未安装 Codex",
+        error: "连接异常",
+      };
+      const label = labels[conn] || "检测中…";
+      if (labelEl) labelEl.textContent = label;
+      btnAgentHealth.title = result.detail || label;
+      renderCodexHealthSummary(result);
+      if (agentHealthCard && healthy) agentHealthCard.classList.add("hidden");
+      return;
     }
-    if (labelEl) labelEl.textContent = label;
 
-    let title = `OpenClaw：${label}`;
-    if (conn === "running" && isHealthy && !needsRefresh) {
-      title += `（${result.running_tasks || 0} 个任务进行中）`;
-    } else if (conn === "not_installed" || overall === "missing") {
-      // 点开详情卡里有更完整的引导；tooltip 这里只给一句话摘要。
-      if (integ && integ.binary && integ.binary.ok === false) {
-        title += "（请先到 https://openclaw.ai/ 安装 openclaw CLI，再跑 `lampgo install-openclaw --yes`）";
-      } else {
-        title += "（请在终端运行 `lampgo install-openclaw --yes`）";
-      }
-    } else if (overall === "degraded") {
-      title += "（配置齐全，但 gateway 守护进程无响应；点我查看如何拉起）";
-    } else if (overall === "basic") {
-      title += "（只装了 openclaw CLI，缺 lampgo plugin 和 skill；硬件控制不可用）";
-    } else if (overall === "partial") {
-      title += "（plugin / skill 未完全安装，点我查看详情）";
-    } else if (needsRefresh) {
-      title += "（plugin 有更新或 token 未同步，建议 `lampgo install-openclaw --yes`）";
-    } else if (conn === "idle" && isHealthy) {
-      title += "（等待任务，按需拉起）";
-    }
-    btnOpenclawHealth.title = title;
-
-    // Auto-expand the detail card when something is wrong OR when a soft
-    // refresh is recommended. Respect manual dismissal for the same state key;
-    // re-nag when the state changes.
-    if (openclawHealthCard) {
-      let stateKey;
-      if (!isHealthy) {
-        stateKey = overall && overall !== "unknown" ? overall : conn;
-      } else if (needsRefresh) {
-        stateKey = "needs_refresh";
-      } else {
-        stateKey = "healthy";
-      }
-
-      if (isHealthy && !needsRefresh) {
-        openclawHealthDismissedKey = null;
-        if (!openclawHealthCard.classList.contains("hidden")) {
-          renderOpenclawHealthCard(result);
-        }
-      } else if (stateKey !== openclawHealthDismissedKey) {
-        renderOpenclawHealthCard(result);
-        openclawHealthCard.classList.remove("hidden");
-      } else if (!openclawHealthCard.classList.contains("hidden")) {
-        renderOpenclawHealthCard(result);
-      }
-    }
   }
 
-  function renderOpenclawHealthCard(result) {
-    if (!openclawHealthCard || !result) return;
-    const integ = result.integration || {};
-    // step 对象里多一个 level 字段："bad"=红色阻塞, "warn"=黄色建议, 默认按 ok 推导。
-    // 当 openclaw CLI 本身都没装时，plugin_freshness / plugin_token 的 warn 语气
-    // 是误导性的——这两项跟所有其它项一样根本跑不起来。把它们升级成 bad 让整张
-    // 详情卡读起来就是一面统一的红 ✗，用户不会误以为"有俩项还挺健康"。
-    const noCli = !integ.binary?.ok;
-    const softLevel = noCli ? "bad" : "warn";
-    const steps = [
-      integ.binary,
-      integ.config_file,
-      integ.skill,
-      integ.plugin,
-      integ.trusted,
-      integ.gateway,
-      integ.plugin_freshness && { ...integ.plugin_freshness, level: softLevel },
-      integ.plugin_token && { ...integ.plugin_token, level: softLevel },
-    ].filter(Boolean);
-
-    const stepHtml = steps
-      .map((s) => {
-        let cls;
-        let icon;
-        if (s.ok) {
-          cls = "is-ok";
-          icon = "✓";
-        } else if (s.level === "warn") {
-          cls = "is-warn";
-          icon = "!";
-        } else {
-          cls = "is-bad";
-          icon = "✗";
-        }
-        return (
-          `<li class="oc-health-step ${cls}">` +
-          `<span class="oc-health-step-icon">${icon}</span>` +
-          `<span><strong>${escapeHtml(s.label || "")}</strong> — ${escapeHtml(s.detail || "")}</span>` +
-          `</li>`
-        );
-      })
-      .join("");
-
-    const notesHtml = (integ.notes || []).map((n) => `<div>• ${escapeHtml(n)}</div>`).join("");
-
-    const needsInstall = !integ.plugin?.ok || !integ.skill?.ok || !integ.trusted?.ok;
-    const gatewayDown = integ.gateway && integ.gateway.ok === false;
-    const needsRefresh =
-      (integ.plugin_freshness && integ.plugin_freshness.ok === false) ||
-      (integ.plugin_token && integ.plugin_token.ok === false);
-    let hintHtml;
-    if (noCli) {
-      // openclaw CLI 自己没装的时候，`lampgo install-openclaw --yes` 必然报错，
-      // 所以要先把用户引导到官网装 CLI，再跑 lampgo 这边的一键集成。
-      hintHtml =
-        `<div class="oc-health-hint is-warn">还没安装 <code>openclaw</code> CLI，所有集成步骤都跑不起来。` +
-        `<br>1. 先访问 <a href="https://openclaw.ai/" target="_blank" rel="noopener noreferrer">https://openclaw.ai/</a> 安装 openclaw；` +
-        `<br>2. 再在终端运行 <code>uv run lampgo install-openclaw --yes</code>，把 lampgo 集成注册进去；` +
-        `<br>3. 回来点 <em>刷新</em>。` +
-        `</div>`;
-    } else if (needsInstall) {
-      hintHtml = `<div class="oc-health-hint">一键修复：在终端运行 <code>uv run lampgo install-openclaw --yes</code>，再点 <em>刷新</em>。</div>`;
-    } else if (gatewayDown) {
-      hintHtml =
-        `<div class="oc-health-hint">配置都齐了，但 OpenClaw gateway 守护进程没在响应。` +
-        `<br>在终端运行下面任一条，然后点 <em>刷新</em>：` +
-        `<br>• <code>openclaw gateway start</code>（后台常驻，推荐日常使用）` +
-        `<br>• <code>openclaw gateway restart</code>（守护进程卡死、端口却被占时用）` +
-        `<br>• <code>openclaw gateway</code>（前台运行，方便看日志排查）` +
-        `</div>`;
-    } else if (needsRefresh) {
-      // 动态地把"需要同步的 tool"和"已经同步的 tool"都列出来，避免把
-      // 具体名字硬编码在前端代码里——每次 plugin 新增/删除 tool 都得来
-      // 改这里。后端 `tool_sync` 已经算好了 source / installed 的对称差。
-      const sync = integ.tool_sync || {};
-      const missing = Array.isArray(sync.missing_in_installed) ? sync.missing_in_installed : [];
-      const extra = Array.isArray(sync.extra_in_installed) ? sync.extra_in_installed : [];
-      const installed = Array.isArray(sync.installed_tools) ? sync.installed_tools : [];
-      // Token-out-of-sync alone can trigger this branch without any tool
-      // diff — detect it so we don't tell the user "3 tools will be
-      // registered" when actually it's just a token rotation.
-      const tokenStale = integ.plugin_token && integ.plugin_token.ok === false;
-      const freshnessStale = integ.plugin_freshness && integ.plugin_freshness.ok === false;
-
-      const toolListHtml = (names) =>
-        names.map((n) => `<code>${escapeHtml(n)}</code>`).join(" / ");
-
-      const detailLines = [];
-      if (missing.length) {
-        detailLines.push(
-          `<br>• <strong>需要同步进去</strong>（${missing.length} 个）：` +
-          toolListHtml(missing),
-        );
-      }
-      if (extra.length) {
-        // Rare but worth surfacing: source removed a tool, installed
-        // still has it.  Reinstall cleans it out.
-        detailLines.push(
-          `<br>• <strong>源码已移除、插件仍残留</strong>（${extra.length} 个）：` +
-          toolListHtml(extra),
-        );
-      }
-      if (installed.length && !missing.length && !extra.length && freshnessStale) {
-        // Freshness says "source newer" but our tool diff is empty — the
-        // change must be inside existing tools' schemas/descriptions, not
-        // the tool list itself.  Be honest about that so the user doesn't
-        // wonder why "needs sync" but "0 tools missing".
-        detailLines.push(
-          `<br>• 现有 ${installed.length} 个 tool 的 schema 或描述有更新，名字没变。`,
-        );
-      }
-      if (installed.length) {
-        detailLines.push(
-          `<br>• <strong>已同步</strong>（${installed.length} 个）：` +
-          toolListHtml(installed),
-        );
-      }
-      if (tokenStale) {
-        detailLines.push(`<br>• <strong>鉴权 token</strong> 需要重新写入。`);
-      }
-
-      hintHtml =
-        `<div class="oc-health-hint is-warn">核心组件已装好，但 plugin 需要刷新一下：` +
-        `<br>在终端运行 <code>uv run lampgo install-openclaw --yes</code>，再点 <em>刷新</em>。` +
-        detailLines.join("") +
-        `</div>`;
-    } else {
-      hintHtml = `<div class="oc-health-hint">所有组件已就绪。</div>`;
-    }
-
-    openclawHealthCard.innerHTML =
-      `<div class="oc-health-card-title">` +
-      `<span>OpenClaw 集成详情</span>` +
-      `<button class="oc-health-card-close" type="button" aria-label="关闭">×</button>` +
-      `</div>` +
-      `<ul class="oc-health-steps">${stepHtml}</ul>` +
-      (notesHtml ? `<div class="oc-health-hint">${notesHtml}</div>` : "") +
-      hintHtml;
-
-    const closeBtn = openclawHealthCard.querySelector(".oc-health-card-close");
-    if (closeBtn) {
-      closeBtn.addEventListener("click", () => {
-        openclawHealthCard.classList.add("hidden");
-        openclawHealthDismissedKey = _currentUnhealthyKey();
-      });
-    }
-  }
-
-  function _currentUnhealthyKey() {
-    const r = openclawHealthLastStatus;
-    if (!r) return null;
-    const conn = r.connection || "unknown";
-    const integ = r.integration || {};
-    const overall = integ.overall || "unknown";
-    const healthy = (conn === "running" || conn === "idle") && overall === "ready";
-    if (!healthy) return overall !== "unknown" ? overall : conn;
-    const needsRefresh =
-      (integ.plugin_freshness && integ.plugin_freshness.ok === false) ||
-      (integ.plugin_token && integ.plugin_token.ok === false);
-    return needsRefresh ? "needs_refresh" : "healthy";
+  function renderCodexHealthSummary(result) {
+    if (!agentHealthCard || !result) return;
+    const rows = [
+      ["Codex CLI", result.binary_path || "未检测到"],
+      ["登录状态", result.logged_in ? "已登录" : "未登录"],
+      ["LampGo 工具", result.mcp_registered ? "已自动注册" : "等待自动注册"],
+      ["任务", `${result.running_tasks || 0} 个运行中 / ${result.total_tasks || 0} 个总计`],
+    ];
+    agentHealthCard.innerHTML =
+      `<div class="codex-health-card-title"><span>Codex 集成详情</span>` +
+      `<button class="codex-health-card-close" type="button" aria-label="关闭">×</button></div>` +
+      `<ul class="codex-health-steps">${rows.map(([label, detail]) =>
+        `<li class="codex-health-step ${result.connection === "connected" ? "is-ok" : "is-warn"}">` +
+        `<span class="codex-health-step-icon">${result.connection === "connected" ? "✓" : "!"}</span>` +
+        `<span><strong>${escapeHtml(label)}</strong> — ${escapeHtml(detail)}</span></li>`).join("")}</ul>` +
+      `<div class="codex-health-hint">${escapeHtml(result.detail || "LampGo 会自动发现并连接本机 Codex。")}</div>`;
+    const closeBtn = agentHealthCard.querySelector(".codex-health-card-close");
+    if (closeBtn) closeBtn.addEventListener("click", () => agentHealthCard.classList.add("hidden"));
   }
 
   function escapeHtml(str) {
@@ -1736,20 +1520,15 @@
       .replace(/'/g, "&#39;");
   }
 
-  if (btnOpenclawHealth) {
-    btnOpenclawHealth.addEventListener("click", () => {
-      if (!openclawHealthCard) return;
-      const hidden = openclawHealthCard.classList.toggle("hidden");
-      if (hidden) {
-        // User closed the card; remember the dismissal for this state.
-        openclawHealthDismissedKey = _currentUnhealthyKey();
-      } else {
-        if (openclawHealthLastStatus) {
-          renderOpenclawHealthCard(openclawHealthLastStatus);
+  if (btnAgentHealth) {
+    btnAgentHealth.addEventListener("click", () => {
+      if (!agentHealthCard) return;
+      const hidden = agentHealthCard.classList.toggle("hidden");
+      if (!hidden) {
+        if (agentHealthLastStatus) {
+          renderCodexHealthSummary(agentHealthLastStatus);
         }
-        // User re-opened manually; clear dismissal so later auto-shows still work.
-        openclawHealthDismissedKey = null;
-        refreshOpenclawHealth();
+        refreshAgentHealth();
       }
     });
   }
@@ -1937,6 +1716,9 @@
   window.addEventListener("focus", () => claimTtsPlaybackClient(true));
   document.addEventListener("visibilitychange", () => {
     claimTtsPlaybackClient(document.visibilityState !== "hidden");
+    if (document.visibilityState !== "hidden" && hasActiveCodexTasks()) {
+      void pollCodexTasks();
+    }
   });
 
   function connect() {
@@ -1953,7 +1735,7 @@
       ws.send(JSON.stringify({ type: "skills" }));
       ws.send(JSON.stringify({ type: "recordings" }));
       ws.send(JSON.stringify({ type: "expressions" }));
-      ws.send(JSON.stringify({ type: "openclaw_tasks" }));
+      ws.send(JSON.stringify({ type: "agent_tasks" }));
       ws.send(JSON.stringify({ type: "status" }));
       claimTtsPlaybackClient();
       // Pre-populate the Hardware settings dropdowns (camera.port /
@@ -2578,13 +2360,13 @@
       return;
     }
 
-    if (msg.ok && msg.result && msg.result.openclaw_tasks) {
-      renderOpenClawTasks(msg.result.openclaw_tasks);
+    if (msg.ok && msg.result && msg.result.agent_tasks) {
+      renderCodexTasks(msg.result.agent_tasks);
       return;
     }
 
-    if (msg.ok && msg.result && msg.result.openclaw_task) {
-      upsertOpenClawTask(msg.result.openclaw_task);
+    if (msg.ok && msg.result && msg.result.agent_task) {
+      upsertCodexTask(msg.result.agent_task);
     }
 
     if (msg.result && msg.result.status === "recording") {
@@ -2666,9 +2448,10 @@
     const evt = msg.event;
     const data = msg.data || {};
 
-    if (evt === "OpenClawTaskUpdated" && data.task) upsertOpenClawTask(data.task);
-    else if (evt === "OpenClawPromotionRequested" && data.task) upsertOpenClawTask(data.task);
-    else if (evt === "OpenClawPromotionDecision" && data.task) upsertOpenClawTask(data.task);
+    if (evt === "AgentTaskUpdated" && data.task) {
+      upsertCodexTask(data.task, data.progress || null);
+      return;
+    }
 
     if (evt === "TtsAudio" && data.audio && !lkRoom) {
       handleTtsAudio(data.audio, data.format || "mp3", data.sample_rate || data.sampleRate || 0);
@@ -2754,10 +2537,10 @@
               { label: "关键词", state: "miss" },
               { label: "LLM Agent", state: "active" },
             ]);
-          } else if (data.stage === "openclaw_handoff") {
+          } else if (data.stage === "agent_handoff") {
             setRouteTrail(log, [
               { label: "关键词", state: "miss" },
-              { label: "OpenClaw", state: "active" },
+              { label: "Codex", state: "active" },
             ]);
           } else if (data.stage === "llm_request") {
             finalizeStreamingThinking(requestId);
@@ -2785,22 +2568,6 @@
           activeAgentRequestId = null;
           btnStop.classList.add("hidden");
         }
-        break;
-      case "OpenClawTaskUpdated":
-        markLastDone(preludeEl);
-        addStep(preludeEl, `OpenClaw 状态：${formatOpenClawStatus(data.task && data.task.status)}`, "done");
-        break;
-      case "OpenClawPromotionRequested":
-        markLastDone(preludeEl);
-        addStep(preludeEl, "OpenClaw 生成了 promoted 待确认方案", "active");
-        break;
-      case "OpenClawPromotionDecision":
-        markLastDone(preludeEl);
-        addStep(
-          preludeEl,
-          data.decision === "approve" ? "已确认 promoted" : "已拒绝 promoted",
-          data.decision === "approve" ? "done" : "error"
-        );
         break;
       case "ToolCallPlanned":
         addToolChip(log, data.turn_index, data.tool_index, data.tool_name, data.arguments);
@@ -2852,7 +2619,7 @@
     if (evtName.startsWith("Safety") || evtName.startsWith("EStop")) return { cls: "evt-safety", icon: "⚠" };
     if (evtName === "AgentFinished" || evtName.startsWith("Intent")) return { cls: "evt-intent", icon: "🧠" };
     if (evtName.startsWith("ToolCall")) return { cls: "evt-tool", icon: "🔧" };
-    if (evtName.startsWith("OpenClaw")) return { cls: "evt-openclaw", icon: "⚙" };
+    if (evtName.startsWith("AgentTask") || evtName.startsWith("AgentAsk")) return { cls: "evt-agent", icon: "⚙" };
     if (evtName === "ChatMessage") return { cls: "evt-chat", icon: "💬" };
     if (evtName === "TtsAudio") return { cls: "evt-audio", icon: "🔊" };
     return { cls: "", icon: "•" };
@@ -2896,7 +2663,7 @@
       const invo = data.invocation_id ? ` (${String(data.invocation_id).slice(0, 8)})` : "";
       return `${data.skill_id || ""}${invo}${data.reason ? " · " + data.reason : ""}`;
     }
-    if (evtName.startsWith("OpenClaw")) {
+    if (evtName.startsWith("AgentTask") || evtName.startsWith("AgentAsk")) {
       const task = data.task || {};
       const status = task.status || data.status || "";
       return `${task.task_id || data.task_id || ""} · ${status}`.trim();
@@ -3021,6 +2788,13 @@
       // In normal catch-up mode we skip anything already seen; in replay mode
       // we intentionally render the window even if it's behind the cursor.
       if (!replayFromScratch && e.seq <= lastEventSeq) continue;
+      if (!replayFromScratch) {
+        try {
+          handleEvent(e);
+        } catch (err) {
+          console.warn("[events] replay handleEvent failed:", err);
+        }
+      }
       try {
         logEvent(e, { allowReplay: replayFromScratch });
       } catch (err) {
@@ -3142,7 +2916,7 @@
 
   function formatIntentResolved(data) {
     const source = formatIntentSource(data.source);
-    if (data.intent_type === "openclaw") return `${source}已接管复杂任务`;
+    if (data.intent_type === "agent" && data.source === "codex") return `${source}已接管复杂任务`;
     if (data.intent_type === "agent") return `${source}完成多步工具编排`;
     if (data.intent_type === "skill" && data.skill_id) {
       if (data.source === "keyword" && data.matched_keyword) {
@@ -3158,7 +2932,7 @@
     if (source === "keyword") return "关键词";
     if (source === "llm") return "LLM";
     if (source === "llm_web_search") return "LLM 网页搜索";
-    if (source === "openclaw") return "OpenClaw";
+    if (source === "codex") return "Codex";
     return "意图路由";
   }
 
@@ -4158,57 +3932,65 @@
     });
   });
 
-  /* ---- OpenClaw ---- */
+  /* ---- Codex ---- */
 
-  function renderOpenClawTasks(tasks) {
-    openclawTasks.clear();
+  function renderCodexTasks(tasks) {
+    const previous = new Map(agentPrevStatus);
+    agentTasks.clear();
     const list = tasks || [];
     list.forEach((task) => {
       if (task && task.task_id) {
-        openclawTasks.set(task.task_id, task);
-        openclawPrevStatus.set(task.task_id, task.status || "");
+        agentTasks.set(task.task_id, task);
+        agentPrevStatus.set(task.task_id, task.status || "");
       }
     });
-    paintOpenClawTasks();
-    list.forEach((task) => maybePostOpenClawFollowup(task, ""));
+    paintCodexTasks();
+    list.forEach((task) => {
+      updateCodexLinkCards(task);
+      renderCodexTaskProgress(task);
+      maybePostCodexFollowup(task, previous.get(task.task_id) || "");
+    });
+    syncCodexTaskPolling();
   }
 
-  function upsertOpenClawTask(task) {
+  function upsertCodexTask(task, progress = null) {
     if (!task || !task.task_id) return;
-    const prev = openclawPrevStatus.get(task.task_id) || "";
-    openclawTasks.set(task.task_id, task);
-    openclawPrevStatus.set(task.task_id, task.status || "");
-    paintOpenClawTasks();
-    maybePostOpenClawFollowup(task, prev);
+    const prev = agentPrevStatus.get(task.task_id) || "";
+    agentTasks.set(task.task_id, task);
+    agentPrevStatus.set(task.task_id, task.status || "");
+    paintCodexTasks();
+    updateCodexLinkCards(task);
+    renderCodexTaskProgress(task, progress);
+    maybePostCodexFollowup(task, prev);
+    syncCodexTaskPolling();
   }
 
-  function maybePostOpenClawFollowup(task, prevStatus) {
+  function maybePostCodexFollowup(task, prevStatus) {
     if (!task || !task.task_id) return;
-    const TERMINAL = new Set(["completed", "failed", "promoted", "rejected"]);
+    const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
     if (!TERMINAL.has(task.status)) return;
     if (prevStatus === task.status) return;
-    if (openclawFollowups.has(task.task_id)) return;
+    if (agentFollowups.has(task.task_id)) return;
 
-    openclawFollowups.add(task.task_id);
-    persistFollowupSet();
-
-    const sessionId = openclawTaskSessions.get(task.task_id) || activeSessionId;
+    const sessionId = agentTaskSessions.get(task.task_id) || activeSessionId;
     if (!sessionId) return;
 
     const detail = (task.detail || "").trim();
     let prefix = "";
-    if (task.status === "completed") prefix = "OpenClaw 已完成任务。";
-    else if (task.status === "failed") prefix = "OpenClaw 执行失败。";
-    else if (task.status === "promoted") prefix = "OpenClaw 已沉淀该能力。";
-    else if (task.status === "rejected") prefix = "已拒绝沉淀。";
+    if (task.status === "completed") prefix = "Codex 已完成任务。";
+    else if (task.status === "failed") prefix = "Codex 执行失败。";
+    else if (task.status === "cancelled") prefix = "Codex 任务已取消。";
+    else if (task.status === "interrupted") prefix = "Codex 任务被中断。";
     const body = detail ? `${prefix}\n\n${detail}` : prefix;
     const meta = {
-      openclaw_task_id: task.task_id,
-      openclaw_user_text: task.user_text || "",
-      openclaw_status: task.status || "",
+      agent_task_id: task.task_id,
+      agent_user_text: task.user_text || "",
+      agent_status: task.status || "",
     };
 
     pushMessageToSession("assistant", body, meta, { sessionId });
+    agentFollowups.add(task.task_id);
+    persistFollowupSet();
 
     if (sessionId === activeSessionId && currentView === "chat") {
       renderHistoricalAssistantBubble(body, Date.now(), meta);
@@ -4216,120 +3998,201 @@
     }
   }
 
-  function openClawStatusKey(status) {
+  function hasActiveCodexTasks() {
+    return Array.from(agentTasks.values()).some((task) =>
+      task && ["queued", "running", "cancelling"].includes(task.status)
+    );
+  }
+
+  async function pollCodexTasks() {
+    if (agentTaskPollInFlight) return;
+    agentTaskPollInFlight = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    try {
+      const resp = await fetch("/api/agent/tasks", {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!resp.ok) return;
+      const body = await resp.json();
+      const tasks = body && body.result && body.result.agent_tasks;
+      if (Array.isArray(tasks)) renderCodexTasks(tasks);
+    } catch (err) {
+      if (err && err.name !== "AbortError") console.warn("[agent] task poll failed:", err);
+    } finally {
+      window.clearTimeout(timeout);
+      agentTaskPollInFlight = false;
+    }
+  }
+
+  function syncCodexTaskPolling() {
+    if (hasActiveCodexTasks()) {
+      if (!agentTaskPollTimer) {
+        agentTaskPollTimer = window.setInterval(() => { void pollCodexTasks(); }, 2000);
+      }
+      return;
+    }
+    if (agentTaskPollTimer) {
+      window.clearInterval(agentTaskPollTimer);
+      agentTaskPollTimer = null;
+    }
+  }
+
+  function updateCodexLinkCards(task) {
+    if (!task || !task.task_id) return;
+    document.querySelectorAll(".agent-link-card").forEach((card) => {
+      if (card.dataset.taskId !== task.task_id) return;
+      const title = card.querySelector(".agent-link-title");
+      const status = card.querySelector(".agent-link-status");
+      if (title && task.user_text) title.textContent = task.user_text;
+      if (!status) return;
+      Array.from(status.classList).forEach((name) => {
+        if (name.startsWith("st-")) status.classList.remove(name);
+      });
+      status.classList.add(`st-${agentStatusKey(task.status)}`);
+      status.textContent = formatCodexStatus(task.status);
+    });
+  }
+
+  function codexTaskBubbles(taskId) {
+    const bubbles = [];
+    document.querySelectorAll(".agent-link-card").forEach((card) => {
+      if (card.dataset.taskId !== taskId) return;
+      const bubble = card.closest(".msg-assistant");
+      if (bubble && !bubbles.includes(bubble)) bubbles.push(bubble);
+    });
+    return bubbles;
+  }
+
+  function applyCodexProgress(container, progress) {
+    if (!container || !progress || !progress.summary) return;
+    const progressId = String(progress.id || `${progress.kind || "progress"}:${progress.summary}`);
+    const state = ["active", "done", "error"].includes(progress.state) ? progress.state : "active";
+    const existing = Array.from(container.querySelectorAll(".step-row[data-codex-progress-id]")).find(
+      (row) => row.dataset.codexProgressId === progressId
+    );
+    if (existing) {
+      existing.classList.remove("active", "done", "error");
+      existing.classList.add(state);
+      const icon = existing.querySelector(".step-icon");
+      const label = existing.querySelector(".step-label");
+      if (icon) icon.innerHTML = state === "active" ? '<div class="spinner"></div>' : state === "done" ? "✓" : "✕";
+      if (label) label.textContent = progress.summary;
+      return;
+    }
+    if (state === "active") {
+      container.querySelectorAll(".step-row.active[data-codex-progress-id]").forEach((row) => {
+        row.classList.remove("active");
+        row.classList.add("done");
+        const icon = row.querySelector(".step-icon");
+        if (icon) icon.textContent = "✓";
+      });
+    }
+    const row = addStep(container, progress.summary, state);
+    if (row) row.dataset.codexProgressId = progressId;
+  }
+
+  function persistCodexActivity(task, bubble) {
+    const sessionId = agentTaskSessions.get(task.task_id);
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session || !Array.isArray(session.messages)) return;
+    const message = [...session.messages].reverse().find(
+      (item) => item && item.meta && item.meta.agent_task_id === task.task_id
+    );
+    if (!message) return;
+    const html = captureActivityHtml(bubble);
+    if (html) message.meta.activity_html = html;
+    message.meta.agent_status = task.status || "";
+    persistSessions();
+  }
+
+  function renderCodexTaskProgress(task, liveProgress = null, targetBubbles = null) {
+    if (!task || !task.task_id) return;
+    const progressItems = [];
+    if (Array.isArray(task.events)) {
+      task.events.forEach((item) => {
+        if (item && item.summary) progressItems.push(item);
+      });
+    }
+    if (liveProgress && liveProgress.summary) progressItems.push(liveProgress);
+    const bubbles = targetBubbles || codexTaskBubbles(task.task_id);
+    bubbles.forEach((bubble) => {
+      const log = ensureActivityLog(bubble);
+      const prelude = log ? getPreludeArea(log) : bubble.querySelector(".steps");
+      progressItems.forEach((progress) => applyCodexProgress(prelude, progress));
+      persistCodexActivity(task, bubble);
+    });
+  }
+
+  function agentStatusKey(status) {
     if (status === "queued") return "queued";
     if (
-      status === "planning" ||
-      status === "executing" ||
-      status === "executing_with_existing_tools" ||
-      status === "generating_temporary_asset"
+      status === "running" ||
+      status === "cancelling"
     ) {
       return "running";
     }
-    if (status === "awaiting_promotion_confirmation") return "awaiting";
-    if (status === "promoted" || status === "completed") return "promoted";
-    if (status === "rejected") return "rejected";
-    if (status === "failed") return "failed";
+    if (status === "completed") return "completed";
+    if (status === "failed" || status === "cancelled" || status === "interrupted") return "failed";
     return "running";
   }
 
-  function paintOpenClawTasks() {
-    const tasks = Array.from(openclawTasks.values()).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  function paintCodexTasks() {
+    const tasks = Array.from(agentTasks.values()).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
-    const counts = { queued: 0, running: 0, awaiting: 0, promoted: 0, failed: 0 };
+    const counts = { queued: 0, running: 0, completed: 0, failed: 0 };
     tasks.forEach((t) => {
-      const k = openClawStatusKey(t.status);
+      const k = agentStatusKey(t.status);
       if (k === "rejected" || k === "failed") counts.failed += 1;
       else if (counts[k] !== undefined) counts[k] += 1;
     });
-    if (ocCountQueued) ocCountQueued.textContent = String(counts.queued);
-    if (ocCountRunning) ocCountRunning.textContent = String(counts.running);
-    if (ocCountAwaiting) ocCountAwaiting.textContent = String(counts.awaiting);
-    if (ocCountPromoted) ocCountPromoted.textContent = String(counts.promoted);
-    if (ocCountFailed) ocCountFailed.textContent = String(counts.failed);
+    if (agentCountQueued) agentCountQueued.textContent = String(counts.queued);
+    if (agentCountRunning) agentCountRunning.textContent = String(counts.running);
+    if (agentCountCompleted) agentCountCompleted.textContent = String(counts.completed);
+    if (agentCountFailed) agentCountFailed.textContent = String(counts.failed);
 
-    if (!openclawTaskList) return;
+    if (!agentTaskList) return;
     if (!tasks.length) {
-      openclawTaskList.innerHTML = '<div class="openclaw-empty">暂无复杂任务</div>';
+      agentTaskList.innerHTML = '<div class="agent-empty">暂无复杂任务</div>';
       return;
     }
-    openclawTaskList.innerHTML = tasks.map(renderOpenClawTaskCard).join("");
-    openclawTaskList.querySelectorAll("[data-confirm-task]").forEach((btn) => {
+    agentTaskList.innerHTML = tasks.map(renderCodexTaskCard).join("");
+    agentTaskList.querySelectorAll("[data-cancel-agent-task]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        confirmPromotion(btn.dataset.confirmTask, btn.dataset.proposalId, btn.dataset.decision);
+        send({ type: "cancel_agent_task", task_id: btn.dataset.cancelAgentTask, request_id: nextId() });
       });
     });
   }
 
-  function renderOpenClawTaskCard(task) {
-    const proposals = Array.isArray(task.proposals) ? task.proposals : [];
-    const statusKey = openClawStatusKey(task.status);
+  function renderCodexTaskCard(task) {
+    const statusKey = agentStatusKey(task.status);
+    const cancellable = ["queued", "running", "cancelling"].includes(task.status);
     return `
-      <div class="openclaw-task-card" data-task-id="${esc(task.task_id)}">
-        <div class="openclaw-task-head">
-          <div class="openclaw-task-title">${esc(task.user_text || task.task_id)}</div>
-          <div class="openclaw-task-status st-${esc(statusKey)}">${esc(formatOpenClawStatus(task.status))}</div>
+      <div class="agent-task-card" data-task-id="${esc(task.task_id)}">
+        <div class="agent-task-head">
+          <div class="agent-task-title">${esc(task.user_text || task.task_id)}</div>
+          <div class="agent-task-status st-${esc(statusKey)}">${esc(formatCodexStatus(task.status))}</div>
         </div>
-        <div class="openclaw-task-detail">${esc(task.detail || task.reason || "等待 OpenClaw 处理")}</div>
-        ${proposals.map((proposal) => renderProposalCard(task, proposal)).join("")}
+        <div class="agent-task-detail">${esc(task.detail || task.reason || "等待 Codex 处理")}</div>
+        ${cancellable ? `<div class="proposal-actions"><button class="proposal-btn reject" type="button" data-cancel-agent-task="${esc(task.task_id)}">停止任务</button></div>` : ""}
       </div>
     `;
   }
 
-  function renderProposalCard(task, proposal) {
-    const files = (proposal.files || []).map((file) => esc(file)).join("<br>");
-    const risks = (proposal.risks || []).map((risk) => esc(risk)).join("<br>");
-    const pending = proposal.status === "pending" && task.status === "awaiting_promotion_confirmation";
-    return `
-      <div class="proposal-card">
-        <div class="proposal-title">${esc(proposal.title || proposal.proposal_type)}</div>
-        <div class="proposal-meta">${esc(proposal.proposal_type || "proposal")} · ${esc(formatProposalStatus(proposal.status))}</div>
-        <div class="proposal-summary">${esc(proposal.summary || "")}</div>
-        ${files ? `<div class="proposal-files"><strong>涉及文件</strong><br>${files}</div>` : ""}
-        ${risks ? `<div class="proposal-risks"><strong>风险提示</strong><br>${risks}</div>` : ""}
-        ${
-          pending
-            ? `<div class="proposal-actions">
-                <button class="proposal-btn approve" type="button" data-confirm-task="${esc(task.task_id)}" data-proposal-id="${esc(proposal.proposal_id)}" data-decision="approve">确认沉淀</button>
-                <button class="proposal-btn reject" type="button" data-confirm-task="${esc(task.task_id)}" data-proposal-id="${esc(proposal.proposal_id)}" data-decision="reject">暂不沉淀</button>
-              </div>`
-            : ""
-        }
-      </div>
-    `;
-  }
-
-  function confirmPromotion(taskId, proposalId, decision) {
-    send({
-      type: "confirm_promotion",
-      task_id: taskId,
-      proposal_id: proposalId,
-      decision,
-      request_id: nextId(),
-    });
-  }
-
-  function formatOpenClawStatus(status) {
+  function formatCodexStatus(status) {
     switch (status) {
       case "queued": return "排队中";
-      case "planning": return "规划中";
-      case "executing": return "执行中";
-      case "executing_with_existing_tools": return "执行中";
-      case "generating_temporary_asset": return "生成 temporary";
-      case "awaiting_promotion_confirmation": return "等待确认";
-      case "promoted": return "已 promoted";
+      case "running": return "执行中";
+      case "cancelling": return "停止中";
       case "completed": return "已完成";
-      case "rejected": return "已拒绝";
+      case "cancelled": return "已取消";
+      case "interrupted": return "已中断";
       case "failed": return "失败";
       default: return status || "--";
     }
   }
 
-  function formatProposalStatus(status) {
-    if (status === "approved") return "已确认";
-    if (status === "rejected") return "已拒绝";
-    return "待确认";
-  }
 
   /* ---- Invoke actions ---- */
 
@@ -4757,11 +4620,11 @@
     if (bubble && meta && meta.activity_html) {
       rehydrateActivityLog(bubble, meta.activity_html);
     }
-    if (bubble && meta && meta.openclaw_task_id) {
-      appendOpenClawLinkCard(bubble, {
-        task_id: meta.openclaw_task_id,
-        user_text: meta.openclaw_user_text || "",
-        status: meta.openclaw_status || "",
+    if (bubble && meta && meta.agent_task_id) {
+      appendCodexLinkCard(bubble, {
+        task_id: meta.agent_task_id,
+        user_text: meta.agent_user_text || "",
+        status: meta.agent_status || "",
       });
     }
     if (bubble && meta && meta.pending && meta.requestId) {
@@ -4778,37 +4641,38 @@
     }
   }
 
-  function appendOpenClawLinkCard(bubble, task) {
+  function appendCodexLinkCard(bubble, task) {
     if (!bubble || !task || !task.task_id) return;
     const responseText = bubble.querySelector(".response-text") || bubble;
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "openclaw-link-card";
+    card.className = "agent-link-card";
     card.dataset.taskId = task.task_id;
-    const latest = openclawTasks.get(task.task_id) || task;
+    const latest = agentTasks.get(task.task_id) || task;
     const status = latest.status || task.status || "";
-    const title = latest.user_text || task.user_text || "OpenClaw 任务";
-    const statusLabel = status ? formatOpenClawStatus(status) : "查看详情";
-    const statusKey = status ? openClawStatusKey(status) : "running";
+    const title = latest.user_text || task.user_text || "Codex 任务";
+    const statusLabel = status ? formatCodexStatus(status) : "查看详情";
+    const statusKey = status ? agentStatusKey(status) : "running";
     card.innerHTML = `
-      <span class="openclaw-link-icon" aria-hidden="true">
+      <span class="agent-link-icon" aria-hidden="true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
       </span>
-      <span class="openclaw-link-body">
-        <span class="openclaw-link-title">${esc(title)}</span>
-        <span class="openclaw-link-meta">在 OpenClaw 页面查看详情</span>
+      <span class="agent-link-body">
+        <span class="agent-link-title">${esc(title)}</span>
+        <span class="agent-link-meta">在任务页查看详情</span>
       </span>
-      <span class="openclaw-link-status st-${esc(statusKey)}">${esc(statusLabel)}</span>
+      <span class="agent-link-status st-${esc(statusKey)}">${esc(statusLabel)}</span>
     `;
-    card.addEventListener("click", () => jumpToOpenClawTask(task.task_id));
+    card.addEventListener("click", () => jumpToCodexTask(task.task_id));
     responseText.appendChild(card);
+    renderCodexTaskProgress(latest, null, [bubble]);
   }
 
-  function jumpToOpenClawTask(taskId) {
-    showView("openclaw");
+  function jumpToCodexTask(taskId) {
+    showView("agent");
     setTimeout(() => {
-      if (!openclawTaskList || !taskId) return;
-      const el = openclawTaskList.querySelector(`[data-task-id="${CSS.escape(taskId)}"]`);
+      if (!agentTaskList || !taskId) return;
+      const el = agentTaskList.querySelector(`[data-task-id="${CSS.escape(taskId)}"]`);
       if (!el) return;
       el.scrollIntoView({ behavior: "smooth", block: "center" });
       el.classList.add("is-flash");
@@ -4942,13 +4806,15 @@
     }
 
     const result = msg.result || {};
-    const ocTask = result.openclaw_task;
+    const ocTask = result.agent_task;
     const isCallBubble = bubble.dataset.callView === "true";
     const text = assistantDisplayTextFromResult(result, { preferSpoken: isCallBubble });
 
     if (ocTask && ocTask.task_id) {
-      appendOpenClawLinkCard(bubble, ocTask);
-      rememberOpenClawTaskSession(ocTask.task_id, activeSessionId);
+      rememberCodexTaskSession(ocTask.task_id, activeSessionId);
+      appendCodexLinkCard(bubble, ocTask);
+      const latestTask = agentTasks.get(ocTask.task_id);
+      if (latestTask) maybePostCodexFollowup(latestTask, "");
     }
 
     if (!msg.ok && msg.error) {
@@ -4990,9 +4856,9 @@
         if (isPreempted) meta.preempted = true;
         if (result.end_conversation) meta.end_conversation = true;
         if (ocTask) {
-          meta.openclaw_task_id = ocTask.task_id;
-          meta.openclaw_user_text = ocTask.user_text || "";
-          meta.openclaw_status = ocTask.status || "";
+          meta.agent_task_id = ocTask.task_id;
+          meta.agent_user_text = ocTask.user_text || "";
+          meta.agent_status = ocTask.status || "";
         }
         const activityHtml = captureActivityHtml(bubble);
         if (activityHtml) meta.activity_html = activityHtml;
@@ -5019,9 +4885,9 @@
         const meta = pushed.entry.meta || (pushed.entry.meta = {});
         if (text) pushed.entry.text = text;
         if (ocTask) {
-          meta.openclaw_task_id = ocTask.task_id;
-          meta.openclaw_user_text = ocTask.user_text || "";
-          meta.openclaw_status = ocTask.status || "";
+          meta.agent_task_id = ocTask.task_id;
+          meta.agent_user_text = ocTask.user_text || "";
+          meta.agent_status = ocTask.status || "";
         }
         const activityHtml = captureActivityHtml(bubble);
         if (activityHtml) meta.activity_html = activityHtml;
@@ -5035,9 +4901,9 @@
       } else if (text) {
         const meta = {};
         if (ocTask) {
-          meta.openclaw_task_id = ocTask.task_id;
-          meta.openclaw_user_text = ocTask.user_text || "";
-          meta.openclaw_status = ocTask.status || "";
+          meta.agent_task_id = ocTask.task_id;
+          meta.agent_user_text = ocTask.user_text || "";
+          meta.agent_status = ocTask.status || "";
         }
         const activityHtml = captureActivityHtml(bubble);
         if (activityHtml) meta.activity_html = activityHtml;
@@ -5462,16 +5328,16 @@
         { label: `技能：${data.skill_id || ""}`.trim(), state: "done" },
       ];
     }
+    if (type === "agent" && source === "codex") {
+      return [
+        { label: "关键词", state: "miss" },
+        { label: "Codex", state: "done" },
+      ];
+    }
     if (type === "agent") {
       return [
         { label: "关键词", state: "miss" },
         { label: "LLM Agent", state: "done" },
-      ];
-    }
-    if (type === "openclaw") {
-      return [
-        { label: "关键词", state: "miss" },
-        { label: "OpenClaw", state: "done" },
       ];
     }
     if (type === "chat") {
@@ -5499,7 +5365,7 @@
     const cancelled = !!(opts && opts.cancelled);
     // 兜底：把 .route-trail 里残留的 is-active 节点降级。
     // 正常链路里 IntentResolved 会调 setRouteTrail(buildResolvedTrail(...)) 完成降级，
-    // 但某些分支（错误退出 / OpenClaw handoff 中断 / IntentResolved 丢失）拿不到这个事件，
+    // 但某些分支（错误退出 / Codex handoff 中断 / IntentResolved 丢失）拿不到这个事件，
     // 结果 .route-node.is-active 的 route-pulse 动画会在对话结束后继续闪。
     // 如果对话是被抢占或用户手动停止的，节点降级为 is-cancelled（灰色 ✕，表示未完成）；
     // 否则视为已成功收尾，降级为 is-done（绿色 ✓）。
@@ -5563,9 +5429,10 @@
     if (state === "done") icon = "✓";
     else if (state === "active") icon = '<div class="spinner"></div>';
     else if (state === "error") icon = "✕";
-    row.innerHTML = `<span class="step-icon">${icon}</span><span>${esc(text)}</span>`;
+    row.innerHTML = `<span class="step-icon">${icon}</span><span class="step-label">${esc(text)}</span>`;
     container.appendChild(row);
     scrollChat();
+    return row;
   }
 
   function markAllActiveDone(container) {
@@ -6807,11 +6674,11 @@
     if (bubble && meta && meta.activity_html) {
       rehydrateActivityLog(bubble, meta.activity_html);
     }
-    if (bubble && meta && meta.openclaw_task_id) {
-      appendOpenClawLinkCard(bubble, {
-        task_id: meta.openclaw_task_id,
-        user_text: meta.openclaw_user_text || "",
-        status: meta.openclaw_status || "",
+    if (bubble && meta && meta.agent_task_id) {
+      appendCodexLinkCard(bubble, {
+        task_id: meta.agent_task_id,
+        user_text: meta.agent_user_text || "",
+        status: meta.agent_status || "",
       });
     }
     if (bubble && meta && meta.preempted) {
@@ -6992,26 +6859,26 @@
     });
   }
 
-  if (btnRefreshOpenclaw) {
-    btnRefreshOpenclaw.addEventListener("click", async () => {
-      if (btnRefreshOpenclaw.classList.contains("is-loading")) return;
-      btnRefreshOpenclaw.classList.add("is-loading");
-      btnRefreshOpenclaw.disabled = true;
-      if (openclawHealthCard) openclawHealthCard.classList.add("is-refreshing");
-      if (openclawTaskList) openclawTaskList.classList.add("is-refreshing");
-      send({ type: "openclaw_tasks" });
+  if (btnRefreshAgent) {
+    btnRefreshAgent.addEventListener("click", async () => {
+      if (btnRefreshAgent.classList.contains("is-loading")) return;
+      btnRefreshAgent.classList.add("is-loading");
+      btnRefreshAgent.disabled = true;
+      if (agentHealthCard) agentHealthCard.classList.add("is-refreshing");
+      if (agentTaskList) agentTaskList.classList.add("is-refreshing");
+      send({ type: "agent_tasks" });
       try {
         // Keep a minimum visible spin so the user gets feedback even when the
         // server answers in <50ms.
         await Promise.all([
-          refreshOpenclawHealth(),
+          refreshAgentHealth(),
           new Promise((r) => setTimeout(r, 450)),
         ]);
       } finally {
-        btnRefreshOpenclaw.classList.remove("is-loading");
-        btnRefreshOpenclaw.disabled = false;
-        if (openclawHealthCard) openclawHealthCard.classList.remove("is-refreshing");
-        if (openclawTaskList) openclawTaskList.classList.remove("is-refreshing");
+        btnRefreshAgent.classList.remove("is-loading");
+        btnRefreshAgent.disabled = false;
+        if (agentHealthCard) agentHealthCard.classList.remove("is-refreshing");
+        if (agentTaskList) agentTaskList.classList.remove("is-refreshing");
       }
     });
   }
@@ -8096,7 +7963,7 @@
     const timeoutEl = document.getElementById("cfg-llm-timeout");
     const historyEl = document.getElementById("cfg-llm-history-turns");
     const thinkingEl = document.getElementById("cfg-llm-enable-thinking");
-    const shareEl = document.getElementById("cfg-share-openclaw-memory");
+    const shareEl = document.getElementById("cfg-share-codex-memory");
     const status = document.getElementById("cfg-llm-status");
     setSettingsStatus(status, "加载中…");
     try {
@@ -8143,7 +8010,7 @@
         historyEl.value = String(result.history_turns);
       }
       if (thinkingEl) thinkingEl.checked = !!result.enable_thinking;
-      if (shareEl) shareEl.checked = !!result.share_openclaw_memory;
+      if (shareEl) shareEl.checked = !!result.share_codex_memory;
       if (provEl && provEl.value !== "custom") {
         applyProviderPreset(provEl.value, { source: "load" });
       }
@@ -8167,7 +8034,7 @@
     const timeoutEl = document.getElementById("cfg-llm-timeout");
     const historyEl = document.getElementById("cfg-llm-history-turns");
     const thinkingEl = document.getElementById("cfg-llm-enable-thinking");
-    const shareEl = document.getElementById("cfg-share-openclaw-memory");
+    const shareEl = document.getElementById("cfg-share-codex-memory");
     const status = document.getElementById("cfg-llm-status");
     const btnSave = document.getElementById("btn-cfg-llm-save");
     const btnTest = document.getElementById("btn-cfg-llm-test");
@@ -8211,7 +8078,7 @@
           })()
         : null,
       enable_thinking: thinkingEl ? !!thinkingEl.checked : false,
-      share_openclaw_memory: shareEl ? shareEl.checked : undefined,
+      share_codex_memory: shareEl ? shareEl.checked : undefined,
       web_search_enabled: useMimoWebSearch,
     };
     setSettingsStatus(status, validate ? "正在测试连接…" : "保存中…");
@@ -8368,17 +8235,17 @@
     }
   }
 
-  async function importPersonaFromOpenclaw() {
+  async function importPersonaFromAgent() {
     const status = document.getElementById("persona-editor-status");
     if (!confirm(
-      "只从 OpenClaw 导入 PROFILE.md（关于主人的信息）。\n" +
+      "只从 Codex 导入 PROFILE.md（关于主人的信息）。\n" +
       "SOUL.md / AGENTS.md 保留 lampgo 自己的台灯身份不被覆盖。\n" +
       "记忆文件请在「记忆」页单独导入。\n" +
       "原文件会先备份到 ~/.lampgo/.backups/。确定？"
     )) return;
-    setSettingsStatus(status, "正在从 OpenClaw 导入…");
+    setSettingsStatus(status, "正在从 Codex 导入…");
     try {
-      const result = await fetchJson("/api/persona/import-openclaw", {
+      const result = await fetchJson("/api/persona/import-agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ which: "safe" }),
@@ -8397,17 +8264,17 @@
     }
   }
 
-  async function importMemoryCoreFromOpenclaw() {
+  async function importMemoryCoreFromAgent() {
     const status = document.getElementById("memory-core-status");
     if (!confirm(
-      "从 ~/.openclaw/MEMORY.md 拷过来，覆盖当前 lampgo 核心记忆。\n" +
+      "从 ~/.agent/MEMORY.md 拷过来，覆盖当前 lampgo 核心记忆。\n" +
       "原文件会先备份到 ~/.lampgo/.backups/。确定？"
     )) return;
-    setSettingsStatus(status, "正在从 OpenClaw 导入…");
+    setSettingsStatus(status, "正在从 Codex 导入…");
     try {
       const result = await fetchJson("/api/memory/core/import", { method: "POST" });
       const parts = [];
-      parts.push("已导入 OpenClaw 记忆");
+      parts.push("已导入 Codex 记忆");
       if (result.source) parts.push(`源：${result.source}`);
       if (result.backup) parts.push(`已备份 → ${result.backup}`);
       setSettingsStatus(status, parts.join("；"), "ok");
@@ -8643,7 +8510,7 @@
     const btnPersonaImport = document.getElementById("btn-persona-import");
     if (btnPersonaImport && !btnPersonaImport._bound) {
       btnPersonaImport._bound = true;
-      btnPersonaImport.addEventListener("click", importPersonaFromOpenclaw);
+      btnPersonaImport.addEventListener("click", importPersonaFromAgent);
     }
     const btnPersonaReset = document.getElementById("btn-persona-reset");
     if (btnPersonaReset && !btnPersonaReset._bound) {
@@ -8684,7 +8551,7 @@
     const btnMemCoreImport = document.getElementById("btn-memory-core-import");
     if (btnMemCoreImport && !btnMemCoreImport._bound) {
       btnMemCoreImport._bound = true;
-      btnMemCoreImport.addEventListener("click", importMemoryCoreFromOpenclaw);
+      btnMemCoreImport.addEventListener("click", importMemoryCoreFromAgent);
     }
     const btnMemCoreReload = document.getElementById("btn-memory-core-reload");
     if (btnMemCoreReload && !btnMemCoreReload._bound) {
@@ -8701,7 +8568,7 @@
       btnMemDailySummarizeNow._bound = true;
       btnMemDailySummarizeNow.addEventListener("click", () => summarizeActiveSessionNow());
     }
-    const shareEl = document.getElementById("cfg-share-openclaw-memory");
+    const shareEl = document.getElementById("cfg-share-codex-memory");
     if (shareEl && !shareEl._bound) {
       shareEl._bound = true;
       shareEl.addEventListener("change", () => {
@@ -8709,7 +8576,7 @@
         fetch("/api/config/llm", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ validate: false, share_openclaw_memory: shareEl.checked }),
+          body: JSON.stringify({ validate: false, share_codex_memory: shareEl.checked }),
         }).catch(() => {});
       });
     }
@@ -8774,7 +8641,7 @@
 
   function refreshSettingsData() {
     // Re-pull from disk every time. Persona / memory files can be modified
-    // out-of-band (OpenClaw plugin tools, manual edits, summarizer), so the
+    // out-of-band (Codex plugin tools, manual edits, summarizer), so the
     // local in-memory cache must not be trusted across view re-entries.
     Promise.all([
       loadLlmConfig(),

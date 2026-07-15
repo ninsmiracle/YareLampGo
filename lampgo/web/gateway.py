@@ -75,7 +75,7 @@ _AUTH_COOKIE_NAME = "lampgo_auth"
 _AUTH_COOKIE_MAX_AGE = 12 * 60 * 60
 _PROTECTED_HTTP_PREFIXES = ("/api/", "/v1/")
 _SAFE_CORS_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-_SAFE_CORS_HEADERS = ["Authorization", "Content-Type", "X-Lampgo-Plugin-Token", "X-Requested-With"]
+_SAFE_CORS_HEADERS = ["Authorization", "Content-Type", "X-Lampgo-Token", "X-Requested-With"]
 _LOCAL_LLM_COMPAT_TOKEN = "lampgo-local"
 _SENSITIVE_CONFIG_FIELDS = frozenset(
     {
@@ -228,12 +228,12 @@ class WebGateway:
             Route("/api/device/expression-capabilities", self.api_expression_capabilities, methods=["GET"]),
             Route("/api/camera/snap", self.api_camera_snap),
             Route("/api/sensor/context", self.api_sensor_context),
-            Route("/api/openclaw/ask", self.api_openclaw_ask, methods=["POST"]),
-            Route("/api/openclaw/ask/reply", self.api_openclaw_ask_reply, methods=["POST"]),
-            Route("/api/openclaw/callback", self.api_openclaw_callback, methods=["POST"]),
-            Route("/api/openclaw/tasks", self.api_openclaw_tasks),
-            Route("/api/openclaw/tasks/{task_id:str}/confirm", self.api_openclaw_confirm, methods=["POST"]),
-            Route("/api/openclaw/health", self.api_openclaw_health),
+            Route("/api/agent/ask", self.api_agent_ask, methods=["POST"]),
+            Route("/api/agent/ask/reply", self.api_agent_ask_reply, methods=["POST"]),
+            Route("/api/agent/callback", self.api_agent_callback, methods=["POST"]),
+            Route("/api/agent/tasks", self.api_agent_tasks),
+            Route("/api/agent/tasks/{task_id:str}/cancel", self.api_agent_cancel, methods=["POST"]),
+            Route("/api/agent/health", self.api_agent_health),
             Route("/api/livekit/token", self.api_livekit_token, methods=["POST"]),
             Route("/api/livekit/room/end", self.api_livekit_room_end, methods=["POST"]),
             Route("/api/cancel", self.api_cancel, methods=["POST"]),
@@ -268,15 +268,12 @@ class WebGateway:
             Route("/api/device/capture-audio/cancel", self.api_esp32_capture_cancel, methods=["POST"]),
             WebSocketRoute("/api/device/speaker", self.ws_esp32_speaker),
             Route("/api/persona", self.api_persona_all, methods=["GET"]),
-            Route("/api/persona/import-openclaw", self.api_persona_import, methods=["POST"]),
             Route("/api/persona/reset", self.api_persona_reset, methods=["POST"]),
             Route("/api/persona/{name:str}", self.api_persona_single, methods=["GET", "PUT"]),
             Route("/api/memory/core", self.api_memory_core, methods=["GET", "PUT"]),
             Route("/api/memory/core/reset", self.api_memory_core_reset, methods=["POST"]),
-            Route("/api/memory/core/import", self.api_memory_core_import, methods=["POST"]),
             Route("/api/memory/daily", self.api_memory_daily, methods=["GET", "POST"]),
             Route("/api/memory/summarize", self.api_memory_summarize, methods=["POST"]),
-            Route("/api/memory/openclaw", self.api_memory_openclaw, methods=["GET"]),
             Route("/api/debug/system-prompt", self.api_debug_system_prompt, methods=["GET"]),
             # ---- server-side persistent cache for chat sessions ----
             Route("/api/sessions", self.api_sessions, methods=["GET", "PUT", "DELETE"]),
@@ -408,7 +405,7 @@ class WebGateway:
     def _expected_auth_token(self) -> str:
         from lampgo import personastore
 
-        return personastore.get_or_create_plugin_token()
+        return personastore.get_or_create_local_api_token()
 
     @staticmethod
     def _bearer_token(value: str | None) -> str:
@@ -423,7 +420,7 @@ class WebGateway:
     def _request_token_candidates(self, request: Request) -> list[str]:
         return [
             self._bearer_token(request.headers.get("authorization")),
-            str(request.headers.get("x-lampgo-plugin-token") or "").strip(),
+            str(request.headers.get("x-lampgo-token") or "").strip(),
             str(request.cookies.get(_AUTH_COOKIE_NAME) or "").strip(),
         ]
 
@@ -629,8 +626,8 @@ class WebGateway:
         Body: ``{"definition": {...}, "overwrite": true}``
 
         Thin pass-through to ``Server._handle_skills_save`` — all the validation
-        / persistence / live-registration happens there so OpenClaw (going via
-        IPC) and the Web UI (going via HTTP) exercise the exact same path.
+        / persistence / live-registration happens there so Codex (through MCP)
+        and the Web UI exercise the exact same path.
         """
         body = await request.json()
         result = self.server._handle_skills_save(body)
@@ -1099,7 +1096,7 @@ class WebGateway:
             }
         )
 
-    async def api_openclaw_ask(self, request: Request) -> JSONResponse:
+    async def api_agent_ask(self, request: Request) -> JSONResponse:
         body = await request.json()
         question = str(body.get("question", "")).strip()
         if not question:
@@ -1110,7 +1107,7 @@ class WebGateway:
         options = [str(item) for item in options if str(item).strip()]
         request_id = str(body.get("request_id", "")).strip()
         timeout_s = float(body.get("timeout_s", 120.0))
-        result = await self.server.openclaw_ask_user(
+        result = await self.server.agent_ask_user(
             question=question,
             options=options,
             request_id=request_id,
@@ -1118,67 +1115,33 @@ class WebGateway:
         )
         return JSONResponse({"ok": True, "result": result})
 
-    async def api_openclaw_ask_reply(self, request: Request) -> JSONResponse:
+    async def api_agent_ask_reply(self, request: Request) -> JSONResponse:
         body = await request.json()
         ask_id = str(body.get("ask_id", "")).strip()
         reply = str(body.get("reply", "")).strip()
         request_id = str(body.get("request_id", "")).strip()
         if not ask_id or not reply:
             return JSONResponse({"ok": False, "error": "ask_id_and_reply_required"}, status_code=400)
-        ok = await self.server.openclaw_reply_user(ask_id=ask_id, reply=reply, request_id=request_id)
+        ok = await self.server.agent_reply_user(ask_id=ask_id, reply=reply, request_id=request_id)
         return JSONResponse({"ok": ok, "result": {"accepted": ok}})
 
-    async def api_openclaw_callback(self, request: Request) -> JSONResponse:
+    async def api_agent_callback(self, request: Request) -> JSONResponse:
         body = await request.json()
-        # Free-form status payload from the OpenClaw plugin.
+        # Free-form status payload from an external agent provider.
         status = body.get("status")
         detail = body.get("detail")
         request_id = str(body.get("request_id", "")).strip()
         if status:
             await self.server.events.publish(
-                ChatMessage(role="assistant", content=f"[OpenClaw] {status}: {detail or ''}".strip(), request_id=request_id)
+                ChatMessage(role="assistant", content=f"[Codex] {status}: {detail or ''}".strip(), request_id=request_id)
             )
         return JSONResponse({"ok": True, "result": {"accepted": True}})
 
-    async def api_openclaw_tasks(self, request: Request) -> JSONResponse:
-        return JSONResponse({"ok": True, "result": {"openclaw_tasks": self.server.openclaw.list_tasks()}})
+    async def api_agent_tasks(self, request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "result": {"agent_tasks": self.server.agent.list_tasks()}})
 
-    async def api_openclaw_health(self, request: Request) -> JSONResponse:
-        from lampgo.bridge.openclaw_installer import detect_openclaw_integration
-
-        status = detect_openclaw_integration()
-        tasks = self.server.openclaw.list_tasks()
-        running_statuses = {
-            "queued",
-            "planning",
-            "executing",
-            "executing_after_promotion",
-            "executing_with_existing_tools",
-            "awaiting_confirmation",
-        }
-        running = sum(1 for t in tasks if str(t.get("status", "")) in running_statuses)
-
-        if not status.binary.ok or status.overall == "missing":
-            connection = "not_installed"
-        elif status.overall == "degraded":
-            connection = "degraded"
-        elif running > 0:
-            connection = "running"
-        else:
-            connection = "idle"
-
-        return JSONResponse(
-            {
-                "ok": True,
-                "result": {
-                    "connection": connection,
-                    "integration": status.as_dict(),
-                    "gateway_running": bool(status.gateway.ok),
-                    "running_tasks": running,
-                    "total_tasks": len(tasks),
-                },
-            }
-        )
+    async def api_agent_health(self, request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "result": await self.server.agent.refresh_health()})
 
     async def api_livekit_token(self, request: Request) -> JSONResponse:
         """Proxy token requests to the managed Lampgo LiveKit Agent SDK."""
@@ -1404,18 +1367,12 @@ class WebGateway:
         )
         return []
 
-    async def api_openclaw_confirm(self, request: Request) -> JSONResponse:
-        body = await request.json()
+    async def api_agent_cancel(self, request: Request) -> JSONResponse:
         task_id = request.path_params["task_id"]
-        proposal_id = str(body.get("proposal_id", "")).strip()
-        decision = str(body.get("decision", "")).strip()
-        if not proposal_id or decision not in {"approve", "reject"}:
-            return JSONResponse({"ok": False, "error": "proposal_id and decision are required"}, status_code=400)
-        try:
-            task = await self.server.openclaw.confirm_promotion(task_id, proposal_id, decision)
-        except KeyError:
-            return JSONResponse({"ok": False, "error": "task or proposal not found"}, status_code=404)
-        return JSONResponse({"ok": True, "result": {"openclaw_task": task}})
+        ok = await self.server.agent.cancel_task(task_id)
+        if not ok:
+            return JSONResponse({"ok": False, "error": "task not found or already stopped"}, status_code=404)
+        return JSONResponse({"ok": True, "result": {"agent_task": self.server.agent.get_task(task_id)}})
 
     # ---- user-editable config / persona / memory ----
 
@@ -1944,7 +1901,7 @@ class WebGateway:
             provider = str(LLMConfig.normalize_provider_alias(cfg.provider) or "")
             overrides = personastore.get_overrides_toml()
             message_type = ((overrides.get("llm") or {}).get("message_type") if isinstance(overrides, dict) else None) or "openai"
-            share_memory = bool(getattr(self.server.config, "share_openclaw_memory", True))
+            share_memory = bool(getattr(self.server.config, "share_codex_memory", True))
             return JSONResponse(
                 {
                     "ok": True,
@@ -1963,7 +1920,7 @@ class WebGateway:
                         "timeout_s": cfg.timeout_s,
                         "history_turns": cfg.history_turns,
                         "enable_thinking": bool(cfg.enable_thinking),
-                        "share_openclaw_memory": share_memory,
+                        "share_codex_memory": share_memory,
                         "provider_presets": self._PROVIDER_PRESETS,
                         # MiMo web search sub-service (see LLMConfig docstring).
                         "web_search_enabled": bool(cfg.web_search_enabled),
@@ -1980,8 +1937,8 @@ class WebGateway:
             )
 
         body = await request.json()
-        # Quick path: caller only toggles share_openclaw_memory.
-        if "share_openclaw_memory" in body and not any(
+        # Quick path: caller only toggles Codex summary sharing.
+        if "share_codex_memory" in body and not any(
             k in body
             for k in (
                 "provider",
@@ -2009,11 +1966,11 @@ class WebGateway:
         ):
             from lampgo import personastore
 
-            share = bool(body.get("share_openclaw_memory"))
-            personastore.patch_overrides_toml({"share_openclaw_memory": share})
-            self.server.config.share_openclaw_memory = share
+            share = bool(body.get("share_codex_memory"))
+            personastore.patch_overrides_toml({"share_codex_memory": share})
+            self.server.config.share_codex_memory = share
             self._invalidate_persona_cache()
-            return JSONResponse({"ok": True, "result": {"share_openclaw_memory": share}})
+            return JSONResponse({"ok": True, "result": {"share_codex_memory": share}})
 
         validate = bool(body.get("validate", True))
         dry_run = bool(body.get("dry_run", False))
@@ -2033,7 +1990,7 @@ class WebGateway:
         model = str(body.get("model") or "").strip() or current_llm.model
         fast_model = str(body.get("fast_model") or "").strip() or (model if "model" in body else current_llm.fast_model)
         message_type = str(body.get("message_type") or "").strip() or (current_llm.message_type or "openai")
-        share_memory = body.get("share_openclaw_memory")
+        share_memory = body.get("share_codex_memory")
 
         def _coerce_positive_int(raw: Any, fallback: int) -> int:
             if raw is None or raw == "":
@@ -2188,7 +2145,7 @@ class WebGateway:
             },
         }
         if share_memory is not None:
-            patch["share_openclaw_memory"] = bool(share_memory)
+            patch["share_codex_memory"] = bool(share_memory)
         personastore.patch_overrides_toml(patch)
         logger.info(
             "web.config_saved",
@@ -2241,7 +2198,7 @@ class WebGateway:
         cfg.llm.web_search_city = ws_city
         cfg.llm.web_search_api_key = effective_ws_key
         if share_memory is not None:
-            cfg.share_openclaw_memory = bool(share_memory)
+            cfg.share_codex_memory = bool(share_memory)
 
         try:
             self.server.reload_llm_client()
@@ -2283,7 +2240,7 @@ class WebGateway:
                     "web_search_city": ws_city,
                     "web_search_api_key_preview": personastore.mask_api_key(effective_ws_key),
                     "web_search_api_key_is_set": bool(effective_ws_key),
-                    "share_openclaw_memory": bool(cfg.share_openclaw_memory),
+                    "share_codex_memory": bool(cfg.share_codex_memory),
                     "hot_reloaded": True,
                 },
             }
@@ -3141,8 +3098,8 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": f"unknown persona: {name}"}, status_code=404)
         if request.method == "GET":
             return JSONResponse({"ok": True, "result": {"name": name, "content": personastore.read_persona(name)}})
-        if not self._check_plugin_token(request):
-            return JSONResponse({"ok": False, "error": "invalid plugin token"}, status_code=403)
+        if not self._check_auth_token(request):
+            return JSONResponse({"ok": False, "error": "invalid local token"}, status_code=403)
         body = await request.json()
         content = body.get("content", "")
         if not isinstance(content, str):
@@ -3150,15 +3107,6 @@ class WebGateway:
         personastore.write_persona(name, content)
         self._invalidate_persona_cache()
         return JSONResponse({"ok": True, "result": {"name": name, "bytes": len(content.encode("utf-8"))}})
-
-    async def api_persona_import(self, request: Request) -> JSONResponse:
-        from lampgo import personastore
-
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        which = body.get("which", "safe")
-        report = personastore.import_persona_from_openclaw(which)
-        self._invalidate_persona_cache()
-        return JSONResponse({"ok": True, "result": report})
 
     async def api_persona_reset(self, request: Request) -> JSONResponse:
         from lampgo import personastore
@@ -3197,20 +3145,6 @@ class WebGateway:
         self._invalidate_persona_cache()
         return JSONResponse({"ok": True, "result": report})
 
-    async def api_memory_core_import(self, request: Request) -> JSONResponse:
-        from lampgo import personastore
-
-        report = personastore.import_memory_core_from_openclaw()
-        if not report.get("source"):
-            return JSONResponse(
-                {"ok": False, "error": "OpenClaw 里没有找到 MEMORY.md（~/.openclaw/MEMORY.md 或 ~/.openclaw/workspace/MEMORY.md）"},
-                status_code=404,
-            )
-        if not report.get("imported"):
-            return JSONResponse({"ok": False, "error": "导入失败，请查看日志"}, status_code=500)
-        self._invalidate_persona_cache()
-        return JSONResponse({"ok": True, "result": report})
-
     async def api_memory_daily(self, request: Request) -> JSONResponse:
         from lampgo import personastore
 
@@ -3239,8 +3173,8 @@ class WebGateway:
                     },
                 }
             )
-        if not self._check_plugin_token(request):
-            return JSONResponse({"ok": False, "error": "invalid plugin token"}, status_code=403)
+        if not self._check_auth_token(request):
+            return JSONResponse({"ok": False, "error": "invalid local token"}, status_code=403)
         body = await request.json()
         bullets = body.get("bullets") or []
         if isinstance(bullets, str):
@@ -3390,11 +3324,6 @@ class WebGateway:
             )
         return bullets[:3]
 
-    async def api_memory_openclaw(self, request: Request) -> JSONResponse:
-        from lampgo import personastore
-
-        return JSONResponse({"ok": True, "result": personastore.openclaw_memory_preview()})
-
     async def api_debug_system_prompt(self, request: Request) -> JSONResponse:
         """Render the system prompt that would currently be sent to the LLM.
 
@@ -3526,7 +3455,7 @@ class WebGateway:
         result = eventstore.get_store().replay(since=since, limit=limit)
         return JSONResponse({"ok": True, "result": result})
 
-    def _check_plugin_token(self, request: Request) -> bool:
+    def _check_auth_token(self, request: Request) -> bool:
         """Validate a privileged write request against the gateway token."""
         return self._is_request_authorized(request)
 
@@ -3550,7 +3479,7 @@ class WebGateway:
     def _websocket_token_candidates(self, ws: WebSocket) -> list[str]:
         return [
             self._bearer_token(ws.headers.get("authorization")),
-            str(ws.headers.get("x-lampgo-plugin-token") or "").strip(),
+            str(ws.headers.get("x-lampgo-token") or "").strip(),
             str(ws.cookies.get(_AUTH_COOKIE_NAME) or "").strip(),
             str(ws.query_params.get("token") or "").strip(),
         ]
@@ -3875,28 +3804,28 @@ class WebGateway:
                 }
             )
 
-        elif msg_type == "openclaw_tasks":
+        elif msg_type == "agent_tasks":
             await ws.send_json(
                 {
                     "ok": True,
-                    "result": {"openclaw_tasks": self.server.openclaw.list_tasks()},
+                    "result": {"agent_tasks": self.server.agent.list_tasks()},
                     "request_id": request_id,
                 }
             )
 
-        elif msg_type == "confirm_promotion":
-            proposal_id = str(msg.get("proposal_id", "")).strip()
-            decision = str(msg.get("decision", "")).strip()
+        elif msg_type == "cancel_agent_task":
             task_id = str(msg.get("task_id", "")).strip()
-            if not task_id or not proposal_id or decision not in {"approve", "reject"}:
-                await ws.send_json({"ok": False, "error": "task_id, proposal_id and decision are required", "request_id": request_id})
+            if not task_id:
+                await ws.send_json({"ok": False, "error": "task_id is required", "request_id": request_id})
                 return
-            try:
-                task = await self.server.openclaw.confirm_promotion(task_id, proposal_id, decision)
-            except KeyError:
-                await ws.send_json({"ok": False, "error": "task or proposal not found", "request_id": request_id})
-                return
-            await ws.send_json({"ok": True, "result": {"openclaw_task": task}, "request_id": request_id})
+            ok = await self.server.agent.cancel_task(task_id)
+            await ws.send_json(
+                {
+                    "ok": ok,
+                    "result": {"agent_task": self.server.agent.get_task(task_id)},
+                    "request_id": request_id,
+                }
+            )
 
         elif msg_type == "cancel":
             cancelled = await self._stop_all_ws_work(request_id=request_id)

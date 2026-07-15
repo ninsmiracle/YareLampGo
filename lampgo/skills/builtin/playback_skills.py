@@ -47,7 +47,7 @@ def load_recording(path: Path) -> tuple[list[dict[str, float]], int]:
 
     Accepts two column naming conventions:
     - Native recorder format: ``base_yaw.pos``, ``base_pitch.pos``, ... + optional ``timestamp``
-    - Simplified format (OpenClaw-generated): bare joint names ``base_yaw``, ``base_pitch``, ...
+    - Simplified agent format: bare joint names ``base_yaw``, ``base_pitch``, ...
     """
     frames: list[dict[str, float]] = []
     timestamps: list[float] = []

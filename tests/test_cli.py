@@ -31,14 +31,14 @@ def test_find_related_pids_filters_self_and_parent(monkeypatch):
             "100 uv run lampgo clear\n"
             "99 /bin/zsh -c uv run lampgo clear\n"
             "200 uv run lampgo run\n"
-            "201 openclaw-gateway\n"
+            "201 codex exec unrelated-task\n"
             "202 python something_else.py\n"
         )
     )
     monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: fake_ps)
 
     pids = cli._find_related_pids()
-    assert pids == [200, 201]
+    assert pids == [200]
 
 
 def test_resolve_calibration_port_prefers_cli_or_config(monkeypatch):

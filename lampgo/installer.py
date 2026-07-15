@@ -2,13 +2,12 @@
 
 Invoked by ``uv run lampgo onboard``. Walks the user through:
 
-1. env_check         — Python / uv / openclaw CLI sanity
+1. env_check         — Python / uv / Codex CLI sanity
 2. audio_tap         — prepare macOS system-audio helper for music mode
 3. hardware          — serial port + camera + microphone selection
 4. llm               — provider + api_base + api_key (+ optional ping)
-5. persona_memory    — import from OpenClaw / default template / skip
-6. openclaw_plugin   — register OpenClaw plugin + skill (reuses
-                       ``lampgo.bridge.openclaw_installer``)
+5. persona_memory    — create the local persona and memory files
+6. codex             — discover Codex and register LampGo tools automatically
 7. summary           — final ``~/.lampgo/`` state
 
 Each step is a standalone function that takes an :class:`InstallContext` and
@@ -29,12 +28,10 @@ import re
 import shutil
 import sys
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from lampgo import personastore
-from lampgo.bridge.openclaw_installer import install_openclaw_integration
-
+from lampgo.agent.codex import ensure_codex_integration, find_codex_binary
 
 StepName = str
 
@@ -44,7 +41,7 @@ ALL_STEPS: tuple[StepName, ...] = (
     "hardware",
     "llm",
     "persona_memory",
-    "openclaw_plugin",
+    "codex",
 )
 
 
@@ -348,16 +345,16 @@ def _step_env_check(ctx: InstallContext) -> list[StepOutcome]:
         )
     )
 
-    oc = shutil.which("openclaw")
-    if oc:
-        _row("openclaw CLI", "✓", oc)
+    codex = find_codex_binary()
+    if codex:
+        _row("Codex CLI", "✓", str(codex))
     else:
-        _row("openclaw CLI", "·", "未检测到（仅影响 OpenClaw 接入，可以跳过）")
+        _row("Codex CLI", "·", "未检测到（复杂任务暂不可用）")
     outcomes.append(
         StepOutcome(
             step="env_check",
-            status="ok" if oc else "skipped",
-            message=f"openclaw={'installed' if oc else 'missing'}",
+            status="ok" if codex else "skipped",
+            message=f"codex={'installed' if codex else 'missing'}",
         )
     )
 
@@ -819,37 +816,16 @@ def _step_persona_memory(ctx: InstallContext) -> list[StepOutcome]:
     _print_section(ctx, 5, 6, "人设 / 记忆")
     outcomes: list[StepOutcome] = []
 
-    oc_home = personastore.openclaw_home()
-    oc_available = oc_home.exists()
-    _print_dim(ctx, f"OpenClaw home  {oc_home}  ({'存在 ✓' if oc_available else '不存在'})")
-
     _print_sub(ctx, "来源")
     choices: list[tuple[str, str]] = [
         ("default", "使用默认模板（不覆盖已编辑的 ~/.lampgo/*.md）"),
     ]
-    if oc_available:
-        choices.insert(0, ("import", "从 OpenClaw 导入 PROFILE.md + MEMORY.md（核心事实）"))
     choices.append(("skip", "跳过"))
 
     choice = _ask_choice(ctx, "    ", choices, default_idx=0)
 
     if choice == "skip":
         outcomes.append(StepOutcome(step="persona_memory", status="skipped", message="user skipped"))
-        return outcomes
-
-    if choice == "import":
-        persona_result = personastore.import_persona_from_openclaw("safe")
-        memory_result = personastore.import_memory_core_from_openclaw()
-        _print_dim(ctx, f"persona imported: {persona_result.get('imported')}")
-        _print_dim(ctx, f"memory imported : {memory_result.get('imported')}")
-        outcomes.append(
-            StepOutcome(
-                step="persona_memory",
-                status="ok",
-                message="imported from openclaw",
-                data={"persona": persona_result, "memory": memory_result},
-            )
-        )
         return outcomes
 
     # default — only fill files that don't yet exist
@@ -872,33 +848,27 @@ def _step_persona_memory(ctx: InstallContext) -> list[StepOutcome]:
     return outcomes
 
 
-# ---------- Step 6: openclaw plugin ---------------------------------------
+# ---------- Step 6: Codex --------------------------------------------------
 
 
-def _step_openclaw_plugin(ctx: InstallContext) -> list[StepOutcome]:
-    _print_section(ctx, 6, 6, "OpenClaw 插件")
-
-    if shutil.which("openclaw") is None:
-        _print_dim(ctx, "未检测到 `openclaw` 命令，跳过。之后可跑 `lampgo install-openclaw`。")
-        return [StepOutcome(step="openclaw_plugin", status="skipped", message="openclaw binary missing")]
-
-    if not _confirm(ctx, "  安装 / 修复 OpenClaw lampgo 插件？", default_yes=True):
-        return [StepOutcome(step="openclaw_plugin", status="skipped", message="user declined")]
-
-    report = install_openclaw_integration(auto_confirm=True, printer=ctx.printer)
-    status = (report.final_status.overall if report.final_status else "unknown")
-    outcome_status = "ok" if not report.errors else "error"
+def _step_codex(ctx: InstallContext) -> list[StepOutcome]:
+    _print_section(ctx, 6, 6, "Codex 自动接入")
+    status = ensure_codex_integration()
+    if status.connection == "connected":
+        _print_dim(ctx, "Codex 已接通，LampGo 工具已自动注册。")
+        outcome_status = "ok"
+    elif status.connection in {"not_installed", "login_required"}:
+        _print_dim(ctx, status.detail)
+        outcome_status = "skipped"
+    else:
+        _print_dim(ctx, f"Codex 接入失败：{status.detail}")
+        outcome_status = "error"
     return [
         StepOutcome(
-            step="openclaw_plugin",
+            step="codex",
             status=outcome_status,
-            message=f"openclaw integration: {status}",
-            data={
-                "performed": report.performed,
-                "skipped": report.skipped,
-                "errors": report.errors,
-                "overall": status,
-            },
+            message=status.detail,
+            data=status.to_dict(),
         )
     ]
 
@@ -976,7 +946,7 @@ def run_install(
         ("hardware", _step_hardware),
         ("llm", _step_llm),
         ("persona_memory", _step_persona_memory),
-        ("openclaw_plugin", _step_openclaw_plugin),
+        ("codex", _step_codex),
     ]
     for name, fn in steps:
         if name in ctx.skip_steps:

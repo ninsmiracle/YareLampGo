@@ -28,13 +28,25 @@ def test_remote_api_requires_gateway_token(monkeypatch, tmp_path):
 
 def test_remote_api_accepts_bearer_token(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
-    token = personastore.get_or_create_plugin_token()
+    token = personastore.get_or_create_local_api_token()
 
     with TestClient(gateway.app, client=("203.0.113.10", 50000)) as client:
         response = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 200
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_local_api_token_is_automatic_and_migrates_legacy_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    personastore.set_credentials({"plugin_token": "legacy-local-token"})
+
+    token = personastore.get_or_create_local_api_token()
+    credentials = personastore.get_credentials()
+
+    assert token == "legacy-local-token"
+    assert credentials["local_api_token"] == token
+    assert "plugin_token" not in credentials
 
 
 def test_local_llm_compat_accepts_livekit_agent_token(monkeypatch, tmp_path):
@@ -81,7 +93,7 @@ def test_loopback_ui_bootstrap_cookie_allows_api(monkeypatch, tmp_path):
 
 def test_cross_site_origin_is_rejected(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
-    token = personastore.get_or_create_plugin_token()
+    token = personastore.get_or_create_local_api_token()
 
     with TestClient(gateway.app, client=("127.0.0.1", 50000)) as client:
         response = client.get(
