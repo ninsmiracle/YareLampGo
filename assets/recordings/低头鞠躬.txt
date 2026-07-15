@@ -1,0 +1,2 @@
+expression=down
+prompt=谦卑的打招呼，低头鞠躬

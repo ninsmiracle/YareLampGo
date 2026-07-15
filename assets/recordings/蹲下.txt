@@ -1,0 +1,2 @@
+expression=sleep
+prompt=蹲下身子休息

@@ -1,0 +1,2 @@
+expression=focused
+prompt=不断的向四周变化姿态观察

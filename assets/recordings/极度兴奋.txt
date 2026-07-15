@@ -1,0 +1,2 @@
+expression=rainbow
+prompt=非常兴奋，情绪高度亢奋中

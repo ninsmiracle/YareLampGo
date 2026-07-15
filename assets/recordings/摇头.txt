@@ -1,0 +1,2 @@
+expression=cross
+prompt=表示强烈拒绝

@@ -1,0 +1,2 @@
+expression=sad
+prompt=先低头，然后疑惑的摇头，表达沮丧

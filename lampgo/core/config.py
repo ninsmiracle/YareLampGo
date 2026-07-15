@@ -608,6 +608,14 @@ def _find_project_root() -> Path:
     return current
 
 
+def _resolve_default_asset_paths(config: LampgoConfig, provenance: dict[str, str], project_root: Path) -> None:
+    """Anchor built-in asset locations to the project root, not the launch directory."""
+    if provenance.get("device.calibration_dir") == "default":
+        config.device.calibration_dir = project_root / config.device.calibration_dir
+    if provenance.get("recordings_dir") == "default":
+        config.recordings_dir = project_root / config.recordings_dir
+
+
 def load_config(
     config_path: str | Path | None = None,
     env_file: str | Path | None = None,
@@ -691,6 +699,7 @@ def load_config_with_provenance(
         for dotted in cli_fields:
             provenance[dotted] = "cli"
 
+    _resolve_default_asset_paths(config, provenance, project_root)
     return config, provenance
 
 

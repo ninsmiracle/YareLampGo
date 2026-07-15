@@ -21,6 +21,7 @@ from typing import Any
 import structlog
 
 from lampgo.core.types import JOINT_NAMES, MotionTarget, SkillResult
+from lampgo.recordings import RECORDING_NAME_ERROR, normalize_recording_name
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 from lampgo.skills.builtin.motion_skills import get_safe_position
 
@@ -134,9 +135,9 @@ class PlayRecordingSkill(Skill):
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
         self._motion = None
         self._expression_controller = None
-        name = params.get("name", "")
+        name = normalize_recording_name(params.get("name", ""))
         if not name:
-            return SkillResult(status="error", message="Recording name required")
+            return SkillResult(status="error", message=RECORDING_NAME_ERROR)
         expression = str(params.get("expression", "")).strip()
         expression_preset = str(params.get("expression_preset", "") or params.get("preset_id", "")).strip()
         raw_mode = params.get("playback_mode")

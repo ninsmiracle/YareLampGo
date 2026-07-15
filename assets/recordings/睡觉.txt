@@ -1,0 +1,2 @@
+expression=sleep
+prompt=身子向后靠，开始睡觉

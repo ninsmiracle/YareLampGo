@@ -1,0 +1,2 @@
+expression=blush
+prompt=扭捏蹲下，害羞状
