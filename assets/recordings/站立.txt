@@ -1,0 +1,2 @@
+expression=focused
+prompt=站直身子，持续30秒

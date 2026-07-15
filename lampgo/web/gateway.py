@@ -55,8 +55,10 @@ from lampgo.expression_library import (
 )
 from lampgo.perception.camera import CameraCapture
 from lampgo.recordings import (
+    RECORDING_NAME_ERROR,
     build_recording_actions_prompt,
     list_recording_catalog,
+    normalize_recording_name,
     recording_description_path,
     write_recording_description,
 )
@@ -672,9 +674,9 @@ class WebGateway:
         locked, because deleting them would mutate shipped content.
         """
         body = await request.json()
-        name = str(body.get("name", "")).strip()
-        if not name or not re.match(r"^[\w\-]+$", name):
-            return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
+        name = normalize_recording_name(body.get("name", ""))
+        if not name:
+            return JSONResponse({"ok": False, "error": RECORDING_NAME_ERROR}, status_code=400)
 
         recordings_dir = Path(self.server.config.recordings_dir)
         user_dir = recordings_dir / "user"
@@ -724,12 +726,12 @@ class WebGateway:
     async def api_recordings_update(self, request: Request) -> JSONResponse:
         """POST /api/recordings/update — edit metadata for a user-created recording."""
         body = await request.json()
-        name = str(body.get("name", "")).strip()
+        name = normalize_recording_name(body.get("name", ""))
         description = str(body.get("description", "") or body.get("prompt", "")).strip()
         expression = str(body.get("expression", "")).strip()
         expression_preset = str(body.get("expression_preset", "") or body.get("preset_id", "")).strip()
-        if not name or not re.match(r"^[\w\-]+$", name):
-            return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
+        if not name:
+            return JSONResponse({"ok": False, "error": RECORDING_NAME_ERROR}, status_code=400)
 
         recordings_dir = Path(self.server.config.recordings_dir)
         user_dir = recordings_dir / "user"
@@ -765,15 +767,15 @@ class WebGateway:
         Updates aliases.json in recordings_dir root if alias provided.
         """
         body = await request.json()
-        name = str(body.get("name", "")).strip()
+        name = normalize_recording_name(body.get("name", ""))
         csv_content = body.get("csv", "")
         alias = str(body.get("alias", "")).strip()
         description = str(body.get("description", "") or body.get("prompt", "")).strip()
         expression = str(body.get("expression", "")).strip()
         expression_preset = str(body.get("expression_preset", "") or body.get("preset_id", "")).strip()
 
-        if not name or not re.match(r"^[\w\-]+$", name):
-            return JSONResponse({"ok": False, "error": "name must be non-empty alphanumeric/dash/underscore"}, status_code=400)
+        if not name:
+            return JSONResponse({"ok": False, "error": RECORDING_NAME_ERROR}, status_code=400)
         if not isinstance(csv_content, str) or not csv_content.strip():
             return JSONResponse({"ok": False, "error": "csv must be a non-empty string"}, status_code=400)
 

@@ -1,0 +1,2 @@
+expression=check
+prompt=点头表示赞同

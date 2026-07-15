@@ -1,0 +1,2 @@
+expression=up
+prompt=伸展身子，向上拉升。显得非常放松

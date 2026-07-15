@@ -1,0 +1,2 @@
+expression=star
+prompt=不太严肃的简短摇头晃脑舞

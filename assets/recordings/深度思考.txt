@@ -1,0 +1,2 @@
+expression=theater
+prompt=进行深度思考

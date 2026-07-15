@@ -1,0 +1,2 @@
+expression=focused
+prompt=前倾身子，向前观察

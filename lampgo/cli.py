@@ -899,7 +899,13 @@ def _cmd_record(args: argparse.Namespace) -> None:
 
     from lampgo.core.config import DeviceConfig, load_config
     from lampgo.core.hal import HardwareAbstraction
+    from lampgo.recordings import RECORDING_NAME_ERROR, normalize_recording_name
     from lampgo.skills.recorder import TeachRecorder
+
+    name = normalize_recording_name(args.name)
+    if not name:
+        print(f"Error: {RECORDING_NAME_ERROR}", file=sys.stderr)
+        sys.exit(2)
 
     config = load_config(config_path=getattr(args, "config", None))
     port = args.motor_port or config.device.motor_port
@@ -922,7 +928,7 @@ def _cmd_record(args: argparse.Namespace) -> None:
     try:
         # Teach-record mode must release torque, otherwise all joints remain locked.
         hal.disable_torque()
-        print(f"Recording '{args.name}' at {args.fps} FPS. Press Ctrl+C to stop...")
+        print(f"Recording '{name}' at {args.fps} FPS. Press Ctrl+C to stop...")
         rec.start()
         try:
             while True:
@@ -932,7 +938,7 @@ def _cmd_record(args: argparse.Namespace) -> None:
             pass
 
         rec.stop()
-        path = rec.save(args.name)
+        path = rec.save(name)
         print(f"Saved {rec.frame_count} frames to {path}")
     finally:
         hal.disconnect()

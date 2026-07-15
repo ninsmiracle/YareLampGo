@@ -1,0 +1,2 @@
+expression=wink
+prompt=蹲下身子，抬头向上看

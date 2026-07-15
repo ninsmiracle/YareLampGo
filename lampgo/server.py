@@ -45,7 +45,12 @@ from lampgo.device import Esp32DeviceManager
 from lampgo.ipc import IPCServer
 from lampgo.perception.cat_teaser import CatTeaserFrameSource, is_supported_local_camera_port
 from lampgo.perception.router import IntentRouter, IntentType
-from lampgo.recordings import build_recording_actions_prompt, write_recording_description
+from lampgo.recordings import (
+    RECORDING_NAME_ERROR,
+    build_recording_actions_prompt,
+    normalize_recording_name,
+    write_recording_description,
+)
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.cat_teaser import CatTeaserSkill
 from lampgo.skills.builtin.expression_skills import SetExpressionSkill
@@ -588,9 +593,9 @@ class LampgoServer:
             if rec.is_recording:
                 return {"ok": False, "error": "recording still active; stop first"}
 
-            name = name.strip()
-            if not name or not re.match(r"^[\w\-]+$", name):
-                return {"ok": False, "error": "invalid name: use letters/numbers/_/-"}
+            name = normalize_recording_name(name)
+            if not name:
+                return {"ok": False, "error": RECORDING_NAME_ERROR}
 
             target_path = Path(self.config.recordings_dir) / "user" / f"{name}.csv"
             if target_path.exists() and not overwrite:

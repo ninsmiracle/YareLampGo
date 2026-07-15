@@ -101,6 +101,7 @@
   const recordEditError = document.getElementById("record-edit-error");
   const btnRecordEditCancel = document.getElementById("btn-record-edit-cancel");
   const recordNameError = document.getElementById("record-name-error");
+  const RECORDING_NAME_RE = /^[\p{L}\p{N}_-]{1,64}$/u;
   const btnRecordDiscard = document.getElementById("btn-record-discard");
   const btnRecordRerecord = document.getElementById("btn-record-rerecord");
   const btnRecordSave = document.getElementById("btn-record-save");
@@ -6758,8 +6759,8 @@
         recordNameError.textContent = "请输入动作名称";
         return;
       }
-      if (!/^[\w-]+$/.test(name)) {
-        recordNameError.textContent = "名称仅支持字母、数字、下划线、短横线";
+      if (!RECORDING_NAME_RE.test(name)) {
+        recordNameError.textContent = "名称仅支持中文、字母、数字、下划线、短横线";
         return;
       }
       const description = ((recordDescriptionInput && recordDescriptionInput.value) || "").trim();

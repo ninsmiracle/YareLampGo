@@ -9,10 +9,13 @@ name.
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 MAX_RECORDING_DESCRIPTION_CHARS = 500
+MAX_RECORDING_NAME_CHARS = 64
+RECORDING_NAME_ERROR = "动作名称仅支持中文、字母、数字、下划线和短横线（最多 64 个字符）"
 _SAFE_PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 LED_EXPRESSION_KEYS = (
     "off",
@@ -74,6 +77,21 @@ RECORDING_EXPRESSION_HINTS: dict[str, str] = {
     "wake_up": "surprised",
     "wave": "smiley",
 }
+
+
+def normalize_recording_name(value: Any) -> str:
+    """Return a filesystem-safe Unicode recording name, or an empty string.
+
+    User recordings are UTF-8 CSV/TXT files on local storage, so Chinese names
+    are safe. Keep the allowed character set deliberately narrow to prevent
+    path traversal and keep the same rule across Web, CLI, and playback.
+    """
+    name = unicodedata.normalize("NFC", str(value or "").strip())
+    if not name or len(name) > MAX_RECORDING_NAME_CHARS:
+        return ""
+    if not all(char.isalnum() or char in "_-" for char in name):
+        return ""
+    return name
 
 
 def _normalize_expression(value: Any) -> str:
