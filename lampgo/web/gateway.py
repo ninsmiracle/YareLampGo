@@ -1079,6 +1079,14 @@ class WebGateway:
             esp32_manager=self.server.esp32,
         )
 
+    @staticmethod
+    async def _request_json_object(request: Request) -> dict[str, Any] | None:
+        try:
+            body = await request.json()
+        except Exception:
+            return None
+        return body if isinstance(body, dict) else None
+
     async def api_sensor_context(self, request: Request) -> JSONResponse:
         camera = self._make_camera_capture()
         return JSONResponse(
@@ -1103,16 +1111,22 @@ class WebGateway:
         )
 
     async def api_agent_ask(self, request: Request) -> JSONResponse:
-        body = await request.json()
-        question = str(body.get("question", "")).strip()
+        body = await self._request_json_object(request)
+        if body is None:
+            return JSONResponse({"ok": False, "error": "invalid_json_body"}, status_code=400)
+        question = str(body.get("question") or "").strip()
         if not question:
             return JSONResponse({"ok": False, "error": "question_required"}, status_code=400)
         options = body.get("options") or []
         if not isinstance(options, list):
             options = []
         options = [str(item) for item in options if str(item).strip()]
-        request_id = str(body.get("request_id", "")).strip()
-        timeout_s = float(body.get("timeout_s", 120.0))
+        request_id = str(body.get("request_id") or "").strip()
+        try:
+            timeout_s = float(body.get("timeout_s", 120.0))
+        except (TypeError, ValueError):
+            timeout_s = 120.0
+        timeout_s = max(5.0, min(600.0, timeout_s))
         result = await self.server.agent_ask_user(
             question=question,
             options=options,
@@ -1122,21 +1136,25 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": result})
 
     async def api_agent_ask_reply(self, request: Request) -> JSONResponse:
-        body = await request.json()
-        ask_id = str(body.get("ask_id", "")).strip()
-        reply = str(body.get("reply", "")).strip()
-        request_id = str(body.get("request_id", "")).strip()
+        body = await self._request_json_object(request)
+        if body is None:
+            return JSONResponse({"ok": False, "error": "invalid_json_body"}, status_code=400)
+        ask_id = str(body.get("ask_id") or "").strip()
+        reply = str(body.get("reply") or "").strip()
+        request_id = str(body.get("request_id") or "").strip()
         if not ask_id or not reply:
             return JSONResponse({"ok": False, "error": "ask_id_and_reply_required"}, status_code=400)
         ok = await self.server.agent_reply_user(ask_id=ask_id, reply=reply, request_id=request_id)
         return JSONResponse({"ok": ok, "result": {"accepted": ok}})
 
     async def api_agent_callback(self, request: Request) -> JSONResponse:
-        body = await request.json()
+        body = await self._request_json_object(request)
+        if body is None:
+            return JSONResponse({"ok": False, "error": "invalid_json_body"}, status_code=400)
         # Free-form status payload from an external agent provider.
         status = body.get("status")
         detail = body.get("detail")
-        request_id = str(body.get("request_id", "")).strip()
+        request_id = str(body.get("request_id") or "").strip()
         if status:
             await self.server.events.publish(
                 ChatMessage(role="assistant", content=f"[Codex] {status}: {detail or ''}".strip(), request_id=request_id)

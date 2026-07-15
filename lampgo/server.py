@@ -2179,6 +2179,10 @@ class LampgoServer:
 
     async def run_forever(self) -> None:
         await self.start()
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
         gateway_host = self._gateway_bind_host()
         local_url = await self._start_web_gateway(print_banner=False, host=gateway_host) or ""
         if self.config.web_enabled:
@@ -2188,10 +2192,6 @@ class LampgoServer:
         await self.agent.bootstrap()
         if self.config.web_enabled and local_url:
             self._print_connection_banner(local_url)
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
         logger.info("server.running (Ctrl+C to stop)")
         await stop.wait()
         await self.shutdown()

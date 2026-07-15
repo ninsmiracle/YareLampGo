@@ -116,6 +116,36 @@ def test_cancel_agent_task_does_not_block_websocket_receive_loop(monkeypatch, tm
     assert response["result"]["agent_tasks"][0]["task_id"] == "still-responsive"
 
 
+def test_agent_api_rejects_non_object_json(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/agent/ask", json=None)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json_body"
+
+
+def test_agent_ask_normalizes_invalid_timeout(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    captured = {}
+
+    async def fake_ask_user(**kwargs):
+        captured.update(kwargs)
+        return {"ask_id": "test", "reply": "", "timeout": True}
+
+    gateway.server.agent_ask_user = fake_ask_user
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/agent/ask",
+            json={"question": "还需要什么？", "timeout_s": "not-a-number"},
+        )
+
+    assert response.status_code == 200
+    assert captured["timeout_s"] == 120.0
+
+
 def test_cross_site_origin_is_rejected(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
     token = personastore.get_or_create_local_api_token()
