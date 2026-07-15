@@ -14,18 +14,18 @@
 
 YareLampGo lowers the barrier to playing with robotic arms and embodied AI. A 5-DOF robotic arm is usually closer to lab equipment than a toy; YareLampGo connects motors, lights, camera, microphone, and LLM tooling into a local software system so developers, creators, and hobbyists can quickly build desktop interactions through the Web UI, CLI, natural language, or an Agent.
 
-The `lampgo` name remains the internal short name for the Python package, CLI command, config directory, and OpenClaw plugin identifiers.
+The `lampgo` name remains the internal short name for the Python package, CLI command, and config directory.
 
-YareLampGo ships with a local Web console, CLI, HTTP / WebSocket APIs, and an OpenClaw plugin. It also has a no-hardware mode so you can try the software flow before connecting a real device.
+YareLampGo ships with a local Web console, CLI, HTTP / WebSocket APIs, and zero-config local Codex integration. It also has a no-hardware mode so you can try the software flow before connecting a real device.
 
 ## Highlights
 
 - **Control a real lamp with natural language**: say "nod", "look at me", or "act shy" to trigger motion, lights, speech, and Agent actions.
 - **Web console out of the box**: chat, play motions, record actions, switch expressions, inspect device state, and update settings in the browser.
 - **Guided Wi-Fi provisioning and calibration**: connect the ESP32 to 2.4GHz Wi-Fi, then calibrate motors before large movements.
-- **Record and reuse motion**: manually move the lamp, save motion parameters, and replay them from the Web UI, CLI, natural language, or OpenClaw.
+- **Record and reuse motion**: manually move the lamp, save motion parameters, and replay them from the Web UI, CLI, natural language, or Codex.
 - **Non-technical users can extend scenes**: describe scenes like "welcome me home" or "act shy after praise" in natural language, then turn atomic or composed motions into reusable desktop skills.
-- **Agents can call real hardware**: with OpenClaw, an Agent can read state, move joints, change LED expressions, capture camera frames, and ask the user for confirmation.
+- **Codex can call real hardware**: LampGo automatically registers local MCP tools so Codex can read state, move joints, capture camera frames, and ask the user for confirmation.
 - **Develop without hardware**: `--no-hw` keeps the Web UI, config, skills, routing, and Agent flow available without the physical lamp.
 
 ![YareLampGo Web console](docs/images/readme/用户主页面.jpeg)
@@ -65,7 +65,7 @@ uv sync
 uv run lampgo onboard
 ```
 
-The onboarding flow checks the environment, configures hardware ports, writes model credentials, imports persona files, and offers OpenClaw plugin installation when OpenClaw is detected. Config files are written to `~/.lampgo/`; sensitive credentials live in `~/.lampgo/credentials.json`.
+The onboarding flow checks the environment, configures hardware ports, writes model credentials, creates persona files, and automatically connects a logged-in local Codex installation. Config files are written to `~/.lampgo/`; sensitive credentials live in `~/.lampgo/credentials.json`.
 
 ### 4. Start The Web Console
 
@@ -138,7 +138,7 @@ See [Quick Start](docs/getting-started/quick-start.md) for more details.
 
 ```mermaid
 flowchart LR
-  user["User / Agent"] --> entry["Web UI / CLI / Voice / OpenClaw"]
+  user["User / Codex"] --> entry["Web UI / CLI / Voice / AgentHarness"]
   entry --> server["LampgoServer"]
   server --> skills["IntentRouter + SkillExecutor"]
   skills --> safety["MotionRuntime + SafetyKernel"]
@@ -160,25 +160,24 @@ We also want the lamp head to become more like a replaceable module over time: m
 | Category | Docs |
 | --- | --- |
 | Start | [Docs index](docs/README.en.md), [Quick Start](docs/getting-started/quick-start.md), [Configuration](docs/getting-started/configuration.md) |
-| Guides | [Motion and Expression](docs/guides/motion-and-expression.md), [OpenClaw Integration](docs/guides/openclaw-integration.md) |
+| Guides | [Motion and Expression](docs/guides/motion-and-expression.md), [Codex Integration](docs/guides/codex-integration.md) |
 | Hardware | [Public Hardware Docs](docs/hardware/README.en.md), [Wiring Table](docs/hardware/wiring.md), [Printable Structure Files](assets/printable/README.en.md) |
 | Architecture | [Architecture](docs/architecture.md), [Project Description](docs/project_description.md), [Roadmap](docs/roadmap.en.md) |
 | Development | [Contributing](docs/development/contributing.md), [Examples](examples/) |
 
-## OpenClaw Integration
+## Codex Integration
 
-YareLampGo can run as an OpenClaw hardware accessory. Agents can read lamp state, move joints, play motions, switch LED expressions, capture camera frames, write memory, or ask the user for confirmation.
+When Codex is installed and logged in, starting LampGo automatically discovers the CLI, registers its stdio MCP tools, and reports “Codex connected.” Complex tasks run in the local Codex process, which can safely call LampGo tools.
 
 ```bash
 uv run lampgo run --web
-uv run lampgo install-openclaw --yes
 ```
 
-See [OpenClaw Integration](docs/guides/openclaw-integration.md) for details.
+No token, port, or environment variable setup is required. See [Codex Integration](docs/guides/codex-integration.md) for details.
 
 ## Contributing
 
-We welcome shared motions, desktop interaction cases, composed skill scenarios, OpenClaw workflows, hardware adaptations, and documentation improvements.
+We welcome shared motions, desktop interaction cases, composed skill scenarios, Codex workflows, hardware adaptations, and documentation improvements.
 
 - Motion assets: add reviewed CSV recordings under `assets/recordings/` with a short description.
 - Cases and scripts: add examples under `examples/` or docs, and explain the scenario they fit.

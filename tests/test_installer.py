@@ -11,14 +11,11 @@ import pytest
 
 @pytest.fixture
 def fake_lampgo_home(tmp_path, monkeypatch):
-    """Isolate ~/.lampgo/ and ~/.openclaw/ into tmp_path, fresh each test."""
+    """Isolate ~/.lampgo/ into tmp_path, fresh for each test."""
     lampgo_home = tmp_path / "lampgo"
-    openclaw_home = tmp_path / "openclaw"
     lampgo_home.mkdir()
-    openclaw_home.mkdir()
     monkeypatch.setenv("LAMPGO_HOME", str(lampgo_home))
-    monkeypatch.setenv("OPENCLAW_HOME", str(openclaw_home))
-    return {"lampgo": lampgo_home, "openclaw": openclaw_home}
+    return {"lampgo": lampgo_home}
 
 
 @pytest.fixture
@@ -48,7 +45,7 @@ def test_run_install_llm_only_works_without_hardware(fake_lampgo_home, cwd_sandb
     report = installer.run_install(
         non_interactive=True,
         assume_yes=True,
-        skip_steps=("env_check", "audio_tap", "hardware", "persona_memory", "openclaw_plugin"),
+        skip_steps=("env_check", "audio_tap", "hardware", "persona_memory", "codex"),
         llm_provider="mimo",
         llm_key="test-install-key-0000-1234",
         printer=lambda msg="": captured.append(msg),
@@ -112,12 +109,6 @@ def test_hardware_step_incremental_preserves_existing_motor_port(
 def test_persona_default_creates_missing_files(fake_lampgo_home, monkeypatch):
     from lampgo import installer, personastore
 
-    # Remove the fake openclaw dir so the default choice becomes "default template".
-    oc_home = fake_lampgo_home["openclaw"]
-    for child in oc_home.iterdir():
-        child.unlink()
-    oc_home.rmdir()
-
     ctx = installer.InstallContext(
         non_interactive=True,
         assume_yes=True,
@@ -141,10 +132,10 @@ def test_run_install_skip_steps_records_skipped_outcomes(fake_lampgo_home, cwd_s
     report = installer.run_install(
         non_interactive=True,
         assume_yes=True,
-        skip_steps=("audio_tap", "hardware", "llm", "persona_memory", "openclaw_plugin"),
+        skip_steps=("audio_tap", "hardware", "llm", "persona_memory", "codex"),
         printer=lambda *_a, **_k: None,
     )
     steps_with_skipped = {
         o.step for o in report.outcomes if o.status == "skipped" and "skipped via --skip" in o.message
     }
-    assert steps_with_skipped >= {"audio_tap", "hardware", "llm", "persona_memory", "openclaw_plugin"}
+    assert steps_with_skipped >= {"audio_tap", "hardware", "llm", "persona_memory", "codex"}

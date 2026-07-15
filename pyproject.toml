@@ -1,7 +1,7 @@
 [project]
 name = "lampgo"
 version = "0.1.0"
-description = "Desktop embodied intelligent lamp robot runtime — clean, safe, OpenClaw-ready."
+description = "Desktop embodied intelligent lamp robot runtime with a local Codex agent harness."
 readme = "README.md"
 authors = [
     { name = "lampgo contributors", email = "noreply@lampgo.local" },

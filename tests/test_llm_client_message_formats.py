@@ -133,7 +133,7 @@ def test_anthropic_mode_also_exposes_web_search_function_tool() -> None:
     cfg = _base_cfg(message_type="anthropic")
     tools = _build_agent_tools(skills=[], config=cfg)
     assert "web_search" in _tool_names(tools)
-    for name in ("say", "finish_response", "escalate_to_openclaw"):
+    for name in ("say", "finish_response", "escalate_to_agent"):
         assert name in _tool_names(tools)
 
 

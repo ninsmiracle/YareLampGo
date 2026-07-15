@@ -15,7 +15,7 @@ from lampgo.core.types import JointState, SkillResult
 
 @dataclass
 class ParameterSpec:
-    """Describes a single skill parameter for OpenClaw exposure."""
+    """Describes a single skill parameter for external-agent exposure."""
 
     name: str
     type: str  # "float", "int", "str", "bool"
@@ -136,7 +136,7 @@ class Skill(ABC):
 
     # Provenance / display metadata.  Used by the Web UI to split "出厂技能"
     # (hardcoded Python classes, read-only) from "我的技能" (JSON-defined
-    # composed skills the user / OpenClaw authored at runtime, editable /
+    # composed skills the user or an agent authored at runtime, editable /
     # deletable).  ``label`` is an optional Chinese display name; when empty
     # the UI falls back to the SKILL_LABELS_CN dictionary keyed by skill_id.
     source: str = "factory"  # "factory" | "user"

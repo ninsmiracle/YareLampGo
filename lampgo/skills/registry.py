@@ -13,7 +13,7 @@ class SkillRegistry:
     """Central registry of all available skills.
 
     Skills register themselves (or are registered at startup).
-    The OpenClaw adapter reads this registry to expose capabilities.
+    Agent-facing adapters read this registry to expose capabilities.
     """
 
     def __init__(self) -> None:
@@ -34,7 +34,7 @@ class SkillRegistry:
 
         Only user-authored skills (``source == 'user'``) may be unregistered;
         attempting to remove a factory skill is a no-op and logs a warning —
-        deleting a built-in would leave OpenClaw / LLM tools in an
+            deleting a built-in would leave agent / LLM tools in an
         inconsistent state and there's no supported workflow for it.
         """
         skill = self._skills.get(skill_id)

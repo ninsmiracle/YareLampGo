@@ -2,11 +2,11 @@
 
 A skill is a Python class that inherits from Skill and implements execute().
 Register it with the SkillRegistry and it's automatically available to
-the CLI, OpenClaw, and any other caller.
+the CLI, Web UI, local LLM, Codex MCP bridge, and any other caller.
 """
 
-import asyncio
 import argparse
+import asyncio
 from typing import Any
 
 from lampgo.core.config import DeviceConfig, LampgoConfig
@@ -54,9 +54,9 @@ async def main(motor_port: str) -> None:
     result = await server.executor.invoke("peek_a_boo", ctx)
     print(f"Result: {result.status}")
 
-    # Show that OpenClaw can see it
-    caps = server.openclaw.list_capabilities_dict()
-    print(f"OpenClaw sees {len(caps)} skills: {[c['skill_id'] for c in caps]}")
+    # Show that every caller, including Codex, sees the same registry.
+    caps = server._handle_skills()["result"]["skills"]
+    print(f"Registry contains {len(caps)} skills: {[c['skill_id'] for c in caps]}")
 
     await server.shutdown()
 

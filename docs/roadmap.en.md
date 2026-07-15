@@ -24,7 +24,7 @@ That said, algorithm contributions are welcome:
 - VLA / vision-language-action models.
 - Better perception, tracking, and desktop scene understanding.
 
-The best starting point is to plug into the existing motion system, skill layer, Web API, or OpenClaw interface instead of replacing the whole stack.
+The best starting point is to plug into the existing motion system, skill layer, Web API, or Codex MCP interface.
 
 ## Desktop Scenarios
 

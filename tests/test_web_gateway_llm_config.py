@@ -252,7 +252,7 @@ def test_repeated_goodbye_is_keyword_chat() -> None:
     assert intent.matched_keyword == "再见"
 
 
-async def test_llm_request_failure_returns_chat_not_openclaw_handoff(monkeypatch) -> None:
+async def test_llm_request_failure_returns_chat_not_agent_handoff(monkeypatch) -> None:
     client = LLMClient(
         LampgoConfig().llm.model_copy(
             update={

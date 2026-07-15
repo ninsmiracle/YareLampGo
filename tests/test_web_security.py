@@ -28,13 +28,25 @@ def test_remote_api_requires_gateway_token(monkeypatch, tmp_path):
 
 def test_remote_api_accepts_bearer_token(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
-    token = personastore.get_or_create_plugin_token()
+    token = personastore.get_or_create_local_api_token()
 
     with TestClient(gateway.app, client=("203.0.113.10", 50000)) as client:
         response = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 200
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_local_api_token_is_automatic_and_migrates_legacy_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    personastore.set_credentials({"plugin_token": "legacy-local-token"})
+
+    token = personastore.get_or_create_local_api_token()
+    credentials = personastore.get_credentials()
+
+    assert token == "legacy-local-token"
+    assert credentials["local_api_token"] == token
+    assert "plugin_token" not in credentials
 
 
 def test_local_llm_compat_accepts_livekit_agent_token(monkeypatch, tmp_path):
@@ -79,9 +91,64 @@ def test_loopback_ui_bootstrap_cookie_allows_api(monkeypatch, tmp_path):
     assert response.status_code == 200
 
 
+def test_cancel_agent_task_does_not_block_websocket_receive_loop(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    class BlockingAgent:
+        async def cancel_task(self, _task_id: str) -> bool:
+            await __import__("asyncio").Event().wait()
+            return True
+
+        def list_tasks(self):
+            return [{"task_id": "still-responsive", "status": "running"}]
+
+        def get_task(self, _task_id: str):
+            return None
+
+    gateway.server.agent = BlockingAgent()
+
+    with TestClient(gateway.app) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "cancel_agent_task", "task_id": "slow", "request_id": "cancel"})
+        ws.send_json({"type": "agent_tasks", "request_id": "status"})
+        response = ws.receive_json()
+
+    assert response["request_id"] == "status"
+    assert response["result"]["agent_tasks"][0]["task_id"] == "still-responsive"
+
+
+def test_agent_api_rejects_non_object_json(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/agent/ask", json=None)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json_body"
+
+
+def test_agent_ask_normalizes_invalid_timeout(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    captured = {}
+
+    async def fake_ask_user(**kwargs):
+        captured.update(kwargs)
+        return {"ask_id": "test", "reply": "", "timeout": True}
+
+    gateway.server.agent_ask_user = fake_ask_user
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/agent/ask",
+            json={"question": "还需要什么？", "timeout_s": "not-a-number"},
+        )
+
+    assert response.status_code == 200
+    assert captured["timeout_s"] == 120.0
+
+
 def test_cross_site_origin_is_rejected(monkeypatch, tmp_path):
     gateway = _gateway(monkeypatch, tmp_path)
-    token = personastore.get_or_create_plugin_token()
+    token = personastore.get_or_create_local_api_token()
 
     with TestClient(gateway.app, client=("127.0.0.1", 50000)) as client:
         response = client.get(

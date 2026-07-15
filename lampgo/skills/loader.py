@@ -21,8 +21,8 @@ Safety rails enforced by :func:`validate_definition`
 ----------------------------------------------------
 1. ``skill_id`` must match ``^[a-z][a-z0-9_]*$`` and be ≤ 64 chars.
 2. ``skill_id`` must NOT collide with any factory skill currently in the
-   registry (users can't "replace" built-ins; deletion would leave OpenClaw /
-   LLM tools broken).
+   registry (users can't "replace" built-ins; deletion would leave agent tools
+   broken).
 3. Steps must be non-empty and ≤ :data:`lampgo.skills.composed.MAX_STEPS_PER_SKILL`.
 4. Every factory-call step's ``skill_id`` must refer to an allowed *factory*
    skill.  Composed → composed composition is forbidden (eliminates
@@ -39,7 +39,7 @@ Safety rails enforced by :func:`validate_definition`
    rather than rejecting them — gentler UX for humans eyeballing values).
 
 All validator errors are :class:`SkillDefinitionError` and carry a reason code
-+ human-readable message, both returned verbatim to OpenClaw so it can give
+plus a human-readable message, both returned verbatim to callers so they can give
 the user actionable feedback.
 """
 
@@ -88,7 +88,7 @@ class SkillDefinitionError(ValueError):
     """Raised when a user skill definition fails validation.
 
     Carries a machine-readable ``reason`` alongside the human-readable
-    message so OpenClaw can branch on it (``duplicate_skill`` vs
+    message so an agent can branch on it (``duplicate_skill`` vs
     ``invalid_step``) without parsing English.
     """
 
@@ -370,7 +370,7 @@ def validate_definition(
             )
         # Dispatch on the discriminator key.  Accept exactly one of the two
         # shapes; rejecting "both present" keeps the JSON unambiguous for
-        # downstream tooling (UI summary, OpenClaw introspection).
+        # downstream tooling (UI summary and agent introspection).
         has_skill = bool(str(step.get("skill_id", "") or "").strip())
         has_traj = isinstance(step.get("trajectory"), dict)
         if has_skill and has_traj:

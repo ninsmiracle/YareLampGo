@@ -142,17 +142,9 @@ def main() -> None:
         "--timeout", type=float, default=0.1, help="Per-ID read timeout in seconds (default: 0.1)"
     )
 
-    # --- openclaw integration ---
-    oc_p = sub.add_parser(
-        "install-openclaw",
-        help="Install / repair lampgo ↔ OpenClaw integration (skill + plugin + trust)",
-    )
-    oc_p.add_argument("--yes", "-y", action="store_true", help="Auto-confirm all prompts")
-    oc_p.add_argument(
-        "--check",
-        action="store_true",
-        help="Only print current integration status; do not modify anything",
-    )
+    # Internal stdio MCP entrypoint. Codex starts this automatically after
+    # LampGo registers the integration; users should not need to run it.
+    sub.add_parser("mcp-stdio", help="Internal Codex bridge (started automatically)")
 
     # --- guided onboarding ---
     # Primary name is `onboard`. We also register `install` as a hidden alias so
@@ -160,7 +152,7 @@ def main() -> None:
     inst_p = sub.add_parser(
         "onboard",
         aliases=["install"],
-        help="Guided first-run setup: hardware, LLM, persona, OpenClaw plugin",
+        help="Guided first-run setup: hardware, LLM, persona, Codex integration",
     )
     inst_p.add_argument(
         "--non-interactive",
@@ -172,7 +164,7 @@ def main() -> None:
         "--skip",
         default="",
         help="Comma-separated step names to skip "
-        "(env_check, audio_tap, hardware, llm, persona_memory, openclaw_plugin).",
+        "(env_check, audio_tap, hardware, llm, persona_memory, codex).",
     )
     inst_p.add_argument("--motor-port", default=None, help="Preset motor serial port for the hardware step.")
     inst_p.add_argument("--llm-provider", default=None, help="Preset LLM provider for the llm step.")
@@ -202,7 +194,7 @@ def main() -> None:
         "ping": _cmd_ping,
         "setup-motors": _cmd_setup_motors,
         "scan-motors": _cmd_scan_motors,
-        "install-openclaw": _cmd_install_openclaw,
+        "mcp-stdio": _cmd_mcp_stdio,
         "onboard": _cmd_onboard,
         "install": _cmd_onboard,
         "help": _cmd_help,
@@ -281,8 +273,8 @@ def _build_help_text() -> str:
         "lampgo 常用手动调试命令\n"
         "========================\n\n"
         "0) 第一次使用\n"
-        "  uv run lampgo onboard             # 引导式配置 (硬件/LLM/人设/OpenClaw)\n"
-        "  uv run lampgo onboard -y --skip persona_memory,openclaw_plugin\n\n"
+        "  uv run lampgo onboard             # 引导式配置 (硬件/LLM/人设/Codex)\n"
+        "  uv run lampgo onboard -y --skip persona_memory,codex\n\n"
         "1) 串口和配置\n"
         "  uv run lampgo detect\n"
         "  uv run lampgo scan-motors --ids 1-20\n"
@@ -317,7 +309,7 @@ def _build_help_text() -> str:
 
 
 def _find_related_pids() -> list[int]:
-    """Find lampgo/openclaw related process ids, excluding current process."""
+    """Find LampGo process ids, excluding the current command and its parent."""
     current_pid = os.getpid()
     parent_pid = os.getppid()
     result = subprocess.run(
@@ -327,7 +319,6 @@ def _find_related_pids() -> list[int]:
         check=False,
     )
     markers = (
-        "openclaw",
         "lampgo run",
         "lampgo invoke",
         "lampgo move",
@@ -599,18 +590,15 @@ def _cmd_scan_motors(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-def _cmd_install_openclaw(args: argparse.Namespace) -> None:
-    from lampgo.bridge.openclaw_installer import install_openclaw_integration
+def _cmd_mcp_stdio(args: argparse.Namespace) -> None:
+    del args
+    from lampgo.mcp_stdio import main as mcp_main
 
-    report = install_openclaw_integration(
-        auto_confirm=bool(getattr(args, "yes", False)),
-        check_only=bool(getattr(args, "check", False)),
-    )
-    sys.exit(1 if report.errors else 0)
+    mcp_main()
 
 
 def _cmd_onboard(args: argparse.Namespace) -> None:
-    """Guided first-run onboarding (hardware, LLM, persona, OpenClaw plugin)."""
+    """Guided first-run onboarding (hardware, LLM, persona, Codex integration)."""
     # Load config once up front so any ``LAMPGO_*`` env vars / .env overrides
     # the user already exported show up as the defaults inside the installer
     # prompts (via ``personastore.get_overrides_toml()`` after ``load_config``).

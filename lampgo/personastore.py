@@ -47,11 +47,6 @@ def lampgo_home() -> Path:
     return base
 
 
-def openclaw_home() -> Path:
-    """Location of OpenClaw's user directory (may not exist)."""
-    return Path(os.environ.get("OPENCLAW_HOME") or Path.home() / ".openclaw")
-
-
 PersonaName = Literal["SOUL", "AGENTS", "PROFILE"]
 PERSONA_FILES: tuple[PersonaName, ...] = ("SOUL", "AGENTS", "PROFILE")
 
@@ -67,7 +62,11 @@ _DEFAULT_PERSONA: dict[str, str] = {
         "# AGENTS.md — 行为准则\n\n"
         "1. 每次动作前先用 `say` 告诉主人我接下来要做什么。\n"
         "2. 需要查实时信息时主动用 `web_search`，不要乱编。\n"
-        "3. 超出我能力的活儿直接 `escalate_to_openclaw`。\n"
+        "3. 超出我能力的活儿直接 `escalate_to_agent`，交给本机 Codex。\n"
+        "4. 用户明确说“把 Codex 叫来”“把你大哥叫来”“交给 Codex”“让 Codex 来”等类似话时，"
+        "表示用户主动进入复杂任务模式；不要先走快速路径，也不要继续自己拆解，立即调用 "
+        "`escalate_to_agent`，把用户原始任务完整交给本机 Codex。\n"
+        "5. 只有明确的召唤或转交才触发上一条；单纯提到 Codex 或“大哥”不算。\n"
     ),
     "PROFILE": (
         "# PROFILE.md — 主人画像\n\n"
@@ -209,16 +208,19 @@ def get_credentials() -> dict[str, Any]:
         return {}
 
 
+def _write_credentials(data: dict[str, Any]) -> None:
+    _atomic_write_text(
+        lampgo_home() / "credentials.json",
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        mode=0o600,
+    )
+
+
 def set_credentials(patch: dict[str, Any]) -> dict[str, Any]:
     """Merge and persist credentials. Returns the resulting document."""
     current = get_credentials()
     merged = _deep_merge(current, patch)
-    path = lampgo_home() / "credentials.json"
-    _atomic_write_text(
-        path,
-        json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
-        mode=0o600,
-    )
+    _write_credentials(merged)
     return merged
 
 
@@ -321,86 +323,6 @@ def reset_memory_core() -> dict[str, Any]:
     return {"reset": True, "backup": str(backup) if backup else None}
 
 
-def import_persona_from_openclaw(which: str | Iterable[str] = "safe") -> dict[str, Any]:
-    """Copy persona/memory md files from ~/.openclaw/ into ~/.lampgo/.
-
-    Modes for `which`:
-      - "safe" (default): only PROFILE — the "about the owner" file, which is
-        safe to share between OpenClaw and lampgo. MEMORY is intentionally
-        excluded here because long-term facts belong to the memory tab and
-        have their own dedicated import entry (`import_memory_core_from_openclaw`).
-      - "all": PROFILE + MEMORY + SOUL + AGENTS. SOUL/AGENTS can conflict with
-        lampgo's hardcoded lamp identity, so only use this if you intentionally
-        want OpenClaw's soul/agent rules to replace lampgo's.
-      - iterable of names: explicit subset, e.g. ["PROFILE", "SOUL"].
-
-    Always backs up existing lampgo-side files before overwriting.
-    Returns {"imported": {name: success}, "backup": "/abs/path" | None}.
-    Missing OpenClaw sources are reported as False and don't overwrite.
-    """
-    oc = openclaw_home()
-    if isinstance(which, str):
-        mode = which.lower()
-        if mode == "safe":
-            targets = ["PROFILE"]
-        elif mode == "all":
-            targets = list(PERSONA_FILES) + ["MEMORY"]
-        else:
-            targets = [which.upper()]
-    else:
-        targets = [t.upper() for t in which]
-
-    # Resolve sources first so we only back up files that will actually be replaced.
-    resolved: list[tuple[str, Path, Path]] = []
-    for t in targets:
-        candidates = [oc / f"{t}.md", oc / "workspace" / f"{t}.md"]
-        src = next((p for p in candidates if p.exists()), None)
-        if src is None:
-            continue
-        dst = lampgo_home() / f"{t}.md"
-        resolved.append((t, src, dst))
-
-    backup = _backup_existing(p for _, _, p in resolved)
-
-    out: dict[str, bool] = {t: False for t in targets}
-    details: list[dict[str, Any]] = []
-    resolved_targets = {t for t, _, _ in resolved}
-    for t, src, dst in resolved:
-        bytes_written = 0
-        ok = False
-        try:
-            text = src.read_text(encoding="utf-8")
-            _atomic_write_text(dst, text)
-            bytes_written = len(text.encode("utf-8"))
-            ok = True
-            out[t] = True
-        except Exception:
-            logger.exception("personastore.import_failed", target=t, src=str(src))
-            out[t] = False
-        details.append({
-            "name": t,
-            "ok": ok,
-            "source": str(src),
-            "dest": str(dst),
-            "bytes": bytes_written,
-        })
-    for t in targets:
-        if t not in resolved_targets:
-            details.append({
-                "name": t,
-                "ok": False,
-                "source": None,
-                "dest": str(lampgo_home() / f"{t}.md"),
-                "bytes": 0,
-                "reason": "openclaw_missing",
-            })
-    return {
-        "imported": out,
-        "backup": str(backup) if backup else None,
-        "details": details,
-    }
-
-
 # ---- core memory ----
 
 def memory_core_path() -> Path:
@@ -413,36 +335,6 @@ def read_memory_core() -> str:
 
 def write_memory_core(content: str) -> None:
     _atomic_write_text(memory_core_path(), content)
-
-
-def import_memory_core_from_openclaw() -> dict[str, Any]:
-    """Copy OpenClaw's MEMORY.md into ~/.lampgo/MEMORY.md with backup.
-
-    Looks for OpenClaw's memory at the usual locations:
-      ~/.openclaw/MEMORY.md, ~/.openclaw/workspace/MEMORY.md
-    Returns {"imported": bool, "backup": str | None, "source": str | None}.
-    If no source is found, returns {"imported": False, ...} and does not touch
-    the existing lampgo memory file.
-    """
-    oc = openclaw_home()
-    candidates = [oc / "MEMORY.md", oc / "workspace" / "MEMORY.md"]
-    src = next((p for p in candidates if p.exists()), None)
-    if src is None:
-        return {"imported": False, "backup": None, "source": None}
-
-    dst = memory_core_path()
-    backup = _backup_existing([dst])
-    try:
-        _atomic_write_text(dst, src.read_text(encoding="utf-8"))
-        imported = True
-    except Exception:
-        logger.exception("personastore.import_memory_failed", src=str(src))
-        imported = False
-    return {
-        "imported": imported,
-        "backup": str(backup) if backup else None,
-        "source": str(src),
-    }
 
 
 # ---- daily memory ----
@@ -536,48 +428,29 @@ def append_memory_daily(
     return target
 
 
-# ---- OpenClaw memory preview ----
+# ---- local API token ----
 
-def openclaw_memory_preview(days: int = 3) -> dict[str, Any]:
-    base = openclaw_home()
-    if not base.exists():
-        return {"available": False, "core": "", "recent_days": []}
-    core_path = base / "workspace" / "MEMORY.md"
-    if not core_path.exists():
-        core_path = base / "MEMORY.md"
-    core = _read_text_or_default(core_path, "")
-    daily_base = base / "workspace" / "memory"
-    if not daily_base.is_dir():
-        daily_base = base / "memory"
-    recent: list[tuple[str, str]] = []
-    if daily_base.is_dir():
-        files = sorted(daily_base.glob("*.md"), key=lambda p: p.stem, reverse=True)
-        for p in files[:days]:
-            try:
-                date.fromisoformat(p.stem)
-            except ValueError:
-                continue
-            recent.append((p.stem, _read_text_or_default(p, "")))
-    return {"available": bool(core or recent), "core": core, "recent_days": recent}
+def get_or_create_local_api_token() -> str:
+    """Return the private token shared by LampGo's own local processes.
 
-
-# ---- plugin token ----
-
-def get_or_create_plugin_token() -> str:
-    """Token used by the OpenClaw plugin to write memory/persona via HTTP.
-
-    Stored in credentials.json under `plugin_token`.
+    It is generated and consumed automatically; users never need to configure
+    an environment variable. The legacy credential key is migrated silently.
     """
     cred = get_credentials()
-    token = str(cred.get("plugin_token") or "").strip()
+    token = str(cred.get("local_api_token") or cred.get("plugin_token") or "").strip()
     if token:
+        if not cred.get("local_api_token") or "plugin_token" in cred:
+            migrated = dict(cred)
+            migrated["local_api_token"] = token
+            migrated.pop("plugin_token", None)
+            _write_credentials(migrated)
         return token
     import secrets
     token = secrets.token_urlsafe(24)
-    set_credentials({"plugin_token": token})
+    set_credentials({"local_api_token": token})
     return token
 
 
-def get_plugin_token() -> str:
+def get_local_api_token() -> str:
     cred = get_credentials()
-    return str(cred.get("plugin_token") or "").strip()
+    return str(cred.get("local_api_token") or cred.get("plugin_token") or "").strip()

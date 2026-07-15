@@ -3,7 +3,7 @@
 The server owns:
   - Hardware (HAL, LED, Motion, Safety)
   - Skill system (Registry, Executor, FSM)
-  - IPC server (Unix socket for CLI / OpenClaw / scripts)
+  - IPC server (Unix socket for CLI / scripts)
   - IntentRouter (keyword + optional fast LLM)
 """
 
@@ -21,17 +21,16 @@ from typing import Any
 
 import structlog
 
-from lampgo.bridge.openclaw import OpenClawAdapter
-from lampgo.bridge.state_writer import MinimalState, StateWriter
+from lampgo.agent import AgentLedIndicator, AgentManager
 from lampgo.core.config import LampgoConfig, LEDConfig
 from lampgo.core.events import (
+    AgentAskRequested,
+    AgentAskResolved,
     AgentFinished,
     ChatMessage,
     EventBus,
     IntentProgress,
     IntentRouting,
-    OpenClawAskRequested,
-    OpenClawAskResolved,
     SkillStarted,
     ToolCallFinished,
     ToolCallPlanned,
@@ -103,7 +102,11 @@ class LampgoServer:
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
-        self.openclaw = OpenClawAdapter(self.registry, self.executor, self.events)
+        self.agent = AgentManager(
+            self.events,
+            api_base=f"http://127.0.0.1:{config.web.port}",
+        )
+        self._agent_indicator = AgentLedIndicator(self.events, self.led.set_mode)
         self.router = IntentRouter()
         self._stt: VolcengineASR = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
@@ -113,10 +116,11 @@ class LampgoServer:
         self._agent_sdk = None
         self._voice_reload_handle: asyncio.TimerHandle | None = None
         self._web_gateway = None
-        self._state_writer = StateWriter()
+        self._uvicorn_server = None
+        self._web_serve_task: asyncio.Task[None] | None = None
         self._recording_alias_cache: tuple[float, dict[str, str]] = (0.0, {})
-        self._openclaw_asks: dict[str, asyncio.Future[str]] = {}
-        self._openclaw_asks_lock = asyncio.Lock()
+        self._agent_asks: dict[str, asyncio.Future[str]] = {}
+        self._agent_asks_lock = asyncio.Lock()
         self._tts_tasks: set[asyncio.Task] = set()
         self._tts_lock = asyncio.Lock()
         self._cancelled_request_ids: set[str] = set()
@@ -184,7 +188,7 @@ class LampgoServer:
         recordings = build_recording_actions_prompt(Path(self.config.recordings_dir))
         return f"{recordings}\n\n{build_expression_prompt()}".strip()
 
-    # ---- user / composed skills (JSON-defined, created by OpenClaw & UI) ----
+    # ---- user / composed skills (JSON-defined, created by agents & UI) ----
 
     def _lampgo_home(self) -> Path:
         """Resolve ~/.lampgo (or $LAMPGO_HOME).  Deferred import to keep the
@@ -421,7 +425,7 @@ class LampgoServer:
 
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
-    async def openclaw_ask_user(
+    async def agent_ask_user(
         self,
         *,
         question: str,
@@ -431,12 +435,12 @@ class LampgoServer:
     ) -> dict[str, Any]:
         ask_id = f"ask_{uuid.uuid4().hex[:10]}"
         fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
-        async with self._openclaw_asks_lock:
-            self._openclaw_asks[ask_id] = fut
+        async with self._agent_asks_lock:
+            self._agent_asks[ask_id] = fut
 
         opts = list(options or [])
         await self.events.publish(
-            OpenClawAskRequested(
+            AgentAskRequested(
                 ask_id=ask_id,
                 question=question,
                 options=opts,
@@ -450,15 +454,15 @@ class LampgoServer:
         except TimeoutError:
             reply = ""
         finally:
-            async with self._openclaw_asks_lock:
-                self._openclaw_asks.pop(ask_id, None)
+            async with self._agent_asks_lock:
+                self._agent_asks.pop(ask_id, None)
 
-        await self.events.publish(OpenClawAskResolved(ask_id=ask_id, reply=reply, request_id=request_id))
+        await self.events.publish(AgentAskResolved(ask_id=ask_id, reply=reply, request_id=request_id))
         return {"ask_id": ask_id, "reply": reply, "timeout": reply == "", "ts": time.time()}
 
-    async def openclaw_reply_user(self, *, ask_id: str, reply: str, request_id: str = "") -> bool:
-        async with self._openclaw_asks_lock:
-            fut = self._openclaw_asks.get(ask_id)
+    async def agent_reply_user(self, *, ask_id: str, reply: str, request_id: str = "") -> bool:
+        async with self._agent_asks_lock:
+            fut = self._agent_asks.get(ask_id)
         if fut is None or fut.done():
             return False
         fut.set_result(reply)
@@ -833,6 +837,25 @@ class LampgoServer:
             return None
 
         intent = self.router.route(text)
+        if intent.intent_type == IntentType.COMPLEX and intent.direct_agent:
+            logger.info(
+                "server.text_direct_codex_handoff",
+                text=_log_safe(text),
+                request_id=request_id,
+                matched_keyword=intent.matched_keyword,
+            )
+            await _publish_intent_progress(
+                "agent_handoff",
+                "收到，你都点名了，我直接把大哥 Codex 叫来。",
+                "codex",
+            )
+            return await self._handoff_to_agent(
+                request_id=request_id,
+                text=text,
+                reason=intent.detail or "用户明确点名调用本机 Codex",
+                recent_tool_calls=[],
+            )
+
         if intent.intent_type == IntentType.COMPLEX and self.router.has_llm_client:
             logger.info(
                 "server.text_escalate_to_llm_agent",
@@ -873,17 +896,17 @@ class LampgoServer:
                     )
                 )
                 logger.info(
-                    "server.text_agent_handoff_to_openclaw",
+                    "server.text_agent_handoff",
                     text=_log_safe(text),
                     request_id=request_id,
                     stop_reason=agent_result.stop_reason,
                     detail=agent_result.detail,
                 )
-                await _publish_intent_progress("openclaw_handoff", "超出当前 tool 能力，转交 OpenClaw...", "openclaw")
-                return await self._handoff_to_openclaw(
+                await _publish_intent_progress("agent_handoff", "这个活儿有点大，我叫本机 Codex 来接手。", "codex")
+                return await self._handoff_to_agent(
                     request_id=request_id,
                     text=text,
-                    reason=agent_result.detail or "LLM 判定需要 OpenClaw 慢路径",
+                    reason=agent_result.detail or "LLM 判定需要复杂任务处理",
                     recent_tool_calls=self._serialize_agent_tool_calls(agent_result.tool_calls),
                 )
             await self.events.publish(
@@ -913,14 +936,14 @@ class LampgoServer:
 
         if intent.intent_type == IntentType.COMPLEX:
             await _publish_intent_progress(
-                "openclaw_handoff",
-                "关键词未命中且未能本地完成，转交 OpenClaw...",
-                "openclaw",
+                "agent_handoff",
+                "这个活儿有点大，我叫本机 Codex 来接手。",
+                "codex",
             )
-            return await self._handoff_to_openclaw(
+            return await self._handoff_to_agent(
                 request_id=request_id,
                 text=text,
-                reason=intent.detail or "需要 OpenClaw 慢路径处理",
+                reason=intent.detail or "需要复杂任务处理",
                 recent_tool_calls=[],
             )
 
@@ -977,7 +1000,7 @@ class LampgoServer:
             "ok": True,
             "result": {
                 "type": "complex",
-                "response": "This request is too complex for the fast path. Please use OpenClaw.",
+                "response": "This request is too complex for the fast path.",
                 "original_text": text,
                 "source": intent.source,
                 "detail": intent.detail,
@@ -1221,34 +1244,35 @@ class LampgoServer:
                 status=status or "ok",
             )
 
-    async def _handoff_to_openclaw(
+    async def _handoff_to_agent(
         self,
         request_id: str,
         text: str,
         reason: str,
         recent_tool_calls: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        logger.info("server.openclaw_handoff", request_id=request_id, text=_log_safe(text), reason=_log_safe(reason))
-        task = await self.openclaw.submit_complex_task(
+        logger.info("server.agent_handoff", request_id=request_id, text=_log_safe(text), reason=_log_safe(reason))
+        task = await self.agent.submit_task(
             {
                 "request_id": request_id,
                 "user_text": text,
                 "reason": reason,
-                "available_capabilities": self.openclaw.list_capabilities_dict(),
-                "recent_tool_calls": recent_tool_calls,
-                "current_state": self._handle_status().get("result", {}),
+                "context": {
+                    "recent_tool_calls": recent_tool_calls,
+                    "current_state": self._handle_status().get("result", {}),
+                },
             }
         )
         return {
             "ok": True,
             "result": {
-                "type": "openclaw",
-                "response": "已转交 OpenClaw 处理。你可以在任务区查看状态，并在需要时确认 promoted 方案。",
-                "source": "openclaw",
+                "type": "agent",
+                "response": "已经交给本机 Codex 处理了，我会把进度放在任务区。",
+                "source": "codex",
                 "detail": reason,
                 "matched_keyword": None,
-                "stop_reason": "openclaw_handoff",
-                "openclaw_task": task,
+                "stop_reason": "agent_handoff",
+                "agent_task": task,
             },
         }
 
@@ -1754,7 +1778,7 @@ class LampgoServer:
         """Validate + persist + register a user-authored composed skill.
 
         Called from:
-          - OpenClaw (``lampgo_save_skill`` tool)
+          - external agents through the LampGo tool surface
           - Web UI (``POST /api/skills/save``)
 
         Body: ``{definition: {...JSON skill spec...}, overwrite?: bool}``
@@ -1923,7 +1947,7 @@ class LampgoServer:
                     set_calibration_home(home)
 
         self._register_builtin_skills()
-        # Load any user-authored / OpenClaw-authored composed skills from
+        # Load user-authored composed skills from
         # ~/.lampgo/skills/user/ AFTER factory skills so their step targets
         # resolve during validation.
         self._load_user_skills()
@@ -1937,7 +1961,6 @@ class LampgoServer:
             except Exception:
                 logger.exception("server.esp32_start_failed")
         self._setup_llm_router()
-        self._state_writer.start(get_state=self._get_minimal_state)
         logger.info(
             "server.ready",
             skills=self.registry.list_ids(),
@@ -2023,18 +2046,6 @@ class LampgoServer:
                 "mode": "hardware",
                 "port": port,
             }
-
-    def _get_minimal_state(self) -> MinimalState:
-        camera_connected = bool(self.config.camera.port.strip())
-        mic_active = self._wake_loop is not None
-        return MinimalState(
-            status="busy" if self.executor.is_busy else "idle",
-            is_busy=self.executor.is_busy,
-            running_skill=self.executor.current_skill_id,
-            estopped=self.safety.is_estopped(),
-            camera_connected=camera_connected,
-            mic_active=mic_active,
-        )
 
     async def _home_on_start(self) -> None:
         """Slowly return to the fixed safe position on startup."""
@@ -2126,6 +2137,16 @@ class LampgoServer:
 
     async def shutdown(self) -> None:
         logger.info("server.shutting_down")
+        if self._uvicorn_server is not None:
+            self._uvicorn_server.should_exit = True
+        if self._web_serve_task is not None and not self._web_serve_task.done():
+            try:
+                await asyncio.wait_for(self._web_serve_task, timeout=3.0)
+            except TimeoutError:
+                self._web_serve_task.cancel()
+                await asyncio.gather(self._web_serve_task, return_exceptions=True)
+        self._web_serve_task = None
+        self._uvicorn_server = None
         await self._stop_idle_sway_scheduler()
         async with self._record_lock:
             if self._record_recorder is not None and self._record_recorder.is_recording:
@@ -2138,7 +2159,8 @@ class LampgoServer:
                     pass
             self._record_task = None
             self._record_recorder = None
-        await self._state_writer.stop()
+        await self._agent_indicator.shutdown()
+        await self.agent.shutdown()
         await self._stop_voice_loop()
         await self._ipc.stop()
         try:
@@ -2157,23 +2179,33 @@ class LampgoServer:
 
     async def run_forever(self) -> None:
         await self.start()
-        local_url = ""
-        if self.config.web_enabled:
-            local_url = await self._start_web_gateway(print_banner=False) or ""
-            vc = self.config.voice
-            if vc.wake_word and vc.livekit_url:
-                await self._start_voice_loop()
-            if local_url:
-                self._print_connection_banner(local_url)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
+        gateway_host = self._gateway_bind_host()
+        local_url = await self._start_web_gateway(print_banner=False, host=gateway_host) or ""
+        if self.config.web_enabled:
+            vc = self.config.voice
+            if vc.wake_word and vc.livekit_url:
+                await self._start_voice_loop()
+        await self.agent.bootstrap()
+        if self.config.web_enabled and local_url:
+            self._print_connection_banner(local_url)
         logger.info("server.running (Ctrl+C to stop)")
         await stop.wait()
         await self.shutdown()
 
-    async def _start_web_gateway(self, *, print_banner: bool = True) -> str | None:
+    def _gateway_bind_host(self) -> str:
+        """Keep the implicit Codex API local unless the user enabled the Web UI."""
+        return self.config.web.host if self.config.web_enabled else "127.0.0.1"
+
+    async def _start_web_gateway(
+        self,
+        *,
+        print_banner: bool = True,
+        host: str | None = None,
+    ) -> str | None:
         try:
             import uvicorn
 
@@ -2184,11 +2216,12 @@ class LampgoServer:
 
             uvi_config = uvicorn.Config(
                 gw.app,
-                host=self.config.web.host,
+                host=host or self.config.web.host,
                 port=self.config.web.port,
                 log_level="warning",
             )
             uvi_server = uvicorn.Server(uvi_config)
+            self._uvicorn_server = uvi_server
             self._web_serve_task = asyncio.create_task(uvi_server.serve())
             local_url = f"http://localhost:{self.config.web.port}"
             logger.info(
@@ -2206,28 +2239,21 @@ class LampgoServer:
             return None
 
     def _print_connection_banner(self, local_url: str) -> None:
-        """Print a clear banner so users know how to wire up OpenClaw when port changes."""
+        """Print a clear banner with the zero-config Codex integration state."""
         def _mark(ok: bool) -> str:
             return "✓" if ok else "✗"
 
         try:
-            from lampgo.bridge.openclaw_installer import detect_openclaw_integration
-
-            status = detect_openclaw_integration()
-            overall = status.overall
-            plugin_detail = "已安装" if status.plugin.ok else "未安装（运行 `lampgo install-openclaw --yes` 一键安装）"
-            skill_detail = "已注册" if status.skill.ok else "未注册（关键词触发不可用）"
-            trusted_detail = "已启用" if status.trusted.ok else "未启用（OpenClaw 会拒绝加载）"
+            status = self.agent.health()
+            connected = status.get("connection") == "connected"
             integration_lines = [
-                f"openclaw CLI     : {_mark(status.binary.ok)} {status.binary.detail}",
-                f"lampgo plugin    : {_mark(status.plugin.ok)} {plugin_detail}",
-                f"lampgo skill     : {_mark(status.skill.ok)} {skill_detail}",
-                f"plugin 启用      : {_mark(status.trusted.ok)} {trusted_detail}",
-                f"gateway 在线     : {_mark(status.gateway.ok)} {status.gateway.detail}",
+                f"Codex CLI        : {_mark(bool(status.get('binary_path')))} {status.get('binary_path') or '未检测到'}",
+                f"Codex 登录       : {_mark(bool(status.get('logged_in')))} {'已登录' if status.get('logged_in') else '请打开 Codex 登录'}",
+                f"LampGo MCP       : {_mark(bool(status.get('mcp_registered')))} {'已自动注册' if status.get('mcp_registered') else '等待自动注册'}",
             ]
-            overall_line = f"集成状态         : {overall}"
+            overall_line = f"Codex 集成       : {'已接通' if connected else status.get('detail', '未就绪')}"
         except Exception:
-            integration_lines = ["openclaw 集成检测失败（忽略）"]
+            integration_lines = ["Codex 集成检测失败（LampGo 仍可运行）"]
             overall_line = ""
 
         vc = self.config.voice
@@ -2264,15 +2290,13 @@ class LampgoServer:
             "",
             "──────── lampgo ready ────────",
             f"Web UI           : {local_url}",
-            f"OpenClaw plugin  : set lampgoApiBase = {local_url}",
-            f"Env override     : export LAMPGO_API_BASE={local_url}",
+            "复杂任务         : 本机 Codex（自动发现、自动连接）",
             *integration_lines,
         ]
         if overall_line:
             lines.append(overall_line)
         lines.extend(livekit_lines)
         lines += [
-            "一键修复集成     : uv run lampgo install-openclaw --yes",
             "──────────────────────────────",
             "",
         ]

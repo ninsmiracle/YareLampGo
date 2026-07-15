@@ -1,6 +1,6 @@
 # 动作与表情
 
-YareLampGo 把真实硬件控制包装成技能。上层用户、Web UI、CLI、LLM 和 OpenClaw 都通过技能调用运动、表情、录制和组合动作，避免绕过安全内核直接写电机。
+YareLampGo 把真实硬件控制包装成技能。上层用户、Web UI、CLI、本地 LLM 和 Codex 都通过技能调用运动、表情、录制和组合动作，避免绕过安全内核直接写电机。
 
 ## 内置动作
 
@@ -24,7 +24,7 @@ uv run lampgo text "看向左边"
 uv run lampgo text "跳个舞"
 ```
 
-`IntentRouter` 会先尝试关键词匹配；未命中时再进入 LLM tool calling；本地无法稳妥完成的复杂任务可以升级到 OpenClaw。
+`IntentRouter` 会先尝试关键词匹配；未命中时再进入 LLM tool calling；本地快速路径无法稳妥完成的复杂任务会交给 Codex。
 
 ## 直接移动关节
 
@@ -60,11 +60,7 @@ uv run lampgo invoke set_expression expression=smiley
 uv run lampgo invoke set_expression expression=thinking
 ```
 
-可用表情以代码中的 `LED_EXPRESSIONS` 和 Web UI 面板为准。Agent 参考资料位于：
-
-```text
-openclaw-skills/lampgo/references/led-modes.md
-```
+可用表情以代码中的 `LED_EXPRESSIONS`、技能列表和 Web UI 面板为准。Codex 可通过 `lampgo_list_skills` 动态读取当前能力。
 
 ## 录制动作
 

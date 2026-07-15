@@ -6,8 +6,8 @@ import asyncio
 import json
 import os
 import re
-from copy import deepcopy
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -63,11 +63,14 @@ _MIMO_MIN_COMPLETION_TOKENS = 4096
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
 
 Physical invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
-- You are a physical desk lamp robot, not a generic assistant, not a disembodied AI, not "OpenClaw". Your name, speaking style, and how you address the user should follow the persona files below.
+- You are a physical desk lamp robot, not a generic assistant or a disembodied AI. Your name, speaking style, and how you address the user should follow the persona files below.
 - `say` is the ONLY channel for user-facing spoken content. Any answer, fact, observation, result, apology, or narration the user should hear MUST be sent through `say`.
 - `finish_response` is only a terminal signal plus a very short UI closer. It is not a place to answer the user.
 - When you need real-time facts, call `web_search` instead of guessing.
-- When a request is beyond the lamp's physical or tool capability, call `escalate_to_openclaw` with a short reason rather than hallucinating.
+- When a request is beyond the lamp's physical or tool capability, call `escalate_to_agent` with a short reason rather than hallucinating.
+- If the user explicitly says to call/summon Codex or “你大哥” (for example “把 Codex 叫来”,
+  “把你大哥叫来”, “交给 Codex”, or “让 Codex 来”), immediately call `escalate_to_agent` and preserve
+  the user's original task. A casual mention of Codex or “大哥” is not a summon.
 - You express yourself with body pose + voice + facial expression combined — that is the lamp's signature channel.
 - Persona / memory files below are authoritative for identity name, tone, relationship, and long-term context, but not for physical/tool capability.
 
@@ -105,7 +108,7 @@ Finish_response anti-repetition rules (VERY IMPORTANT):
   - (after scan) "扫完啦～"
   - (after shy pose) "嗯嗯～"
   - (after info lookup) "查好啦～"
-- If the request is impossible or outside your physical/tool abilities, call escalate_to_openclaw with a short reason.
+- If the request is impossible or outside your physical/tool abilities, call escalate_to_agent with a short reason.
 - Always respond in the same language as the user.
 - Keep replies concise and action-oriented.
 
@@ -373,10 +376,10 @@ def _build_agent_tools(
         )
     tools.append(
         _build_function_tool(
-            "escalate_to_openclaw",
-            "Hand off to OpenClaw slow path for tasks that exceed lampgo's local capabilities",
+            "escalate_to_agent",
+            "Hand off to the local complex-task agent for work beyond LampGo's fast path",
             {
-                "reason": {"type": "string", "description": "Short reason why this needs OpenClaw"},
+                "reason": {"type": "string", "description": "Short reason why this needs the local agent"},
                 "context_summary": {"type": "string", "description": "Optional short context summary for the handoff"},
             },
         )
@@ -505,7 +508,7 @@ class LLMClient:
         try:
             from lampgo.persona.bundle import load_bundles
 
-            persona, memory = load_bundles(self._config)
+            persona, memory = load_bundles(self._config, query=text)
         except Exception:
             logger.exception("llm_client.load_bundles_failed")
         recording_actions_prompt = self._recording_actions_prompt
@@ -681,7 +684,7 @@ class LLMClient:
 
                 return AgentLoopResult(
                     intent_type="complex",
-                    response="This request is too complex for the fast path. Please use OpenClaw.",
+                    response="This request is too complex for the fast path.",
                     detail="LLM 未返回任何工具调用",
                     stop_reason="missing_tool_call",
                     tool_calls=tool_records,
@@ -703,7 +706,7 @@ class LLMClient:
             is_terminal_turn = (
                 "finish_response" in tool_names_in_turn
                 or "end_conversation" in tool_names_in_turn
-                or "escalate_to_openclaw" in tool_names_in_turn
+                or "escalate_to_agent" in tool_names_in_turn
             )
             if assistant_content and not is_terminal_turn and on_progress is not None:
                 narration = _strip_think_tags(assistant_content).strip()
@@ -745,7 +748,7 @@ class LLMClient:
                         await asyncio.gather(*pending_tts, return_exceptions=True)
                     return AgentLoopResult(
                         intent_type="complex",
-                        response="This request is too complex for the fast path. Please use OpenClaw.",
+                        response="This request is too complex for the fast path.",
                         detail="超过最大工具调用次数",
                         stop_reason="max_tool_calls",
                         tool_calls=tool_records,
@@ -817,7 +820,7 @@ class LLMClient:
                         end_conversation=True,
                     )
 
-                if tool_name == "escalate_to_openclaw":
+                if tool_name == "escalate_to_agent":
                     if pending_tts:
                         await asyncio.gather(*pending_tts, return_exceptions=True)
                     reason = str(arguments.get("reason", "")).strip() or "LLM 判定请求过于复杂"
@@ -826,7 +829,7 @@ class LLMClient:
                         reason = f"{reason} | {context_summary}"
                     return AgentLoopResult(
                         intent_type="complex",
-                        response="This request is too complex for the fast path. Please use OpenClaw.",
+                        response="This request is too complex for the fast path.",
                         detail=reason,
                         stop_reason="complex_handoff",
                         tool_calls=tool_records,
@@ -951,7 +954,7 @@ class LLMClient:
 
         return AgentLoopResult(
             intent_type="complex",
-            response="This request is too complex for the fast path. Please use OpenClaw.",
+            response="This request is too complex for the fast path.",
             detail="达到最大 LLM 轮次限制",
             stop_reason="max_turns",
             tool_calls=tool_records,

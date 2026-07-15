@@ -269,34 +269,3 @@ def detect_ports() -> dict:
         "all_ports": ports if ports else [],
         "messages": messages,
     }
-
-
-def write_env_file(
-    motor_port: str | None = None,
-    led_port: str | None = None,
-    lamp_id: str = "AL02",
-    env_path: str = "~/.openclaw/.env",
-) -> str:
-    """Write detected ports to an env file (for OpenClaw setup)."""
-    from pathlib import Path
-
-    path = Path(env_path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    existing: dict[str, str] = {}
-    if path.exists():
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                existing[k.strip()] = v.strip()
-
-    if motor_port:
-        existing["LAMPGO_MOTOR_PORT"] = motor_port
-    if led_port:
-        existing["LAMPGO_LED_PORT"] = led_port
-    existing.setdefault("LAMPGO_LAMP_ID", lamp_id)
-
-    lines = [f"{k}={v}" for k, v in sorted(existing.items())]
-    path.write_text("\n".join(lines) + "\n")
-    return str(path)

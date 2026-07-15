@@ -1,4 +1,4 @@
-"""ComposedSkill — user-/OpenClaw-authored skill built by sequencing existing
+"""ComposedSkill — user- or agent-authored skill built by sequencing existing
 factory skills and/or custom joint-trajectory keyframes.
 
 Motivation
@@ -7,8 +7,8 @@ The factory skills (``move_to``, ``nod``, ``set_expression``, ``play_recording``
 …) cover the atomic vocabulary, but many user-visible behaviours are really a
 **fixed sequence** of those atoms — optionally interleaved with a one-off
 custom joint-trajectory when no existing skill matches the shape of the
-motion.  Rather than force users to edit Python + restart, we let OpenClaw /
-the Web UI drop a JSON file into ``~/.lampgo/skills/user/`` and pick it up
+motion. Rather than force users to edit Python + restart, we let Codex or the
+Web UI drop a JSON file into ``~/.lampgo/skills/user/`` and pick it up
 as a real registered skill.
 
 Step shapes

@@ -1,8 +1,0 @@
-{
-  "name": "lampgo",
-  "version": "0.2.0",
-  "description": "lampgo desk lamp robot — 5-DOF arm + LED expressions + camera vision + visual servoing + complex animation",
-  "author": "lampgo-team",
-  "tags": ["robotics", "lamp", "motion", "led", "vision", "openclaw"],
-  "license": "GPL-3.0-only"
-}
