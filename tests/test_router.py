@@ -23,7 +23,15 @@ def test_explicit_codex_summon_routes_directly_to_agent(text: str) -> None:
     assert intent.detail == "用户明确点名调用本机 Codex"
 
 
-@pytest.mark.parametrize("text", ["Codex 是什么", "我大哥今天来了", "先别把 Codex 叫来"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Codex 是什么",
+        "我大哥今天来了",
+        "我大哥来找我了，顺便帮我改了文档",
+        "先别把 Codex 叫来",
+    ],
+)
 def test_codex_mention_without_summon_does_not_force_direct_agent(text: str) -> None:
     intent = IntentRouter().route(text)
 

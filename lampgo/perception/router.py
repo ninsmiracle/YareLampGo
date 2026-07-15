@@ -57,7 +57,7 @@ CODEX_SUMMON_PATTERNS = (
     re.compile(r"(?:叫|喊|请|找|拉|召唤|调用|启动|请出)(?:一下|下)?(?:codex|你大哥|大哥)(?:来|过来)?"),
     re.compile(r"(?:交给|转给)(?:codex|你大哥|大哥)"),
     re.compile(r"让(?:codex|你大哥|大哥)(?:来|过来|处理|接手|帮忙)"),
-    re.compile(r"(?:codex|你大哥|大哥)(?:来|过来)(?:处理|接手|帮忙)?"),
+    re.compile(r"(?:codex|你大哥|大哥)(?:来|过来)(?:处理|接手|帮忙|帮我)"),
 )
 CODEX_SUMMON_NEGATION_RE = re.compile(
     r"(?:不要|不用|无需|不必|先别|别)(?:把|叫|喊|请|找|拉|召唤|调用|启动|交给|转给)?(?:codex|你大哥|大哥)"

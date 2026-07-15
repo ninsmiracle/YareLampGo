@@ -21,6 +21,8 @@ _APP_CANDIDATES = (
     Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
     Path("/Applications/Codex.app/Contents/Resources/codex"),
 )
+_ALLOWED_SANDBOXES = frozenset({"read-only", "workspace-write"})
+_PROCESS_STOP_TIMEOUT_S = 3.0
 
 
 @dataclass
@@ -155,6 +157,12 @@ class CodexProvider:
         sandbox: str,
         on_event: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> CodexRunResult:
+        if sandbox not in _ALLOWED_SANDBOXES:
+            return CodexRunResult(
+                ok=False,
+                exit_code=2,
+                stderr=f"不支持的 Codex sandbox：{sandbox}",
+            )
         status = await asyncio.to_thread(ensure_codex_integration)
         if status.connection != "connected":
             return CodexRunResult(ok=False, exit_code=127, stderr=status.detail)
@@ -179,11 +187,6 @@ class CodexProvider:
             stderr=asyncio.subprocess.PIPE,
         )
         self._processes[task_id] = proc
-        assert proc.stdin is not None
-        proc.stdin.write(prompt.encode("utf-8"))
-        await proc.stdin.drain()
-        proc.stdin.close()
-
         thread_id = ""
         final_message = ""
         stderr_chunks: list[str] = []
@@ -195,6 +198,11 @@ class CodexProvider:
 
         stderr_task = asyncio.create_task(read_stderr())
         try:
+            assert proc.stdin is not None
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+
             assert proc.stdout is not None
             while line := await proc.stdout.readline():
                 raw = line.decode("utf-8", errors="replace").strip()
@@ -217,8 +225,24 @@ class CodexProvider:
             await stderr_task
         finally:
             self._processes.pop(task_id, None)
+            if proc.stdin is not None and not proc.stdin.is_closing():
+                proc.stdin.close()
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=_PROCESS_STOP_TIMEOUT_S)
+                except TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
             if not stderr_task.done():
                 stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
         return CodexRunResult(
             ok=code == 0,
             exit_code=code,
@@ -231,10 +255,16 @@ class CodexProvider:
         proc = self._processes.get(task_id)
         if proc is None or proc.returncode is not None:
             return False
-        proc.terminate()
         try:
-            await asyncio.wait_for(proc.wait(), timeout=3.0)
+            proc.terminate()
+        except ProcessLookupError:
+            return False
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_STOP_TIMEOUT_S)
         except TimeoutError:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             await proc.wait()
         return True

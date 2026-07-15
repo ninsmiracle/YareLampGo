@@ -46,7 +46,10 @@ class AgentLedIndicator:
         if not task_id or not status:
             return
 
-        self._task_statuses[task_id] = status
+        if status in ACTIVE_STATUSES:
+            self._task_statuses[task_id] = status
+        else:
+            self._task_statuses.pop(task_id, None)
         mode = self._resolve_mode(status)
         if mode is None or mode == self._desired_mode:
             return

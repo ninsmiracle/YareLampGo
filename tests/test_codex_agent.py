@@ -1,9 +1,10 @@
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from lampgo.agent.codex import CodexRunResult, _entry_matches
+from lampgo.agent.codex import CodexProvider, CodexRunResult, CodexStatus, _entry_matches
 from lampgo.agent.indicator import AgentLedIndicator
 from lampgo.agent.manager import AgentManager
 from lampgo.agent.progress import summarize_codex_event
@@ -37,6 +38,7 @@ async def test_agent_led_indicator_maps_task_lifecycle() -> None:
     await indicator.flush()
 
     assert modes == ["focused", "check", "cross"]
+    assert indicator._task_statuses == {}
     await indicator.shutdown()
 
 
@@ -57,6 +59,101 @@ async def test_agent_led_indicator_stays_focused_while_any_task_is_active() -> N
     await indicator.flush()
     assert modes == ["focused", "check"]
     await indicator.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_rejects_unsafe_sandbox(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "lampgo.agent.codex.ensure_codex_integration",
+        lambda: (_ for _ in ()).throw(AssertionError("integration must not run")),
+    )
+
+    async def ignore_event(_event: dict[str, Any]) -> None:
+        return None
+
+    result = await CodexProvider().run(
+        task_id="unsafe",
+        prompt="do something",
+        workspace=tmp_path,
+        sandbox="danger-full-access",
+        on_event=ignore_event,
+    )
+
+    assert result.ok is False
+    assert result.exit_code == 2
+    assert "sandbox" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_cleans_up_when_event_handler_fails(monkeypatch, tmp_path: Path) -> None:
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def write(self, _data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        def is_closing(self) -> bool:
+            return self.closed
+
+    class FakeReader:
+        def __init__(self, lines: list[bytes]) -> None:
+            self.lines = lines
+
+        async def readline(self) -> bytes:
+            return self.lines.pop(0) if self.lines else b""
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeWriter()
+            self.stdout = FakeReader([b'{"type":"turn.started"}\n'])
+            self.stderr = FakeReader([])
+            self.returncode = None
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            self.returncode = 0 if self.returncode is None else self.returncode
+            return self.returncode
+
+    process = FakeProcess()
+    monkeypatch.setattr(
+        "lampgo.agent.codex.ensure_codex_integration",
+        lambda: CodexStatus(connection="connected", binary_path="/usr/bin/codex"),
+    )
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("lampgo.agent.codex.asyncio.create_subprocess_exec", fake_subprocess)
+
+    async def fail_event(_event: dict[str, Any]) -> None:
+        raise RuntimeError("event sink failed")
+
+    provider = CodexProvider()
+    with pytest.raises(RuntimeError, match="event sink failed"):
+        await provider.run(
+            task_id="cleanup",
+            prompt="inspect",
+            workspace=tmp_path,
+            sandbox="read-only",
+            on_event=fail_event,
+        )
+
+    assert process.terminated is True
+    assert process.stdin.closed is True
+    assert provider._processes == {}
 
 
 def test_codex_mcp_registration_requires_exact_stdio_command() -> None:
@@ -144,6 +241,65 @@ async def test_agent_manager_streams_and_persists_codex_task(monkeypatch, tmp_pa
     assert task["events"][-1]["summary"] == "已执行：rg -n TODO lampgo"
     assert "camera_snap" in received_prompt
     assert (tmp_path / "lampgo" / "agent_tasks.json").exists()
+    assert await manager.cancel_task(created["task_id"]) is False
+    assert manager.get_task(created["task_id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_times_out_and_cancels_provider(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path / "lampgo"))
+    monkeypatch.setattr("lampgo.agent.manager._CODEX_TASK_TIMEOUT_S", 0.01)
+    manager = AgentManager(EventBus(), api_base="http://127.0.0.1:8420")
+    cancelled: list[str] = []
+
+    class SlowProvider:
+        async def run(self, **_kwargs):
+            await asyncio.Event().wait()
+
+        async def cancel(self, task_id: str) -> bool:
+            cancelled.append(task_id)
+            return True
+
+    manager._provider = SlowProvider()  # type: ignore[assignment]
+    created = await manager.submit_task({"user_text": "分析项目", "workspace": str(tmp_path)})
+    await manager._running[created["task_id"]]
+
+    task = manager.get_task(created["task_id"])
+    assert task is not None
+    assert task["status"] == "failed"
+    assert "超时" in task["detail"]
+    assert cancelled == [created["task_id"]]
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_cancel_wins_running_task_race(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path / "lampgo"))
+    manager = AgentManager(EventBus(), api_base="http://127.0.0.1:8420")
+    started = asyncio.Event()
+
+    class BlockingProvider:
+        async def run(self, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def cancel(self, _task_id: str) -> bool:
+            return True
+
+    manager._provider = BlockingProvider()  # type: ignore[assignment]
+    created = await manager.submit_task({"user_text": "分析项目", "workspace": str(tmp_path)})
+    await started.wait()
+
+    assert await manager.cancel_task(created["task_id"]) is True
+    assert manager.get_task(created["task_id"])["status"] == "cancelled"
+
+
+def test_server_keeps_implicit_codex_api_on_loopback() -> None:
+    server = LampgoServer(LampgoConfig(no_hw=True))
+    assert server._gateway_bind_host() == "127.0.0.1"
+
+    server.config.web_enabled = True
+    server.config.web.host = "0.0.0.0"
+    assert server._gateway_bind_host() == "0.0.0.0"
 
 
 def test_codex_progress_exposes_commentary_but_not_private_reasoning() -> None:

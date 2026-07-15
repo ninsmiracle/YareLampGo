@@ -20,6 +20,8 @@ from lampgo.context.codex_memory import CodexMemorySummaryProvider
 from lampgo.core.events import AgentTaskUpdated, EventBus
 
 logger = structlog.get_logger(__name__)
+_ACTIVE_TASK_STATUSES = frozenset({"queued", "running", "cancelling"})
+_CODEX_TASK_TIMEOUT_S = 30 * 60.0
 _WRITE_MARKERS = (
     "改",
     "写",
@@ -154,74 +156,106 @@ class AgentManager:
         return task.to_dict()
 
     async def cancel_task(self, task_id: str) -> bool:
-        task = self._tasks.get(task_id)
-        if task is None:
-            return False
-        task.status = "cancelling"
-        task.detail = "正在停止 Codex 任务。"
-        task.updated_at = time.time()
-        await self._publish(task)
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.status not in _ACTIVE_TASK_STATUSES:
+                return False
+            should_publish_cancelling = task.status != "cancelling"
+            if should_publish_cancelling:
+                task.status = "cancelling"
+                task.detail = "正在停止 Codex 任务。"
+                task.updated_at = time.time()
+                self._persist()
+        if should_publish_cancelling:
+            await self._publish(task, persist=False)
         cancelled = await self._provider.cancel(task_id)
         runner = self._running.get(task_id)
         if runner and not runner.done():
             runner.cancel()
-        task.status = "cancelled"
-        task.detail = "任务已取消。"
-        task.updated_at = time.time()
-        self._persist()
-        await self._publish(task)
+            await asyncio.gather(runner, return_exceptions=True)
+        should_publish = False
+        async with self._lock:
+            if task.status == "cancelling":
+                task.status = "cancelled"
+                task.detail = "任务已取消。"
+                task.updated_at = time.time()
+                self._persist()
+                should_publish = True
+        if should_publish:
+            await self._publish(task, persist=False)
         return cancelled or runner is not None
 
     async def _run(self, task_id: str) -> None:
-        task = self._tasks[task_id]
-        task.status = "running"
-        task.detail = "Codex 正在处理。"
-        task.updated_at = time.time()
-        await self._publish(task)
+        async with self._lock:
+            task = self._tasks[task_id]
+            if task.status != "queued":
+                return
+            task.status = "running"
+            task.detail = "Codex 正在处理。"
+            task.updated_at = time.time()
+            self._persist()
+        await self._publish(task, persist=False)
 
         memory = self._memory.get_context(task.user_text, max_chars=6000)
         prompt = self._build_prompt(task, memory)
+        provider_thread_id = ""
 
         async def on_event(event: dict[str, Any]) -> None:
-            event_type = str(event.get("type") or "event")
-            if event_type == "thread.started":
-                task.provider_thread_id = str(event.get("thread_id") or "")
             progress = summarize_codex_event(event)
-            if progress is None:
-                return
-            progress = {**progress, "ts": time.time()}
-            task.events.append(progress)
-            task.events = task.events[-100:]
-            task.detail = str(progress.get("summary") or task.detail)
-            task.updated_at = time.time()
+            async with self._lock:
+                if task.status != "running":
+                    return
+                event_type = str(event.get("type") or "event")
+                if event_type == "thread.started":
+                    task.provider_thread_id = str(event.get("thread_id") or "")
+                if progress is None:
+                    return
+                progress = {**progress, "ts": time.time()}
+                task.events.append(progress)
+                task.events = task.events[-100:]
+                task.detail = str(progress.get("summary") or task.detail)
+                task.updated_at = time.time()
             await self._publish(task, persist=False, progress=progress)
 
         try:
-            result = await self._provider.run(
-                task_id=task.task_id,
-                prompt=prompt,
-                workspace=Path(task.workspace),
-                sandbox=task.sandbox,
-                on_event=on_event,
+            result = await asyncio.wait_for(
+                self._provider.run(
+                    task_id=task.task_id,
+                    prompt=prompt,
+                    workspace=Path(task.workspace),
+                    sandbox=task.sandbox,
+                    on_event=on_event,
+                ),
+                timeout=_CODEX_TASK_TIMEOUT_S,
             )
         except asyncio.CancelledError:
             return
+        except TimeoutError:
+            await self._provider.cancel(task_id)
+            status = "failed"
+            detail = "Codex 任务运行超时，已停止本地进程。"
         except Exception as exc:  # noqa: BLE001
             logger.exception("agent.run_failed", task_id=task_id)
-            task.status = "failed"
-            task.detail = f"Codex 调用异常：{exc}"
+            status = "failed"
+            detail = f"Codex 调用异常：{exc}"
         else:
-            task.provider_thread_id = result.thread_id or task.provider_thread_id
+            provider_thread_id = result.thread_id
             if result.ok:
-                task.status = "completed"
-                task.detail = result.final_message or "Codex 已完成任务。"
+                status = "completed"
+                detail = result.final_message or "Codex 已完成任务。"
             else:
-                task.status = "failed"
+                status = "failed"
                 error = result.stderr or f"Codex 退出码 {result.exit_code}"
-                task.detail = error[-1200:]
-        task.updated_at = time.time()
-        self._persist()
-        await self._publish(task)
+                detail = error[-1200:]
+        async with self._lock:
+            if task.status != "running":
+                return
+            task.provider_thread_id = provider_thread_id or task.provider_thread_id
+            task.status = status
+            task.detail = detail
+            task.updated_at = time.time()
+            self._persist()
+        await self._publish(task, persist=False)
 
     @staticmethod
     def _sandbox_for(text: str) -> str:

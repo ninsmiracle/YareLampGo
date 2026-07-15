@@ -2179,14 +2179,14 @@ class LampgoServer:
 
     async def run_forever(self) -> None:
         await self.start()
-        local_url = ""
+        gateway_host = self._gateway_bind_host()
+        local_url = await self._start_web_gateway(print_banner=False, host=gateway_host) or ""
         if self.config.web_enabled:
-            local_url = await self._start_web_gateway(print_banner=False) or ""
             vc = self.config.voice
             if vc.wake_word and vc.livekit_url:
                 await self._start_voice_loop()
         await self.agent.bootstrap()
-        if local_url:
+        if self.config.web_enabled and local_url:
             self._print_connection_banner(local_url)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -2196,7 +2196,16 @@ class LampgoServer:
         await stop.wait()
         await self.shutdown()
 
-    async def _start_web_gateway(self, *, print_banner: bool = True) -> str | None:
+    def _gateway_bind_host(self) -> str:
+        """Keep the implicit Codex API local unless the user enabled the Web UI."""
+        return self.config.web.host if self.config.web_enabled else "127.0.0.1"
+
+    async def _start_web_gateway(
+        self,
+        *,
+        print_banner: bool = True,
+        host: str | None = None,
+    ) -> str | None:
         try:
             import uvicorn
 
@@ -2207,7 +2216,7 @@ class LampgoServer:
 
             uvi_config = uvicorn.Config(
                 gw.app,
-                host=self.config.web.host,
+                host=host or self.config.web.host,
                 port=self.config.web.port,
                 log_level="warning",
             )
