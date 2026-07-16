@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YareLampGo 控制台</title>
   <link rel="icon" href="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg">
-  <link rel="stylesheet" href="/style.css?v=recording-expression-presets-20260710">
+  <link rel="stylesheet" href="/style.css?v=led-pixel-clips-20260715">
   <link rel="stylesheet" href="/setup.css?v=secret-inputs-20260602">
 </head>
 <body>
@@ -373,23 +373,40 @@
                 <button type="button" class="skill-search-clear" data-target="expression-search" aria-label="清空搜索">×</button>
               </div>
               <div id="expression-grid" class="skill-card-grid"></div>
-              <form id="led-effect-form" class="expression-editor-row">
-                <input id="led-effect-id" type="text" maxlength="32" placeholder="效果 ID" required />
-                <input id="led-effect-label" type="text" maxlength="64" placeholder="显示名称" required />
-                <select id="led-effect-role" aria-label="LED 用途">
-                  <option value="mouth">嘴巴</option>
-                  <option value="symbol">符号</option>
-                  <option value="direction">方向</option>
-                  <option value="accent">气氛</option>
-                </select>
-                <select id="led-effect-template" aria-label="程序模板">
-                  <option value="mouth">嘴巴</option>
-                  <option value="arrow">箭头</option>
-                  <option value="heart">爱心</option>
-                  <option value="pulse">脉冲</option>
-                </select>
-                <input id="led-effect-color" type="color" value="#ffffff" title="默认颜色" />
-                <button class="primary-button" type="submit">保存 LED 效果</button>
+              <form id="led-effect-form" class="led-animation-editor">
+                <div class="led-editor-head">
+                  <input id="led-effect-id" type="text" maxlength="32" placeholder="效果 ID" required />
+                  <input id="led-effect-label" type="text" maxlength="64" placeholder="显示名称" required />
+                  <select id="led-effect-role" aria-label="LED 用途">
+                    <option value="mouth">嘴巴</option>
+                    <option value="symbol">符号</option>
+                    <option value="direction">方向</option>
+                    <option value="accent">气氛</option>
+                  </select>
+                  <span id="led-editor-status" class="led-editor-status">新动画</span>
+                </div>
+                <div class="led-editor-workspace">
+                  <div class="led-editor-stage">
+                    <canvas id="led-editor-canvas" width="1020" height="180" aria-label="51 乘 9 LED 动画画布"></canvas>
+                    <div id="led-frame-timeline" class="led-frame-timeline" aria-label="30 帧时间轴"></div>
+                  </div>
+                  <div class="led-editor-tools">
+                    <div id="led-editor-palette" class="led-editor-palette" aria-label="LED 调色板"></div>
+                    <div class="led-editor-tool-row" role="group" aria-label="绘制工具">
+                      <button type="button" class="is-active" data-led-tool="paint" title="画笔">画笔</button>
+                      <button type="button" data-led-tool="erase" title="橡皮">橡皮</button>
+                      <button id="btn-led-copy-frame" type="button" title="复制当前帧，不修改画布">复制</button>
+                      <button id="btn-led-paste-frame" type="button" title="粘贴复制的帧到当前选中的时间轴帧" disabled>粘贴</button>
+                      <button id="btn-led-mirror-frame" type="button" title="左右镜像">镜像</button>
+                      <button id="btn-led-clear-frame" type="button" title="清空当前帧">清空</button>
+                    </div>
+                    <div class="led-editor-command-row">
+                      <button id="btn-led-editor-preview" class="ghost-button" type="button">播放预览</button>
+                      <button id="btn-led-editor-save" class="ghost-button" type="button">仅保存</button>
+                      <button id="btn-led-editor-sync" class="primary-button" type="submit">保存并同步</button>
+                    </div>
+                  </div>
+                </div>
               </form>
             </div>
 
@@ -403,7 +420,7 @@
                 <div class="expression-controls">
                   <label>眼睛<select id="composer-eye"><option value="">无眼睛</option></select></label>
                   <label>LED<select id="composer-led"><option value="">无 LED</option></select></label>
-                  <label>颜色<input id="composer-color" type="color" value="#ffffff" /></label>
+                  <label class="expression-color-control"><input id="composer-color-override" type="checkbox" />覆盖主色<input id="composer-color" type="color" value="#ffffff" /></label>
                   <label>亮度<input id="composer-brightness" type="range" min="1" max="96" value="64" /></label>
                   <label>强度<input id="composer-intensity" type="range" min="10" max="100" value="100" /></label>
                   <div class="expression-direction" role="group" aria-label="方向">
@@ -413,20 +430,20 @@
                     <button type="button" class="is-active" data-direction="right" title="向右">→</button>
                   </div>
                   <div class="expression-playback" role="group" aria-label="播放方式">
-                    <button type="button" class="is-active" data-playback="once">单次</button>
-                    <button type="button" data-playback="loop">循环</button>
+                    <button type="button" data-playback="once">单次</button>
+                    <button type="button" class="is-active" data-playback="loop">循环</button>
                   </div>
                   <div class="expression-command-row">
                     <button id="btn-expression-preview" class="ghost-button" type="button" title="本地预览">▶ 预览</button>
-                    <button id="btn-expression-sync" class="ghost-button" type="button">同步眼睛</button>
+                    <button id="btn-expression-sync" class="ghost-button" type="button">同步所选资源</button>
                     <button id="btn-expression-set-default" class="ghost-button" type="button">设为默认搭配</button>
                     <button id="btn-expression-play" class="primary-button" type="button">▶ 播放</button>
                     <button id="btn-expression-stop" class="ghost-button" type="button" title="停止播放">■</button>
                   </div>
                   <div class="expression-save-row">
-                    <input id="composer-preset-id" type="text" maxlength="32" placeholder="组合 ID" />
-                    <input id="composer-preset-label" type="text" maxlength="64" placeholder="组合名称" />
-                    <button id="btn-expression-save" class="ghost-button" type="button">保存组合</button>
+                    <input id="composer-preset-id" type="hidden" />
+                    <input id="composer-preset-label" type="text" maxlength="64" placeholder="给这个组合命名" />
+                    <button id="btn-expression-save" class="ghost-button" type="button">暂存组合</button>
                   </div>
                 </div>
               </div>
@@ -1421,7 +1438,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=recording-expression-presets-20260710"></script>
+  <script src="/app.js?v=led-frame-clipboard-20260715"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

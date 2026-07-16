@@ -9,12 +9,23 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from lampgo import personastore
 from lampgo.core.led import led_expression_catalog
 from lampgo.expression_clips import list_expression_clips, load_expression_clip
+from lampgo.led_effects import (
+    LED_EFFECT_BUDGET_BYTES,
+    MAX_CUSTOM_LED_EFFECTS,
+    MAX_LED_EFFECT_BYTES,
+    LedEffectError,
+    list_pixel_led_effects,
+    save_pixel_led_effect,
+)
 
 MAX_EYES_CURRENT = 5
 MAX_EYE_BYTES = 256 * 1024
@@ -22,9 +33,6 @@ C6_INSTALLED_BUDGET_BYTES = 896 * 1024
 C6_RESERVED_BYTES = 256 * 1024
 C6_STAGING_BYTES = 256 * 1024
 
-MAX_CUSTOM_LED_EFFECTS = 24
-MAX_LED_EFFECT_BYTES = 8 * 1024
-LED_EFFECT_BUDGET_BYTES = 192 * 1024
 MAX_PRESETS = 64
 MAX_PRESET_BYTES = 1024
 PRESET_BUDGET_BYTES = 64 * 1024
@@ -163,7 +171,9 @@ def set_eye_default_led(eye_clip_id: str, led_effect_id: str | None) -> dict[str
     manifest["default_led_effect_id"] = normalized_effect
     path = personastore.lampgo_home() / "expression_clips" / storage_id / "manifest.json"
     _atomic_write_json(path, manifest)
-    return load_eye(eye_clip_id)
+    eye = load_eye(eye_clip_id)
+    refresh_llm_expression_catalog()
+    return eye
 
 
 def _builtin_role(name: str) -> str:
@@ -309,7 +319,7 @@ def _validate_program(raw: Any) -> dict[str, Any]:
 
 
 def list_led_effects() -> list[dict[str, Any]]:
-    custom = _read_json_objects(_led_effect_dir())
+    custom = [*_read_json_objects(_led_effect_dir()), *list_pixel_led_effects()]
     by_id = {str(item["effect_id"]): item for item in _virtual_effects()}
     for item in custom:
         effect_id = str(item.get("effect_id") or "")
@@ -335,8 +345,36 @@ def save_led_effect(raw: dict[str, Any]) -> dict[str, Any]:
     role = str(raw.get("role") or "accent").strip().lower()
     if role not in ALLOWED_ROLES:
         raise ExpressionLibraryError(f"role must be one of: {', '.join(sorted(ALLOWED_ROLES))}")
-    label = str(raw.get("label") or effect_id).strip()[:64]
-    program = _validate_program(raw.get("program"))
+    label = str(raw.get("label") or effect_id).strip()[:64] or effect_id
+    legacy_effects = _read_json_objects(_led_effect_dir())
+    pixel_effects = list_pixel_led_effects()
+    legacy_other = [item for item in legacy_effects if str(item.get("effect_id") or "") != effect_id]
+    pixel_other = [item for item in pixel_effects if str(item.get("effect_id") or "") != effect_id]
+    current_exists = len(legacy_other) != len(legacy_effects) or len(pixel_other) != len(pixel_effects)
+    if not current_exists and len(legacy_other) + len(pixel_other) >= MAX_CUSTOM_LED_EFFECTS:
+        raise ExpressionLibraryError(f"maximum custom LED effects reached: {MAX_CUSTOM_LED_EFFECTS}")
+    used_without_current = sum(len(_encoded_json(item)) for item in legacy_other) + sum(
+        int((item.get("package") or {}).get("bytes") or 0) for item in pixel_other
+    )
+    raw_program = raw.get("program")
+    if isinstance(raw_program, dict) and int(raw_program.get("version") or 0) == 2:
+        try:
+            item = save_pixel_led_effect(
+                raw,
+                effect_id=effect_id,
+                label=label,
+                role=role,
+                external_count=len(legacy_other),
+                external_used_bytes=sum(len(_encoded_json(item)) for item in legacy_other),
+            )
+        except LedEffectError as exc:
+            raise ExpressionLibraryError(str(exc)) from exc
+        legacy_path = _led_effect_dir() / f"{effect_id}.json"
+        if legacy_path.exists():
+            legacy_path.unlink()
+        refresh_llm_expression_catalog()
+        return item
+    program = _validate_program(raw_program)
     item = {
         "effect_id": effect_id,
         "label": label,
@@ -349,18 +387,37 @@ def save_led_effect(raw: dict[str, Any]) -> dict[str, Any]:
     encoded = _encoded_json(item)
     if len(encoded) > MAX_LED_EFFECT_BYTES:
         raise ExpressionLibraryError(f"LED effect exceeds {MAX_LED_EFFECT_BYTES} byte limit")
-    directory = _led_effect_dir()
-    path = directory / f"{effect_id}.json"
-    existing = _read_json_objects(directory)
-    if not path.exists() and len(existing) >= MAX_CUSTOM_LED_EFFECTS:
-        raise ExpressionLibraryError(f"maximum custom LED effects reached: {MAX_CUSTOM_LED_EFFECTS}")
-    used_without_current = sum(
-        len(_encoded_json(item)) for item in existing if str(item.get("effect_id") or "") != effect_id
-    )
     if used_without_current + len(encoded) > LED_EFFECT_BUDGET_BYTES:
         raise ExpressionLibraryError("custom LED effect storage budget exceeded")
+    directory = _led_effect_dir()
+    path = directory / f"{effect_id}.json"
     _atomic_write_json(path, item)
+    pixel_directory = directory / effect_id
+    if pixel_directory.is_dir():
+        shutil.rmtree(pixel_directory)
+    refresh_llm_expression_catalog()
     return item
+
+
+def delete_led_effect(effect_id: str) -> None:
+    effect_id = sanitize_library_id(effect_id, field="effect_id")
+    effect = load_led_effect(effect_id)
+    if effect.get("source") != "custom":
+        raise ExpressionLibraryError("official LED effects cannot be deleted")
+    used_by = [
+        str(item.get("label") or item.get("preset_id"))
+        for item in _stored_presets()
+        if item.get("led_effect_id") == effect_id
+    ]
+    if used_by:
+        raise ExpressionLibraryError(f"LED effect is used by presets: {', '.join(used_by)}")
+    legacy_path = _led_effect_dir() / f"{effect_id}.json"
+    if legacy_path.exists():
+        legacy_path.unlink()
+    directory = _led_effect_dir() / effect_id
+    if directory.is_dir():
+        shutil.rmtree(directory)
+    refresh_llm_expression_catalog()
 
 
 def _normalize_led_params(raw: Any, effect: dict[str, Any] | None) -> dict[str, Any]:
@@ -373,6 +430,8 @@ def _normalize_led_params(raw: Any, effect: dict[str, Any] | None) -> dict[str, 
         params["color"] = _normalize_color(raw["color"], field="led_params.color")
     if "secondary_color" in raw:
         params["secondary_color"] = _normalize_color(raw["secondary_color"], field="led_params.secondary_color")
+    if "accent_color" in raw:
+        params["accent_color"] = _normalize_color(raw["accent_color"], field="led_params.accent_color")
     if "brightness" in raw:
         brightness = int(raw["brightness"])
         if not 1 <= brightness <= 96:
@@ -388,7 +447,7 @@ def _normalize_led_params(raw: Any, effect: dict[str, Any] | None) -> dict[str, 
         if direction not in ALLOWED_DIRECTIONS:
             raise ExpressionLibraryError("led_params.direction is invalid")
         params["direction"] = direction
-    allowed = {"color", "secondary_color", "brightness", "intensity", "direction"}
+    allowed = {"color", "secondary_color", "accent_color", "brightness", "intensity", "direction"}
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ExpressionLibraryError(f"unsupported led_params: {', '.join(unknown)}")
@@ -413,7 +472,7 @@ def _virtual_dizzy_preset() -> dict[str, Any] | None:
         "eye_clip_id": "dizzy_eyes",
         "led_effect_id": "dizzy_mouth",
         "led_params": {},
-        "playback": "once",
+        "playback": "loop",
         "duration_ms": 3000,
         "source": "migration",
     }
@@ -442,29 +501,33 @@ def load_expression_preset(preset_id: str) -> dict[str, Any]:
 def save_expression_preset(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ExpressionLibraryError("preset must be an object")
-    preset_id = sanitize_library_id(str(raw.get("preset_id") or ""), field="preset_id")
+    requested_id = str(raw.get("preset_id") or "").strip().lower()
+    preset_id = sanitize_library_id(requested_id or f"usr_{uuid.uuid4().hex[:12]}", field="preset_id")
+    if preset_id == "dizzy" and _virtual_dizzy_preset():
+        raise ExpressionLibraryError("migration expression presets cannot be overwritten")
     eye_id = str(raw.get("eye_clip_id") or "").strip().lower() or None
     led_id = str(raw.get("led_effect_id") or "").strip().lower() or None
     if not eye_id and not led_id:
         raise ExpressionLibraryError("preset requires an eye_clip_id or led_effect_id")
     eye = load_eye(eye_id) if eye_id else None
     effect = load_led_effect(led_id) if led_id else None
-    playback = str(raw.get("playback") or "once").strip().lower()
+    playback = str(raw.get("playback") or "loop").strip().lower()
     if playback not in ALLOWED_PLAYBACK:
         raise ExpressionLibraryError("playback must be once or loop")
     duration_ms = int(raw.get("duration_ms") or (eye or {}).get("duration_ms") or 3000)
     if not 2500 <= duration_ms <= 3500:
         raise ExpressionLibraryError("duration_ms must be 2500-3500")
+    label = str(raw.get("name") or raw.get("label") or preset_id).strip()[:64] or preset_id
     item = {
         "preset_id": preset_id,
-        "label": str(raw.get("label") or preset_id).strip()[:64],
+        "label": label,
         "description": str(raw.get("description") or "").strip()[:240],
         "eye_clip_id": eye_id,
         "led_effect_id": led_id,
         "led_params": _normalize_led_params(raw.get("led_params"), effect),
         "playback": playback,
         "duration_ms": duration_ms,
-        "source": str(raw.get("source") or "user").strip()[:32],
+        "source": "user",
     }
     encoded = _encoded_json(item)
     if len(encoded) > MAX_PRESET_BYTES:
@@ -480,7 +543,17 @@ def save_expression_preset(raw: dict[str, Any]) -> dict[str, Any]:
     if used_without_current + len(encoded) > PRESET_BUDGET_BYTES:
         raise ExpressionLibraryError("expression preset storage budget exceeded")
     _atomic_write_json(path, item)
+    refresh_llm_expression_catalog()
     return item
+
+
+def delete_expression_preset(preset_id: str) -> None:
+    preset_id = sanitize_library_id(preset_id, field="preset_id")
+    path = _preset_dir() / f"{preset_id}.json"
+    if not path.exists():
+        raise ExpressionLibraryError(f"expression preset not found: {preset_id}")
+    path.unlink()
+    refresh_llm_expression_catalog()
 
 
 def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
@@ -519,7 +592,7 @@ def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
 
     merged_params = dict((preset or {}).get("led_params") or {})
     merged_params.update(raw.get("led_params") or {})
-    playback = str(raw.get("playback") or (preset or {}).get("playback") or "once").strip().lower()
+    playback = str(raw.get("playback") or (preset or {}).get("playback") or "loop").strip().lower()
     if playback not in ALLOWED_PLAYBACK:
         raise ExpressionLibraryError("playback must be once or loop")
     duration_ms = int(
@@ -542,10 +615,14 @@ def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
 
 def expression_capabilities() -> dict[str, Any]:
     eyes = list_eyes()
-    custom_effects = [item for item in _read_json_objects(_led_effect_dir())]
+    legacy_effects = [item for item in _read_json_objects(_led_effect_dir())]
+    pixel_effects = list_pixel_led_effects()
+    custom_effects = [*legacy_effects, *pixel_effects]
     presets = _stored_presets()
     eye_used = sum(int((item.get("lcd") or {}).get("bytes") or 0) for item in eyes)
-    led_used = sum(len(_encoded_json(item)) for item in custom_effects)
+    led_used = sum(len(_encoded_json(item)) for item in legacy_effects) + sum(
+        int((item.get("package") or {}).get("bytes") or 0) for item in pixel_effects
+    )
     preset_used = sum(len(_encoded_json(item)) for item in presets)
     return {
         "eyes": {
@@ -589,6 +666,33 @@ def build_expression_prompt() -> str:
     )
 
 
+def expression_catalog_snapshot() -> dict[str, Any]:
+    """Return the machine-readable expression catalog shared with LLM clients."""
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "eyes": list_eyes(),
+        "led_effects": list_led_effects(),
+        "expression_presets": list_expression_presets(),
+        "capacity": expression_capabilities(),
+    }
+
+
+def refresh_llm_expression_catalog() -> Path:
+    """Atomically refresh the derived, read-only catalog for external LLMs."""
+    path = expression_library_root() / "llm-catalog.json"
+    revision = 1
+    if path.exists():
+        try:
+            revision = max(1, int(json.loads(path.read_text(encoding="utf-8")).get("revision") or 0) + 1)
+        except Exception:
+            revision = 1
+    snapshot = expression_catalog_snapshot()
+    snapshot["revision"] = revision
+    _atomic_write_json(path, snapshot)
+    return path
+
+
 def expression_schemas() -> dict[str, Any]:
     return {
         "eye_clip": {
@@ -609,7 +713,23 @@ def expression_schemas() -> dict[str, Any]:
                 "role": {"enum": sorted(ALLOWED_ROLES)},
                 "program": {
                     "type": "object",
-                    "properties": {"version": {"const": 1}, "template": {"enum": sorted(ALLOWED_TEMPLATES)}},
+                    "oneOf": [
+                        {
+                            "properties": {
+                                "version": {"const": 1},
+                                "template": {"enum": sorted(ALLOWED_TEMPLATES)},
+                            }
+                        },
+                        {
+                            "properties": {
+                                "version": {"const": 2},
+                                "type": {"const": "pixel_clip"},
+                                "fps": {"const": 10},
+                                "palette": {"type": "object", "maxProperties": 16},
+                                "frames": {"type": "array", "minItems": 1, "maxItems": 30},
+                            }
+                        },
+                    ],
                 },
             },
         },
@@ -620,7 +740,7 @@ def expression_schemas() -> dict[str, Any]:
                 "preset_id": {"type": "string", "pattern": _SAFE_ID_RE.pattern},
                 "eye_clip_id": {"type": ["string", "null"]},
                 "led_effect_id": {"type": ["string", "null"]},
-                "playback": {"enum": sorted(ALLOWED_PLAYBACK)},
+                "playback": {"enum": sorted(ALLOWED_PLAYBACK), "default": "loop"},
                 "duration_ms": {"type": "integer", "minimum": 2500, "maximum": 3500},
             },
         },

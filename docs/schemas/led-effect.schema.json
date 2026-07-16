@@ -4,31 +4,69 @@
   "title": "LampGo LED Effect",
   "type": "object",
   "additionalProperties": false,
-  "required": ["effect_id", "role", "program"],
+  "required": ["effect_id", "label", "role", "program"],
   "properties": {
     "effect_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
-    "label": {"type": "string", "maxLength": 64},
+    "label": {"type": "string", "minLength": 1, "maxLength": 64},
     "role": {"enum": ["mouth", "symbol", "direction", "accent"]},
     "program": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["version", "template"],
-      "properties": {
-        "version": {"const": 1},
-        "template": {"enum": ["mouth", "arrow", "heart", "pulse"]},
-        "variant": {"enum": ["smile", "open", "flat", "dizzy"]},
-        "defaults": {
+      "oneOf": [
+        {
+          "title": "User pixel clip",
           "type": "object",
           "additionalProperties": false,
+          "required": ["version", "type", "fps", "palette", "frames"],
           "properties": {
-            "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
-            "secondary_color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
-            "brightness": {"type": "integer", "minimum": 1, "maximum": 96},
-            "intensity": {"type": "number", "minimum": 0.1, "maximum": 1.0},
-            "direction": {"enum": ["left", "right", "up", "down"]}
+            "version": {"const": 2},
+            "type": {"const": "pixel_clip"},
+            "fps": {"const": 10},
+            "palette": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 16,
+              "propertyNames": {"pattern": "^[.1-9A-F]$"},
+              "additionalProperties": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}
+            },
+            "roles": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "primary": {"type": "string"},
+                "secondary": {"type": "string"},
+                "accent": {"type": "string"}
+              }
+            },
+            "frames": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 30,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["rows", "ticks"],
+                "properties": {
+                  "rows": {
+                    "type": "array",
+                    "minItems": 9,
+                    "maxItems": 9,
+                    "items": {"type": "string", "minLength": 51, "maxLength": 51}
+                  },
+                  "ticks": {"type": "integer", "minimum": 1, "maximum": 30}
+                }
+              }
+            }
+          }
+        },
+        {
+          "title": "Legacy safe template",
+          "type": "object",
+          "required": ["version", "template"],
+          "properties": {
+            "version": {"const": 1},
+            "template": {"enum": ["mouth", "arrow", "heart", "pulse", "codex"]}
           }
         }
-      }
+      ]
     }
   }
 }
