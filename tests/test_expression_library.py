@@ -17,6 +17,7 @@ from lampgo.expression_library import (
     save_expression_preset,
     save_led_effect,
 )
+from lampgo.led_effects import LEF_MAGIC
 from lampgo.server import LampgoServer
 from lampgo.web.gateway import WebGateway
 
@@ -58,6 +59,26 @@ def _custom_effect(effect_id: str) -> dict:
                 "template": "mouth",
                 "variant": "smile",
                 "defaults": {"color": "#ffffff", "intensity": 0.8},
+            },
+        }
+    )
+
+
+def _pixel_effect(effect_id: str) -> dict:
+    rows = ["." * 51 for _ in range(9)]
+    rows[4] = "." * 10 + "1" * 31 + "." * 10
+    return save_led_effect(
+        {
+            "effect_id": effect_id,
+            "label": "彩色嘴巴",
+            "role": "mouth",
+            "program": {
+                "version": 2,
+                "type": "pixel_clip",
+                "fps": 10,
+                "palette": {".": "#000000", "1": "#ff0088"},
+                "roles": {"primary": "1"},
+                "frames": [{"rows": rows, "ticks": 30}],
             },
         }
     )
@@ -141,7 +162,7 @@ def test_dizzy_legacy_asset_migrates_without_copy(monkeypatch, tmp_path):
     assert resolved["eye_clip_id"] == "dizzy_eyes"
     assert resolved["eye_storage_clip_id"] == "dizzy"
     assert resolved["led_effect_id"] == "dizzy_mouth"
-    assert resolved["playback"] == "once"
+    assert resolved["playback"] == "loop"
 
 
 def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monkeypatch, tmp_path):
@@ -170,6 +191,10 @@ def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monke
         rejected = client.post("/api/expression-presets", json={"preset_id": "focus", **composition})
         assert rejected.status_code == 400
         assert "confirmed=true" in rejected.json()["error"]
+
+        rejected_update = client.put("/api/expression-presets/focus", json=composition)
+        assert rejected_update.status_code == 400
+        assert "confirmed=true" in rejected_update.json()["error"]
 
         saved = client.post(
             "/api/expression-presets",
@@ -247,3 +272,63 @@ def test_led_dsl_and_capacity_guards(monkeypatch, tmp_path):
     assert capacity["led_effects"]["installed_custom"] == 1
     assert capacity["led_effects"]["single_max_bytes"] == 8 * 1024
     assert capacity["presets"]["max_count"] == 64
+
+
+def test_pixel_led_auto_syncs_then_plays_by_id_with_loop_default(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    _pixel_effect("color_mouth")
+    uploads: list[tuple[str, bytes, dict]] = []
+    plays: list[tuple[str, dict]] = []
+
+    async def fake_proxy_get(path: str):
+        assert path == "/device/led-effects"
+        return 200, {"ok": True, "result": {"led_effects": []}}, "application/json"
+
+    async def fake_proxy_post_bytes(path: str, payload: bytes, *, params=None, content_type="application/octet-stream"):
+        uploads.append((path, payload, params or {}))
+        return 200, {"ok": True, "action": "upload"}, "application/json"
+
+    async def fake_proxy_post(path: str, payload: dict):
+        plays.append((path, payload))
+        return 200, {"ok": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_get", fake_proxy_get)
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/expressions/play", json={"led_effect_id": "color_mouth"})
+        catalog = client.get("/api/expression-catalog")
+
+    assert response.status_code == 200
+    assert uploads[0][0] == "/device/led-effects/upload"
+    assert uploads[0][1].startswith(LEF_MAGIC)
+    assert uploads[0][2]["effect_id"] == "color_mouth"
+    assert plays[0][0] == "/device/expressions/play"
+    assert plays[0][1]["led_effect_id"] == "color_mouth"
+    assert plays[0][1]["playback"] == "loop"
+    assert "led_program" not in plays[0][1]
+    assert catalog.status_code == 200
+    assert any(
+        item["effect_id"] == "color_mouth"
+        for item in catalog.json()["result"]["led_effects"]
+    )
+
+
+def test_preset_name_can_generate_stable_machine_id(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    _pixel_effect("color_mouth")
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/expression-presets",
+            json={
+                "name": "我的彩色笑脸",
+                "led_effect_id": "color_mouth",
+                "confirmed": True,
+            },
+        )
+    assert response.status_code == 200
+    preset = response.json()["result"]["preset"]
+    assert preset["preset_id"].startswith("usr_")
+    assert preset["label"] == "我的彩色笑脸"
+    assert preset["playback"] == "loop"

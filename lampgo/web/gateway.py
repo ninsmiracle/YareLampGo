@@ -41,17 +41,28 @@ from lampgo.expression_clips import (
 )
 from lampgo.expression_library import (
     ExpressionLibraryError,
+    delete_expression_preset,
+    delete_led_effect,
     expression_capabilities,
+    expression_catalog_snapshot,
     expression_schemas,
     eye_source_path,
     eye_storage_id,
     list_expression_presets,
     list_eyes,
     list_led_effects,
+    refresh_llm_expression_catalog,
     resolve_expression,
     save_expression_preset,
     save_led_effect,
     set_eye_default_led,
+)
+from lampgo.led_effects import (
+    LedEffectError,
+    load_pixel_led_effect,
+    load_pixel_led_package,
+    load_pixel_led_source,
+    update_pixel_led_sync,
 )
 from lampgo.perception.camera import CameraCapture
 from lampgo.recordings import (
@@ -202,6 +213,10 @@ class WebGateway:
         self._livekit_active_rooms: dict[str, dict[str, Any]] = {}
         self._rate_limit_buckets: dict[str, list[float]] = {}
         self.app = self._build_app()
+        try:
+            refresh_llm_expression_catalog()
+        except Exception:
+            logger.exception("expression_catalog.initial_refresh_failed")
 
     def _build_app(self) -> Starlette:
         routes = [
@@ -224,7 +239,16 @@ class WebGateway:
             Route("/api/eyes/{eye_id:str}/source", self.api_eye_source, methods=["GET"]),
             Route("/api/eyes/{eye_id:str}/sync", self.api_eye_sync, methods=["POST"]),
             Route("/api/led-effects", self.api_led_effects, methods=["GET", "POST"]),
+            Route("/api/led-effects/{effect_id:str}", self.api_led_effect_item, methods=["PUT", "DELETE"]),
+            Route("/api/led-effects/{effect_id:str}/source", self.api_led_effect_source, methods=["GET"]),
+            Route("/api/led-effects/{effect_id:str}/sync", self.api_led_effect_sync, methods=["POST"]),
             Route("/api/expression-presets", self.api_expression_presets, methods=["GET", "POST"]),
+            Route(
+                "/api/expression-presets/{preset_id:str}",
+                self.api_expression_preset_item,
+                methods=["PUT", "DELETE"],
+            ),
+            Route("/api/expression-catalog", self.api_expression_catalog, methods=["GET"]),
             Route("/api/expressions/preview", self.api_expression_preview, methods=["POST"]),
             Route("/api/expressions/play", self.api_expression_play, methods=["POST"]),
             Route("/api/expressions/stop", self.api_expression_stop, methods=["POST"]),
@@ -902,6 +926,86 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "result": {"led_effect": effect}})
 
+    async def api_led_effect_item(self, request: Request) -> JSONResponse:
+        effect_id = str(request.path_params.get("effect_id") or "")
+        try:
+            if request.method == "DELETE":
+                delete_led_effect(effect_id)
+                device: Any = None
+                if self.server.esp32:
+                    payload = self.server.esp32.with_owner_auth(
+                        {"led_effect_id": effect_id}, reason="led_effect_delete"
+                    )
+                    status, device, _ = await self.server.esp32.proxy_post("/device/led-effects/delete", payload)
+                    if status >= 400 and isinstance(device, dict) and device.get("error") != "LED effect not found":
+                        logger.warning("led_effect.device_delete_failed", effect_id=effect_id, response=device)
+                return JSONResponse({"ok": True, "result": {"effect_id": effect_id, "device": device}})
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ExpressionLibraryError("LED effect body must be an object")
+            body["effect_id"] = effect_id
+            effect = save_led_effect(body)
+            return JSONResponse({"ok": True, "result": {"led_effect": effect}})
+        except (ExpressionLibraryError, LedEffectError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    async def api_led_effect_source(self, request: Request) -> JSONResponse:
+        effect_id = str(request.path_params.get("effect_id") or "")
+        try:
+            source = load_pixel_led_source(effect_id)
+        except (LedEffectError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+        return JSONResponse({"ok": True, "result": {"led_effect": source}})
+
+    async def _sync_led_effect_to_device(
+        self,
+        effect_id: str,
+        *,
+        force: bool = False,
+    ) -> tuple[int, Any, dict[str, Any]]:
+        if not self.server.esp32:
+            return 503, {"ok": False, "error": "no_device"}, {}
+        manifest = load_pixel_led_effect(effect_id)
+        package = load_pixel_led_package(effect_id)
+        package_info = manifest.get("package") or {}
+        expected_sha = str(package_info.get("sha256") or "")
+        if not force:
+            status, body, _ = await self.server.esp32.proxy_get("/device/led-effects")
+            installed = ((body.get("result") or {}).get("led_effects") or []) if isinstance(body, dict) else []
+            if status < 400 and any(
+                item.get("effect_id") == effect_id and item.get("sha256") == expected_sha for item in installed
+            ):
+                manifest = update_pixel_led_sync(effect_id, status="synced", device=body.get("result"))
+                refresh_llm_expression_catalog()
+                return 200, {"ok": True, "action": "already_synced"}, manifest
+        query = self.server.esp32.with_owner_auth(
+            {"effect_id": effect_id, "bytes": len(package), "sha256": expected_sha},
+            reason="led_effect_sync",
+        )
+        status, body, _ = await self.server.esp32.proxy_post_bytes(
+            "/device/led-effects/upload", package, params=query
+        )
+        ok = status < 400 and isinstance(body, dict) and body.get("ok") is not False
+        manifest = update_pixel_led_sync(
+            effect_id,
+            status="synced" if ok else "sync_failed",
+            device=body,
+        )
+        refresh_llm_expression_catalog()
+        return status, body, manifest
+
+    async def api_led_effect_sync(self, request: Request) -> JSONResponse:
+        effect_id = str(request.path_params.get("effect_id") or "")
+        try:
+            status, device, manifest = await self._sync_led_effect_to_device(effect_id, force=True)
+        except (LedEffectError, ExpressionLibraryError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        ok = status < 400 and not (isinstance(device, dict) and device.get("ok") is False)
+        return JSONResponse(
+            {"ok": ok, "result": {"led_effect": manifest, "device": device}},
+            status_code=status,
+        )
+
     async def api_expression_presets(self, request: Request) -> JSONResponse:
         if request.method == "GET":
             return JSONResponse(
@@ -924,6 +1028,26 @@ class WebGateway:
         except (ExpressionLibraryError, ValueError, TypeError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "result": {"preset": preset}})
+
+    async def api_expression_preset_item(self, request: Request) -> JSONResponse:
+        preset_id = str(request.path_params.get("preset_id") or "")
+        try:
+            if request.method == "DELETE":
+                delete_expression_preset(preset_id)
+                return JSONResponse({"ok": True, "result": {"preset_id": preset_id}})
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ExpressionLibraryError("preset body must be an object")
+            if body.get("confirmed") is not True:
+                raise ExpressionLibraryError("saving a preset requires confirmed=true")
+            body["preset_id"] = preset_id
+            preset = save_expression_preset(body)
+            return JSONResponse({"ok": True, "result": {"preset": preset}})
+        except (ExpressionLibraryError, ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    async def api_expression_catalog(self, request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "result": expression_catalog_snapshot()})
 
     async def api_expression_preview(self, request: Request) -> JSONResponse:
         try:
@@ -951,18 +1075,25 @@ class WebGateway:
         if not self.server.esp32:
             return 503, {"ok": False, "error": "no_device"}
         effect = composition.get("led_effect") or {}
+        if effect.get("kind") == "pixel_clip" and composition.get("led_effect_id"):
+            sync_status, sync_body, _ = await self._sync_led_effect_to_device(
+                str(composition["led_effect_id"])
+            )
+            if sync_status >= 400 or (isinstance(sync_body, dict) and sync_body.get("ok") is False):
+                return sync_status, sync_body
         payload: dict[str, Any] = {
             "eye_clip_id": composition.get("eye_storage_clip_id"),
             "led_effect_id": composition.get("led_effect_id"),
             "led_params": composition.get("led_params") or {},
-            "playback": composition.get("playback") or "once",
+            "playback": composition.get("playback") or "loop",
             "duration_ms": int(composition.get("duration_ms") or 3000),
         }
         if composition.get("preset_id"):
             payload["preset_id"] = composition["preset_id"]
         if effect.get("mode") is not None:
             payload["led_mode"] = int(effect["mode"])
-        if isinstance(effect.get("program"), dict):
+        program = effect.get("program")
+        if isinstance(program, dict) and program.get("type") != "pixel_clip":
             payload["led_program"] = effect["program"]
         payload = self.server.esp32.with_owner_auth(payload, reason="expression_play")
         status, response, _ = await self.server.esp32.proxy_post("/device/expressions/play", payload)
@@ -1007,6 +1138,7 @@ class WebGateway:
         try:
             payload = await self._read_expression_clip_upload(request)
             manifest = create_expression_clip(**payload)
+            refresh_llm_expression_catalog()
         except ExpressionClipError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         except Exception as exc:

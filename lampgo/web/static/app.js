@@ -41,11 +41,20 @@
   const ledEffectId = document.getElementById("led-effect-id");
   const ledEffectLabel = document.getElementById("led-effect-label");
   const ledEffectRole = document.getElementById("led-effect-role");
-  const ledEffectTemplate = document.getElementById("led-effect-template");
-  const ledEffectColor = document.getElementById("led-effect-color");
+  const ledEditorCanvas = document.getElementById("led-editor-canvas");
+  const ledFrameTimeline = document.getElementById("led-frame-timeline");
+  const ledEditorPalette = document.getElementById("led-editor-palette");
+  const ledEditorStatus = document.getElementById("led-editor-status");
+  const btnLedCopyFrame = document.getElementById("btn-led-copy-frame");
+  const btnLedPasteFrame = document.getElementById("btn-led-paste-frame");
+  const btnLedMirrorFrame = document.getElementById("btn-led-mirror-frame");
+  const btnLedClearFrame = document.getElementById("btn-led-clear-frame");
+  const btnLedEditorPreview = document.getElementById("btn-led-editor-preview");
+  const btnLedEditorSave = document.getElementById("btn-led-editor-save");
   const composerEye = document.getElementById("composer-eye");
   const composerLed = document.getElementById("composer-led");
   const composerColor = document.getElementById("composer-color");
+  const composerColorOverride = document.getElementById("composer-color-override");
   const composerBrightness = document.getElementById("composer-brightness");
   const composerIntensity = document.getElementById("composer-intensity");
   const composerPresetId = document.getElementById("composer-preset-id");
@@ -225,9 +234,27 @@
   let expressionLedEffects = [];
   let expressionPresets = [];
   let expressionDirection = "right";
-  let expressionPlayback = "once";
+  let expressionPlayback = "loop";
   let expressionPreviewTimer = null;
   let expressionPreviewImage = null;
+  const ledEffectSourceCache = new Map();
+  const LED_EDITOR_WIDTH = 51;
+  const LED_EDITOR_HEIGHT = 9;
+  const LED_EDITOR_FRAMES = 30;
+  const LED_EDITOR_SYMBOLS = "123456789ABCDEF".split("");
+  const ledEditorColors = [
+    "#ff3b6b", "#00d8ff", "#ffd43b", "#44e38b", "#ffffff",
+    "#8b5cf6", "#ff8a34", "#2878ff", "#f472b6", "#9aff32",
+    "#00a6a6", "#ff1744", "#c8d0d8", "#7a4cff", "#f7ff00",
+  ];
+  let ledEditorFrames = Array.from({ length: LED_EDITOR_FRAMES }, () => new Uint8Array(LED_EDITOR_WIDTH * LED_EDITOR_HEIGHT));
+  let ledEditorFrame = 0;
+  let ledEditorSymbol = 1;
+  let ledEditorTool = "paint";
+  let ledEditorDrawing = false;
+  let ledEditorPreviewTimer = null;
+  let ledEditorClipboard = null;
+  let ledEditorClipboardSource = -1;
   let latestStatusData = {};
 
   function expressionMeta(name) {
@@ -3394,6 +3421,294 @@
     return `${(bytes / 1024).toFixed(bytes >= 102400 ? 0 : 1)} KiB`;
   }
 
+  function ledEditorCellExists(row, col) {
+    const lengths = [47, 49, 51, 51, 51, 51, 51, 49, 47];
+    const pad = Math.floor((LED_EDITOR_WIDTH - lengths[row]) / 2);
+    return col >= pad && col < pad + lengths[row];
+  }
+
+  function drawLedEditor() {
+    if (!ledEditorCanvas) return;
+    const context = ledEditorCanvas.getContext("2d");
+    const cellWidth = ledEditorCanvas.width / LED_EDITOR_WIDTH;
+    const cellHeight = ledEditorCanvas.height / LED_EDITOR_HEIGHT;
+    context.fillStyle = "#15191c";
+    context.fillRect(0, 0, ledEditorCanvas.width, ledEditorCanvas.height);
+    const frame = ledEditorFrames[ledEditorFrame];
+    for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
+      for (let col = 0; col < LED_EDITOR_WIDTH; col += 1) {
+        const exists = ledEditorCellExists(row, col);
+        const value = frame[row * LED_EDITOR_WIDTH + col];
+        const x = col * cellWidth + cellWidth / 2;
+        const y = row * cellHeight + cellHeight / 2;
+        const radius = Math.max(2, Math.min(cellWidth, cellHeight) * 0.31);
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fillStyle = !exists ? "#15191c" : value ? ledEditorColors[value - 1] : "#343a3f";
+        context.shadowColor = value ? ledEditorColors[value - 1] : "transparent";
+        context.shadowBlur = value ? 8 : 0;
+        context.fill();
+      }
+    }
+    context.shadowBlur = 0;
+    if (ledEditorStatus) {
+      const copied = ledEditorClipboard ? ` · 已复制第 ${ledEditorClipboardSource + 1} 帧` : "";
+      ledEditorStatus.textContent = `第 ${ledEditorFrame + 1} / ${LED_EDITOR_FRAMES} 帧 · 10 FPS${copied}`;
+    }
+    if (btnLedPasteFrame) {
+      btnLedPasteFrame.disabled = !ledEditorClipboard;
+      btnLedPasteFrame.title = ledEditorClipboard
+        ? `将第 ${ledEditorClipboardSource + 1} 帧粘贴到当前帧`
+        : "请先复制一个帧";
+    }
+    if (ledFrameTimeline) {
+      Array.from(ledFrameTimeline.children).forEach((button, index) => {
+        button.classList.toggle("is-active", index === ledEditorFrame);
+        button.classList.toggle("has-pixels", ledEditorFrames[index].some((value) => value > 0));
+      });
+    }
+  }
+
+  function setLedEditorFrame(index) {
+    ledEditorFrame = Math.max(0, Math.min(LED_EDITOR_FRAMES - 1, Number(index) || 0));
+    drawLedEditor();
+  }
+
+  function renderLedEditorTimeline() {
+    if (!ledFrameTimeline) return;
+    ledFrameTimeline.innerHTML = "";
+    for (let index = 0; index < LED_EDITOR_FRAMES; index += 1) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = String(index + 1);
+      button.title = `第 ${index + 1} 帧`;
+      button.addEventListener("click", () => setLedEditorFrame(index));
+      ledFrameTimeline.appendChild(button);
+    }
+  }
+
+  function renderLedEditorPalette() {
+    if (!ledEditorPalette) return;
+    ledEditorPalette.innerHTML = "";
+    LED_EDITOR_SYMBOLS.forEach((symbol, index) => {
+      const wrapper = document.createElement("label");
+      wrapper.className = "led-palette-swatch";
+      wrapper.title = `${symbol} 色`;
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "led-editor-palette-choice";
+      radio.checked = index === ledEditorSymbol - 1;
+      radio.addEventListener("change", () => { ledEditorSymbol = index + 1; });
+      const color = document.createElement("input");
+      color.type = "color";
+      color.value = ledEditorColors[index];
+      color.addEventListener("input", () => {
+        ledEditorColors[index] = color.value;
+        ledEditorSymbol = index + 1;
+        radio.checked = true;
+        drawLedEditor();
+      });
+      wrapper.append(radio, color);
+      ledEditorPalette.appendChild(wrapper);
+    });
+  }
+
+  function ledEditorPointerCell(event) {
+    const rect = ledEditorCanvas.getBoundingClientRect();
+    const col = Math.floor(((event.clientX - rect.left) / rect.width) * LED_EDITOR_WIDTH);
+    const row = Math.floor(((event.clientY - rect.top) / rect.height) * LED_EDITOR_HEIGHT);
+    if (row < 0 || row >= LED_EDITOR_HEIGHT || col < 0 || col >= LED_EDITOR_WIDTH || !ledEditorCellExists(row, col)) {
+      return null;
+    }
+    return { row, col };
+  }
+
+  function paintLedEditorCell(event) {
+    const cell = ledEditorPointerCell(event);
+    if (!cell) return;
+    ledEditorFrames[ledEditorFrame][cell.row * LED_EDITOR_WIDTH + cell.col] =
+      ledEditorTool === "erase" ? 0 : ledEditorSymbol;
+    drawLedEditor();
+  }
+
+  function mirrorLedEditorFrame() {
+    const source = ledEditorFrames[ledEditorFrame];
+    const mirrored = new Uint8Array(source.length);
+    for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
+      for (let col = 0; col < LED_EDITOR_WIDTH; col += 1) {
+        mirrored[row * LED_EDITOR_WIDTH + col] = source[row * LED_EDITOR_WIDTH + (LED_EDITOR_WIDTH - 1 - col)];
+      }
+    }
+    ledEditorFrames[ledEditorFrame] = mirrored;
+    drawLedEditor();
+  }
+
+  function copyLedEditorFrame() {
+    ledEditorClipboard = new Uint8Array(ledEditorFrames[ledEditorFrame]);
+    ledEditorClipboardSource = ledEditorFrame;
+    drawLedEditor();
+  }
+
+  function pasteLedEditorFrame() {
+    if (!ledEditorClipboard) return;
+    ledEditorFrames[ledEditorFrame] = new Uint8Array(ledEditorClipboard);
+    drawLedEditor();
+  }
+
+  function toggleLedEditorPreview() {
+    if (ledEditorPreviewTimer) {
+      clearInterval(ledEditorPreviewTimer);
+      ledEditorPreviewTimer = null;
+      if (btnLedEditorPreview) btnLedEditorPreview.textContent = "播放预览";
+      return;
+    }
+    if (btnLedEditorPreview) btnLedEditorPreview.textContent = "暂停预览";
+    ledEditorPreviewTimer = setInterval(() => setLedEditorFrame((ledEditorFrame + 1) % LED_EDITOR_FRAMES), 100);
+  }
+
+  function ledEditorRows(frame) {
+    const rows = [];
+    for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
+      let line = "";
+      for (let col = 0; col < LED_EDITOR_WIDTH; col += 1) {
+        const value = ledEditorCellExists(row, col) ? frame[row * LED_EDITOR_WIDTH + col] : 0;
+        line += value ? LED_EDITOR_SYMBOLS[value - 1] : ".";
+      }
+      rows.push(line);
+    }
+    return rows;
+  }
+
+  function currentLedEditorDocument() {
+    const compressed = [];
+    ledEditorFrames.forEach((frame) => {
+      const rows = ledEditorRows(frame);
+      const previous = compressed[compressed.length - 1];
+      if (previous && previous.rows.every((row, index) => row === rows[index])) previous.ticks += 1;
+      else compressed.push({ rows, ticks: 1 });
+    });
+    const palette = { ".": "#000000" };
+    LED_EDITOR_SYMBOLS.forEach((symbol, index) => { palette[symbol] = ledEditorColors[index]; });
+    return {
+      effect_id: String((ledEffectId && ledEffectId.value) || "").trim(),
+      label: String((ledEffectLabel && ledEffectLabel.value) || "").trim(),
+      role: (ledEffectRole && ledEffectRole.value) || "mouth",
+      program: {
+        version: 2,
+        type: "pixel_clip",
+        fps: 10,
+        palette,
+        roles: { primary: "1", secondary: "2", accent: "3" },
+        frames: compressed,
+      },
+    };
+  }
+
+  async function saveLedEditor({ sync = false } = {}) {
+    const body = currentLedEditorDocument();
+    if (!body.effect_id || !body.label) {
+      window.alert("请填写效果 ID 和显示名称");
+      return;
+    }
+    try {
+      if (ledEditorStatus) ledEditorStatus.textContent = "正在编译…";
+      const saved = await fetchJson("/api/led-effects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (sync) {
+        if (ledEditorStatus) ledEditorStatus.textContent = "正在同步 S3…";
+        await fetchJson(`/api/led-effects/${encodeURIComponent(body.effect_id)}/sync`, { method: "POST" });
+      }
+      ledEffectSourceCache.set(body.effect_id, body);
+      const packageInfo = (saved.led_effect && saved.led_effect.package) || {};
+      if (ledEditorStatus) {
+        ledEditorStatus.textContent = `${sync ? "已同步" : "已保存"} · ${formatBytes(packageInfo.bytes)}`;
+      }
+      await refreshExpressionStudio();
+    } catch (error) {
+      if (ledEditorStatus) ledEditorStatus.textContent = "保存失败";
+      window.alert(`LED 动画保存失败：${error.message || error}`);
+    }
+  }
+
+  function loadLedEditorDocument(source) {
+    const program = source && source.program;
+    if (!program || program.type !== "pixel_clip") return;
+    if (ledEffectId) ledEffectId.value = source.effect_id || "";
+    if (ledEffectLabel) ledEffectLabel.value = source.label || "";
+    if (ledEffectRole) ledEffectRole.value = source.role || "mouth";
+    LED_EDITOR_SYMBOLS.forEach((symbol, index) => {
+      if (program.palette && program.palette[symbol]) ledEditorColors[index] = program.palette[symbol];
+    });
+    const expanded = [];
+    (program.frames || []).forEach((frame) => {
+      for (let tick = 0; tick < Number(frame.ticks || 1); tick += 1) expanded.push(frame.rows || []);
+    });
+    ledEditorFrames = Array.from({ length: LED_EDITOR_FRAMES }, (_, frameIndex) => {
+      const values = new Uint8Array(LED_EDITOR_WIDTH * LED_EDITOR_HEIGHT);
+      const rows = expanded[frameIndex] || [];
+      rows.forEach((row, rowIndex) => {
+        Array.from(String(row)).forEach((symbol, colIndex) => {
+          values[rowIndex * LED_EDITOR_WIDTH + colIndex] = Math.max(0, LED_EDITOR_SYMBOLS.indexOf(symbol) + 1);
+        });
+      });
+      return values;
+    });
+    renderLedEditorPalette();
+    setLedEditorFrame(0);
+  }
+
+  async function editLedEffect(effectId) {
+    try {
+      const result = await fetchJson(`/api/led-effects/${encodeURIComponent(effectId)}/source`);
+      const source = result.led_effect;
+      ledEffectSourceCache.set(effectId, source);
+      loadLedEditorDocument(source);
+      if (ledEditorStatus) ledEditorStatus.textContent = "已载入，可覆盖保存";
+    } catch (error) {
+      window.alert(`载入失败：${error.message || error}`);
+    }
+  }
+
+  async function syncLedEffect(effectId) {
+    try {
+      await fetchJson(`/api/led-effects/${encodeURIComponent(effectId)}/sync`, { method: "POST" });
+      await refreshExpressionStudio();
+    } catch (error) {
+      window.alert(`同步失败：${error.message || error}`);
+    }
+  }
+
+  async function deleteLedEffectFromLibrary(effect) {
+    if (!window.confirm(`确认删除用户 LED 动画「${effect.label || effect.effect_id}」？`)) return;
+    try {
+      await fetchJson(`/api/led-effects/${encodeURIComponent(effect.effect_id)}`, { method: "DELETE" });
+      ledEffectSourceCache.delete(effect.effect_id);
+      await refreshExpressionStudio();
+    } catch (error) {
+      window.alert(`删除失败：${error.message || error}`);
+    }
+  }
+
+  function initializeLedEditor() {
+    renderLedEditorTimeline();
+    renderLedEditorPalette();
+    drawLedEditor();
+    if (!ledEditorCanvas) return;
+    ledEditorCanvas.addEventListener("pointerdown", (event) => {
+      ledEditorDrawing = true;
+      ledEditorCanvas.setPointerCapture(event.pointerId);
+      paintLedEditorCell(event);
+    });
+    ledEditorCanvas.addEventListener("pointermove", (event) => {
+      if (ledEditorDrawing) paintLedEditorCell(event);
+    });
+    ledEditorCanvas.addEventListener("pointerup", () => { ledEditorDrawing = false; });
+    ledEditorCanvas.addEventListener("pointercancel", () => { ledEditorDrawing = false; });
+  }
+
   function populateExpressionComposer() {
     if (composerEye) {
       const selected = composerEye.value;
@@ -3429,7 +3744,7 @@
         eye.label || eye.eye_clip_id,
         `${eye.eye_clip_id} · ${eye.frame_count || 0} 帧 · ${eye.fps || 0} FPS · ${formatBytes(lcd.bytes)} · ${sync.status || "unsynced"}`,
         [
-          { label: "同步", run: () => syncExpressionEye(eye.eye_clip_id) },
+          { label: "同步", run: () => syncExpressionResources(eye.eye_clip_id) },
           { label: "选用", run: () => selectExpressionResource(eye.eye_clip_id, null), primary: true },
         ],
       ));
@@ -3448,6 +3763,7 @@
         [
           { label: "载入", run: () => loadExpressionPreset(preset) },
           { label: "▶", title: "播放", run: () => playExpression({ preset_id: preset.preset_id }), primary: true },
+          ...(preset.source === "user" ? [{ label: "删除", run: () => deleteExpressionPresetFromLibrary(preset) }] : []),
         ],
       ));
     });
@@ -3515,6 +3831,7 @@
       button.classList.toggle("is-active", button.dataset.playback === expressionPlayback);
     });
     const params = preset.led_params || {};
+    if (composerColorOverride) composerColorOverride.checked = Boolean(params.color);
     if (params.color && composerColor) composerColor.value = params.color;
     if (params.brightness && composerBrightness) composerBrightness.value = String(params.brightness);
     if (params.intensity && composerIntensity) composerIntensity.value = String(Math.round(params.intensity * 100));
@@ -3529,15 +3846,18 @@
   }
 
   function currentExpressionBody() {
+    const ledParams = {
+      brightness: Number((composerBrightness && composerBrightness.value) || 64),
+      intensity: Number((composerIntensity && composerIntensity.value) || 100) / 100,
+      direction: expressionDirection,
+    };
+    if (composerColorOverride && composerColorOverride.checked) {
+      ledParams.color = (composerColor && composerColor.value) || "#ffffff";
+    }
     return {
       eye_clip_id: (composerEye && composerEye.value) || null,
       led_effect_id: (composerLed && composerLed.value) || null,
-      led_params: {
-        color: (composerColor && composerColor.value) || "#ffffff",
-        brightness: Number((composerBrightness && composerBrightness.value) || 64),
-        intensity: Number((composerIntensity && composerIntensity.value) || 100) / 100,
-        direction: expressionDirection,
-      },
+      led_params: ledParams,
       playback: expressionPlayback,
       duration_ms: 3000,
     };
@@ -3588,18 +3908,56 @@
     return dx * dx + dy * dy <= 1 && dx * dx + dy * dy >= 0.42;
   }
 
+  async function loadLedPreviewSource(effect) {
+    if (!effect || effect.kind !== "pixel_clip") return null;
+    if (ledEffectSourceCache.has(effect.effect_id)) return ledEffectSourceCache.get(effect.effect_id);
+    try {
+      const result = await fetchJson(`/api/led-effects/${encodeURIComponent(effect.effect_id)}/source`);
+      ledEffectSourceCache.set(effect.effect_id, result.led_effect);
+      return result.led_effect;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function pixelClipCellColor(effect, row, col, phase) {
+    const source = ledEffectSourceCache.get(effect && effect.effect_id);
+    const program = source && source.program;
+    if (!program || program.type !== "pixel_clip") return null;
+    const targetTick = Math.min(29, Math.floor(phase * 30));
+    let elapsed = 0;
+    let rows = null;
+    for (const frame of program.frames || []) {
+      elapsed += Number(frame.ticks || 1);
+      if (targetTick < elapsed) {
+        rows = frame.rows;
+        break;
+      }
+    }
+    const symbol = rows && rows[row] ? rows[row][col] : ".";
+    if (!symbol || symbol === ".") return null;
+    const primarySymbol = program.roles && program.roles.primary;
+    if (composerColorOverride && composerColorOverride.checked && symbol === primarySymbol) {
+      return (composerColor && composerColor.value) || "#ffffff";
+    }
+    return (program.palette && program.palette[symbol]) || null;
+  }
+
   function renderLedPreview(effect, phase) {
     ensureLedPreviewCells();
     if (!expressionLedPreview) return;
     const color = (composerColor && composerColor.value) || "#ffffff";
     const intensity = Number((composerIntensity && composerIntensity.value) || 100) / 100;
+    const pixelClipReady = effect && effect.kind === "pixel_clip" && ledEffectSourceCache.has(effect.effect_id);
     Array.from(expressionLedPreview.children).forEach((cell, index) => {
       const row = Math.floor(index / 51);
       const col = index % 51;
-      const active = ledCellActive(effect, row, col, phase);
-      cell.style.background = active ? color : "#30353a";
+      const pixelColor = pixelClipReady ? pixelClipCellColor(effect, row, col, phase) : null;
+      const active = pixelClipReady ? Boolean(pixelColor) : ledCellActive(effect, row, col, phase);
+      const activeColor = pixelColor || color;
+      cell.style.background = active ? activeColor : "#30353a";
       cell.style.opacity = active ? String(0.35 + intensity * 0.65) : "1";
-      cell.style.boxShadow = active ? `0 0 5px ${color}` : "none";
+      cell.style.boxShadow = active ? `0 0 5px ${activeColor}` : "none";
     });
   }
 
@@ -3662,7 +4020,7 @@
       const composition = result.composition;
       const eye = expressionEyes.find((item) => item.eye_clip_id === composition.eye_clip_id);
       const effect = expressionLedEffects.find((item) => item.effect_id === composition.led_effect_id);
-      await loadEyePreviewImage(eye);
+      await Promise.all([loadEyePreviewImage(eye), loadLedPreviewSource(effect)]);
       if (expressionPreviewTimer) cancelAnimationFrame(expressionPreviewTimer);
       const started = Date.now();
       const tick = () => {
@@ -3707,15 +4065,20 @@
     });
   }
 
-  async function syncExpressionEye(eyeId = null) {
+  async function syncExpressionResources(eyeId = null) {
     const selected = eyeId || (composerEye && composerEye.value);
-    if (!selected) {
-      window.alert("请选择眼睛素材");
+    const selectedLed = eyeId ? "" : ((composerLed && composerLed.value) || "");
+    const effect = expressionLedEffects.find((item) => item.effect_id === selectedLed);
+    if (!selected && !(effect && effect.kind === "pixel_clip")) {
+      window.alert("所选资源无需同步，或尚未选择可同步资源");
       return;
     }
     if (expressionPreviewStatus) expressionPreviewStatus.textContent = "同步中…";
     try {
-      await fetchJson(`/api/eyes/${encodeURIComponent(selected)}/sync`, { method: "POST" });
+      if (selected) await fetchJson(`/api/eyes/${encodeURIComponent(selected)}/sync`, { method: "POST" });
+      if (effect && effect.kind === "pixel_clip") {
+        await fetchJson(`/api/led-effects/${encodeURIComponent(selectedLed)}/sync`, { method: "POST" });
+      }
       if (expressionPreviewStatus) expressionPreviewStatus.textContent = "同步完成";
       await refreshExpressionStudio();
     } catch (error) {
@@ -3755,15 +4118,16 @@
 
   async function saveExpressionPresetFromComposer() {
     const presetId = String((composerPresetId && composerPresetId.value) || "").trim();
-    if (!presetId) {
-      window.alert("请输入组合 ID");
+    const presetName = String((composerPresetLabel && composerPresetLabel.value) || "").trim();
+    if (!presetName) {
+      window.alert("请给组合取一个名称");
       return;
     }
-    if (!window.confirm(`确认保存组合「${presetId}」？`)) return;
+    if (!window.confirm(`确认暂存组合「${presetName}」？`)) return;
     try {
       const body = currentExpressionBody();
-      body.preset_id = presetId;
-      body.label = String((composerPresetLabel && composerPresetLabel.value) || presetId).trim();
+      if (presetId) body.preset_id = presetId;
+      body.name = presetName;
       body.confirmed = true;
       await fetchJson("/api/expression-presets", {
         method: "POST",
@@ -3773,6 +4137,17 @@
       await refreshExpressionStudio();
     } catch (error) {
       window.alert(`保存失败：${error.message || error}`);
+    }
+  }
+
+  async function deleteExpressionPresetFromLibrary(preset) {
+    if (!window.confirm(`确认删除组合「${preset.label || preset.preset_id}」？`)) return;
+    try {
+      await fetchJson(`/api/expression-presets/${encodeURIComponent(preset.preset_id)}`, { method: "DELETE" });
+      if (composerPresetId && composerPresetId.value === preset.preset_id) composerPresetId.value = "";
+      await refreshExpressionStudio();
+    } catch (error) {
+      window.alert(`删除失败：${error.message || error}`);
     }
   }
 
@@ -3836,6 +4211,10 @@
       if (meta && meta.mode !== null && meta.mode !== undefined) metaParts.push(`m${meta.mode}`);
       if (meta) metaParts.push(meta.animated ? "动态" : "静态");
       if (effect) metaParts.push(effect.source || "builtin");
+      if (effect && effect.kind === "pixel_clip") {
+        metaParts.push(formatBytes((effect.package || {}).bytes));
+        metaParts.push((effect.sync || {}).status || "not_synced");
+      }
       metaParts.push("眼睛保持当前");
       const card = makeSkillCard({
         title: labelCn,
@@ -3843,6 +4222,26 @@
         tooltip: `单独播放 LED 效果：${labelCn}（${name}），眼睛保持当前画面`,
         onClick: () => { void playLedEffect(name); },
       });
+      if (effect && effect.kind === "pixel_clip" && effect.source === "custom") {
+        const actions = document.createElement("div");
+        actions.className = "expression-card-actions";
+        [
+          ["编辑", () => editLedEffect(effect.effect_id)],
+          ["同步", () => syncLedEffect(effect.effect_id)],
+          ["删除", () => deleteLedEffectFromLibrary(effect)],
+        ].forEach(([label, run]) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void run();
+          });
+          actions.appendChild(button);
+        });
+        card.appendChild(actions);
+      }
       expressionGrid.appendChild(card);
     });
     if (!filtered.length) renderEmptyCell(expressionGrid, q ? `无匹配「${q}」的灯光表情` : "暂无灯光表情");
@@ -3881,7 +4280,7 @@
     });
   });
   if (btnExpressionPreview) btnExpressionPreview.addEventListener("click", () => { void previewExpression(); });
-  if (btnExpressionSync) btnExpressionSync.addEventListener("click", () => { void syncExpressionEye(); });
+  if (btnExpressionSync) btnExpressionSync.addEventListener("click", () => { void syncExpressionResources(); });
   if (btnExpressionSetDefault) {
     btnExpressionSetDefault.addEventListener("click", () => { void setDefaultLedForEye(); });
   }
@@ -3890,31 +4289,29 @@
   if (btnExpressionSave) btnExpressionSave.addEventListener("click", () => { void saveExpressionPresetFromComposer(); });
   if (btnEyeUpload) btnEyeUpload.addEventListener("click", () => { void uploadExpressionEye(); });
   if (ledEffectForm) {
-    ledEffectForm.addEventListener("submit", async (event) => {
+    ledEffectForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      try {
-        await fetchJson("/api/led-effects", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            effect_id: String(ledEffectId.value || "").trim(),
-            label: String(ledEffectLabel.value || "").trim(),
-            role: ledEffectRole.value,
-            program: {
-              version: 1,
-              template: ledEffectTemplate.value,
-              defaults: { color: ledEffectColor.value, intensity: 1.0 },
-            },
-          }),
-        });
-        ledEffectForm.reset();
-        ledEffectColor.value = "#ffffff";
-        await refreshExpressionStudio();
-      } catch (error) {
-        window.alert(`保存失败：${error.message || error}`);
-      }
+      void saveLedEditor({ sync: true });
     });
   }
+  document.querySelectorAll("[data-led-tool]").forEach((button) => {
+    button.addEventListener("click", () => {
+      ledEditorTool = button.dataset.ledTool === "erase" ? "erase" : "paint";
+      document.querySelectorAll("[data-led-tool]").forEach((item) => {
+        item.classList.toggle("is-active", item === button);
+      });
+    });
+  });
+  if (btnLedCopyFrame) btnLedCopyFrame.addEventListener("click", copyLedEditorFrame);
+  if (btnLedPasteFrame) btnLedPasteFrame.addEventListener("click", pasteLedEditorFrame);
+  if (btnLedMirrorFrame) btnLedMirrorFrame.addEventListener("click", mirrorLedEditorFrame);
+  if (btnLedClearFrame) btnLedClearFrame.addEventListener("click", () => {
+    ledEditorFrames[ledEditorFrame].fill(0);
+    drawLedEditor();
+  });
+  if (btnLedEditorPreview) btnLedEditorPreview.addEventListener("click", toggleLedEditorPreview);
+  if (btnLedEditorSave) btnLedEditorSave.addEventListener("click", () => { void saveLedEditor({ sync: false }); });
+  initializeLedEditor();
   ensureLedPreviewCells();
   void refreshSkillsAndRecordings();
   void refreshExpressionStudio();

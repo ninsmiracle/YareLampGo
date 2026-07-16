@@ -227,14 +227,14 @@ class LEDController:
             "eye_clip_id": composition.get("eye_storage_clip_id"),
             "led_effect_id": composition.get("led_effect_id"),
             "led_params": composition.get("led_params") or {},
-            "playback": composition.get("playback") or "once",
+            "playback": composition.get("playback") or "loop",
             "duration_ms": int(composition.get("duration_ms") or 3000),
         }
         if composition.get("preset_id"):
             payload["preset_id"] = composition["preset_id"]
         if effect.get("mode") is not None:
             payload["led_mode"] = int(effect["mode"])
-        if isinstance(effect.get("program"), dict):
+        if isinstance(effect.get("program"), dict) and effect["program"].get("type") != "pixel_clip":
             payload["led_program"] = effect["program"]
         return self._send_remote_path("/device/expressions/play", payload, reason="expression_play"), composition
 

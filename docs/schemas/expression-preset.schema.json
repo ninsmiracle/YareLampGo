@@ -4,19 +4,26 @@
   "title": "LampGo Expression Preset",
   "type": "object",
   "additionalProperties": false,
-  "required": ["preset_id", "playback", "duration_ms"],
+  "required": ["confirmed"],
   "anyOf": [
-    {"required": ["eye_clip_id"]},
-    {"required": ["led_effect_id"]}
+    {
+      "required": ["eye_clip_id"],
+      "properties": {"eye_clip_id": {"type": "string", "minLength": 1}}
+    },
+    {
+      "required": ["led_effect_id"],
+      "properties": {"led_effect_id": {"type": "string", "minLength": 1}}
+    }
   ],
   "properties": {
     "preset_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 64},
     "label": {"type": "string", "maxLength": 64},
     "description": {"type": "string", "maxLength": 240},
     "eye_clip_id": {"type": ["string", "null"]},
     "led_effect_id": {"type": ["string", "null"]},
     "led_params": {"type": "object"},
-    "playback": {"enum": ["once", "loop"]},
+    "playback": {"enum": ["once", "loop"], "default": "loop"},
     "duration_ms": {"type": "integer", "minimum": 2500, "maximum": 3500},
     "confirmed": {"const": true}
   }
