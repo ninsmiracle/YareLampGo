@@ -10,6 +10,7 @@ audio in the room, runs ASR/TTS via Volcengine, and calls lampgo's
 from __future__ import annotations
 
 import asyncio
+import getpass
 import importlib.util
 import json
 import os
@@ -18,6 +19,7 @@ import signal
 import socket
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -107,6 +109,37 @@ _LOCAL_NO_PROXY_HOSTS = (
     "10.0.0.0/8",
     "172.16.0.0/12",
 )
+
+_BIND_FAILURE_MARKERS = (
+    "address already in use",
+    "errno 48",
+    "errno 98",
+    "winerror 10048",
+)
+
+
+@dataclass(frozen=True)
+class _SDKPortOwner:
+    """A verified LampGo SDK process group that owns the local SDK port."""
+
+    listener_pid: int
+    root_pid: int
+    process_group_id: int | None
+    process_name: str
+
+
+def _command_runs_agent_sdk(command: list[str]) -> bool:
+    """Return whether an argv contains the exact LampGo SDK executable."""
+    expected = {name.casefold() for name in AGENT_SDK_BINARIES}
+    for token in command:
+        # ``Path`` follows the host OS and therefore does not split a Windows
+        # path when tests or diagnostics run on Unix (and vice versa).
+        executable = str(token).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if executable.endswith(".exe"):
+            executable = executable[:-4]
+        if executable in expected:
+            return True
+    return False
 
 
 def _yaml_string(value: str) -> str:
@@ -573,6 +606,8 @@ class AgentSDKManager:
         self._patch_dir: Path | None = None
         self._monitor_task: asyncio.Task | None = None
         self._ready_event = asyncio.Event()
+        self._startup_failed_event = asyncio.Event()
+        self._start_lock = asyncio.Lock()
         self._last_error = ""
 
     @property
@@ -685,6 +720,240 @@ class AgentSDKManager:
         return None
 
     @staticmethod
+    def _psutil():
+        """Import psutil lazily so missing voice extras still get a useful error."""
+        try:
+            import psutil
+        except ImportError as exc:  # pragma: no cover - guarded by the voice extra
+            raise RuntimeError("psutil is required to inspect the LiveKit Agent SDK port") from exc
+        return psutil
+
+    def _find_port_listener_pid(self) -> int | None:
+        """Return the unique PID listening on the SDK port, if any."""
+        psutil = self._psutil()
+        listener_pids: set[int] = set()
+        unknown_listener = False
+        try:
+            connections = [
+                (connection, connection.pid)
+                for connection in psutil.net_connections(kind="tcp")
+            ]
+        except (psutil.AccessDenied, OSError):
+            # macOS can reject the whole system-wide query because of one
+            # protected process. Fall back to inspecting current-user
+            # processes individually so a single denial is harmless.
+            connections = []
+            for process in psutil.process_iter():
+                if not self._process_is_current_user(process):
+                    continue
+                try:
+                    connections.extend(
+                        (connection, process.pid)
+                        for connection in process.net_connections(kind="tcp")
+                    )
+                except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                    continue
+
+        for connection, owner_pid in connections:
+            if connection.status != psutil.CONN_LISTEN or not connection.laddr:
+                continue
+            local_port = getattr(connection.laddr, "port", None)
+            if local_port is None and len(connection.laddr) >= 2:
+                local_port = connection.laddr[1]
+            if local_port != self._port:
+                continue
+            if owner_pid is None:
+                unknown_listener = True
+            else:
+                listener_pids.add(int(owner_pid))
+
+        if unknown_listener or len(listener_pids) > 1:
+            raise RuntimeError(f"cannot determine the unique owner of TCP port {self._port}")
+        if listener_pids:
+            return next(iter(listener_pids))
+
+        # If no visible process owns the port, distinguish a genuinely free
+        # port from a listener hidden by OS permissions. Never assume the
+        # latter is safe to terminate or replace.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", self._port))
+            except OSError as exc:
+                raise RuntimeError(
+                    f"TCP port {self._port} is occupied but its owner cannot be inspected"
+                ) from exc
+        return None
+
+    @staticmethod
+    def _process_is_current_user(process) -> bool:
+        try:
+            if hasattr(os, "getuid"):
+                return int(process.uids().real) == os.getuid()
+            return process.username().casefold() == getpass.getuser().casefold()
+        except Exception:
+            return False
+
+    def _identify_sdk_port_owner(self, listener_pid: int) -> _SDKPortOwner | None:
+        """Resolve a listener to an SDK parent/process-group leader owned by this user."""
+        psutil = self._psutil()
+        try:
+            listener = psutil.Process(listener_pid)
+            if not self._process_is_current_user(listener):
+                return None
+
+            process_group_id: int | None = None
+            candidates = []
+            if os.name != "nt":
+                try:
+                    process_group_id = os.getpgid(listener_pid)
+                    candidates.append(psutil.Process(process_group_id))
+                except (OSError, psutil.Error):
+                    process_group_id = None
+
+            current = listener
+            seen: set[int] = set()
+            while current.pid not in seen and len(seen) < 8:
+                seen.add(current.pid)
+                candidates.append(current)
+                try:
+                    current = current.parent()
+                except psutil.Error:
+                    break
+                if current is None:
+                    break
+
+            for candidate in candidates:
+                if not self._process_is_current_user(candidate):
+                    continue
+                try:
+                    command = candidate.cmdline()
+                except psutil.Error:
+                    continue
+                if not _command_runs_agent_sdk(command):
+                    continue
+                if process_group_id is not None:
+                    try:
+                        if os.getpgid(candidate.pid) != process_group_id:
+                            continue
+                    except OSError:
+                        continue
+                return _SDKPortOwner(
+                    listener_pid=listener_pid,
+                    root_pid=int(candidate.pid),
+                    process_group_id=process_group_id,
+                    process_name=candidate.name(),
+                )
+        except psutil.Error:
+            return None
+        return None
+
+    def _describe_process(self, pid: int) -> str:
+        psutil = self._psutil()
+        try:
+            process = psutil.Process(pid)
+            return process.name()
+        except psutil.Error:
+            return "unknown"
+
+    def _signal_sdk_owner(self, owner: _SDKPortOwner, *, force: bool) -> None:
+        """Signal only the verified SDK process group/tree."""
+        psutil = self._psutil()
+        if os.name != "nt" and owner.process_group_id is not None:
+            if owner.process_group_id == os.getpgrp():
+                raise RuntimeError("refusing to signal LampGo's own process group")
+            signal_to_send = signal.SIGKILL if force else signal.SIGTERM
+            try:
+                os.killpg(owner.process_group_id, signal_to_send)
+            except ProcessLookupError:
+                pass
+            return
+
+        try:
+            root = psutil.Process(owner.root_pid)
+            process_tree = root.children(recursive=True) + [root]
+        except psutil.NoSuchProcess:
+            return
+        for process in reversed(process_tree):
+            try:
+                process.kill() if force else process.terminate()
+            except psutil.NoSuchProcess:
+                pass
+
+    async def _wait_for_port_free(self, timeout_s: float) -> bool:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            try:
+                listener_pid = await asyncio.to_thread(self._find_port_listener_pid)
+            except RuntimeError:
+                return False
+            if listener_pid is None:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
+
+    async def _release_sdk_port(self) -> bool:
+        """Replace a stale LampGo SDK listener; never kill an unknown process."""
+        try:
+            listener_pid = await asyncio.to_thread(self._find_port_listener_pid)
+        except RuntimeError as exc:
+            self._set_last_error(str(exc))
+            logger.warning("agent_sdk.port_inspection_failed", port=self._port, error=str(exc))
+            return False
+        if listener_pid is None:
+            return True
+
+        owner = await asyncio.to_thread(self._identify_sdk_port_owner, listener_pid)
+        if owner is None:
+            process_name = await asyncio.to_thread(self._describe_process, listener_pid)
+            self._set_last_error(
+                f"TCP port {self._port} is occupied by an unknown process "
+                f"(pid={listener_pid}, process={process_name}); refusing to terminate it"
+            )
+            logger.warning(
+                "agent_sdk.port_owned_by_unknown_process",
+                port=self._port,
+                pid=listener_pid,
+                process=process_name,
+            )
+            return False
+
+        logger.warning(
+            "agent_sdk.stale_process_detected",
+            port=self._port,
+            listener_pid=owner.listener_pid,
+            root_pid=owner.root_pid,
+            pgid=owner.process_group_id,
+            process=owner.process_name,
+        )
+        try:
+            await asyncio.to_thread(self._signal_sdk_owner, owner, force=False)
+            if await self._wait_for_port_free(3.0):
+                logger.info("agent_sdk.stale_process_stopped", port=self._port, root_pid=owner.root_pid)
+                return True
+
+            logger.warning(
+                "agent_sdk.stale_process_stop_timeout",
+                port=self._port,
+                root_pid=owner.root_pid,
+                pgid=owner.process_group_id,
+            )
+            await asyncio.to_thread(self._signal_sdk_owner, owner, force=True)
+            if await self._wait_for_port_free(2.0):
+                logger.info("agent_sdk.stale_process_killed", port=self._port, root_pid=owner.root_pid)
+                return True
+        except Exception as exc:
+            self._set_last_error(f"failed to stop stale {AGENT_SDK_PACKAGE}: {exc}")
+            logger.exception("agent_sdk.stale_process_cleanup_failed", root_pid=owner.root_pid)
+            return False
+
+        self._set_last_error(
+            f"stale {AGENT_SDK_PACKAGE} did not release TCP port {self._port}"
+        )
+        return False
+
+    @staticmethod
     def _merge_no_proxy(value: str | None) -> str:
         existing = [item.strip() for item in (value or "").split(",") if item.strip()]
         seen = {item.lower() for item in existing}
@@ -696,9 +965,17 @@ class AgentSDKManager:
 
     async def start(self) -> bool:
         """Start the Agent SDK subprocess if config is complete."""
-        if self._process is not None:
+        async with self._start_lock:
+            return await self._start_locked()
+
+    async def _start_locked(self) -> bool:
+        if self.is_running:
             logger.debug("agent_sdk.already_running")
             return True
+        if self._process is not None:
+            # A previous parent may already have exited while worker children
+            # still hold stdout or sockets. Reap its whole managed group first.
+            await self.stop()
 
         if not self._can_start():
             return False
@@ -712,6 +989,9 @@ class AgentSDKManager:
                 binaries=AGENT_SDK_BINARIES,
                 hint=f"Agent SDK CLI is missing from PATH and venv/bin: {binaries}",
             )
+            return False
+
+        if not await self._release_sdk_port():
             return False
 
         self._roles_path = self._generate_roles_yaml()
@@ -748,6 +1028,7 @@ class AgentSDKManager:
         logger.info("agent_sdk.no_proxy_configured", no_proxy=no_proxy)
 
         self._ready_event.clear()
+        self._startup_failed_event.clear()
         try:
             self._process = await asyncio.create_subprocess_exec(
                 sdk_binary,
@@ -796,7 +1077,7 @@ class AgentSDKManager:
                 proc.send_signal(signal.SIGTERM)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("agent_sdk.stop_timeout_killing", pid=pid, pgid=pgid)
                 if pgid is not None:
                     os.killpg(pgid, signal.SIGKILL)
@@ -812,6 +1093,7 @@ class AgentSDKManager:
             self._process = None
         self._process_pgid = None
         self._ready_event.clear()
+        self._startup_failed_event.clear()
 
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
@@ -836,13 +1118,29 @@ class AgentSDKManager:
     async def wait_ready(self, timeout_s: float = 8.0) -> bool:
         if self.is_ready:
             return True
-        if not self.is_running:
+        if not self.is_running or self._startup_failed_event.is_set():
             return False
+
+        waiters = {
+            asyncio.create_task(self._ready_event.wait()),
+            asyncio.create_task(self._startup_failed_event.wait()),
+        }
+        done: set[asyncio.Task] = set()
         try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout_s)
-        except asyncio.TimeoutError:
+            done, _ = await asyncio.wait(
+                waiters,
+                timeout=timeout_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+        if not done:
+            self._set_last_error(f"voice agent SDK did not become ready within {timeout_s:.1f}s")
             return False
-        return self.is_ready
+        return not self._startup_failed_event.is_set() and self.is_ready
 
     async def _monitor(self) -> None:
         """Read stdout and watch for unexpected exits."""
@@ -854,6 +1152,10 @@ class AgentSDKManager:
                 text = line.decode(errors="replace").rstrip()
                 if text:
                     logger.info("agent_sdk.output", line=text)
+                    lowered = text.casefold()
+                    if any(marker in lowered for marker in _BIND_FAILURE_MARKERS):
+                        self._set_last_error(f"TCP port {self._port} became unavailable during SDK startup")
+                        self._startup_failed_event.set()
                     if "registered worker" in text:
                         self._ready_event.set()
         except asyncio.CancelledError:
@@ -861,9 +1163,15 @@ class AgentSDKManager:
         except Exception:
             logger.debug("agent_sdk.monitor_read_error", exc_info=True)
 
-        rc = proc.returncode
+        rc = await proc.wait()
         if rc is not None and rc != 0:
+            if not self._last_error:
+                self._set_last_error(f"{AGENT_SDK_PACKAGE} exited with status {rc}")
+            self._startup_failed_event.set()
             logger.warning("agent_sdk.exited_unexpectedly", returncode=rc)
+        elif not self._ready_event.is_set():
+            self._set_last_error(f"{AGENT_SDK_PACKAGE} exited before becoming ready")
+            self._startup_failed_event.set()
         if self._process is proc:
             self._process = None
             self._process_pgid = None

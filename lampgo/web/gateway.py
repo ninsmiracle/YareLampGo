@@ -1445,7 +1445,7 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": result})
 
     async def api_livekit_room_end(self, request: Request) -> JSONResponse:
-        """Hard-close a LiveKit room when the browser ends a call."""
+        """Release LampGo's local call ownership after the browser disconnects."""
         try:
             body = await request.json()
         except Exception:
@@ -1505,7 +1505,7 @@ class WebGateway:
         reason: str,
         client_call_id: str = "",
     ) -> list[str]:
-        """Delete LiveKit rooms and forget them from the local active-room registry."""
+        """Forget local room ownership; cloud auth does not expose room administration."""
         targets = sorted(
             {
                 str(room or "").strip()
