@@ -97,6 +97,33 @@ def test_executor_preempts_running_skill():
     asyncio.run(run())
 
 
+def test_executor_rejects_virtual_motion_after_hardware_startup_failure() -> None:
+    class FakeReturnSafe(Skill):
+        skill_id = "return_safe"
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            raise AssertionError("blocked motion must not execute")
+
+    async def run() -> None:
+        registry = SkillRegistry()
+        registry.register(FakeReturnSafe())
+        executor = SkillExecutor(registry, EventBus())
+        executor.set_motion_block_reason("Unsafe startup pose; torque remains disabled")
+        ctx = SimpleNamespace(
+            motion=SimpleNamespace(is_running=True, is_virtual=True),
+            led=SimpleNamespace(is_connected=False),
+        )
+
+        result = await executor.invoke("return_safe", ctx)
+
+        assert result.status == "rejected"
+        assert result.error_code == "motor_hardware_unavailable"
+        assert result.error_detail == "Unsafe startup pose; torque remains disabled"
+
+    asyncio.run(run())
+
+
 class _HangingSkill(Skill):
     skill_id = "first"
     description = "hang until cancelled"

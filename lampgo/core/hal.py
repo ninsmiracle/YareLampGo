@@ -40,7 +40,13 @@ class HardwareAbstraction:
 
     _HOME_EDGE_MARGIN_RATIO = 0.15
     _MIN_VALID_RANGE_COUNTS = 80
-    _RECOVERY_LIMIT_MARGIN_COUNTS = 96
+    _MAX_VALID_RANGE_COUNTS = 3500
+    _MIN_NEUTRAL_MARGIN_RATIO = 0.10
+    _STARTUP_EDGE_MARGIN_RATIO = 0.05
+    _MIN_STARTUP_EDGE_MARGIN_COUNTS = 32
+    _NEUTRAL_CONFIRM_TOLERANCE_COUNTS = 128
+    _STS3215_MULTI_TURN_PHASE_BIT = 0x10
+    _CALIBRATION_SCHEMA_VERSION = 2
 
     def __init__(self, config: DeviceConfig) -> None:
         self._config = config
@@ -73,17 +79,29 @@ class HardwareAbstraction:
             motors=motors,
             calibration=calibration,
         )
-        self._bus.connect(handshake=False)
-        self._verify_expected_motors()
+        try:
+            self._bus.connect(handshake=False)
+            # A stale Goal_Position can become destructive as soon as torque is
+            # enabled. Make torque-off the first register operation after the
+            # serial port opens, before pinging or applying any calibration.
+            self._release_torque_for_manual_motion(strict=True)
+            self._verify_expected_motors()
 
-        if calibration:
-            logger.info("hal.calibration_loaded", lamp_id=self._config.lamp_id)
-        elif calibrate:
-            logger.info("Motor bus not calibrated — running interactive calibration")
-            self.calibrate()
+            if calibration:
+                logger.info("hal.calibration_loaded", lamp_id=self._config.lamp_id)
+            elif calibrate:
+                logger.info("Motor bus not calibrated — running interactive calibration")
+                self.calibrate()
 
-        if configure:
-            self._configure()
+            if configure:
+                self._configure()
+        except Exception:
+            try:
+                self._bus.disconnect(disable_torque=True)
+            except Exception:
+                logger.exception("hal.connect_cleanup_failed")
+            self._bus = None
+            raise
         self._connected = True
         logger.info("hal.connected", port=self._config.motor_port)
 
@@ -209,9 +227,13 @@ class HardwareAbstraction:
         if self._bus is None:
             logger.info("hal.enable_torque: stub mode")
             return
-        for motor in self._bus.motors:
-            self._safe_bus_write("Lock", motor, 1)
-            self._safe_bus_write("Torque_Enable", motor, 1)
+        # Re-run the complete fail-closed startup sequence. Recording can leave
+        # an arm at a range edge, and blindly restoring torque there is unsafe.
+        try:
+            self._configure()
+        except Exception:
+            self._release_torque_for_manual_motion(strict=False)
+            raise
         logger.info("hal.torque_enabled")
 
     def get_calibration_home(self) -> dict[str, float] | None:
@@ -246,6 +268,10 @@ class HardwareAbstraction:
         if self._bus is None:
             raise RuntimeError("Cannot calibrate in stub mode")
 
+        logger.info("calibration.preflight")
+        self._release_torque_for_manual_motion(strict=True)
+        changed_mode = self._ensure_sts3215_single_turn(list(self._bus.motors))
+
         existing = self._load_calibration()
         if existing:
             choice = input(
@@ -253,12 +279,19 @@ class HardwareAbstraction:
                 "or type 'c' to re-calibrate: "
             )
             if choice.strip().lower() != "c":
-                self._bus.write_calibration(existing)
+                if changed_mode:
+                    changed = ", ".join(sorted(changed_mode))
+                    raise RuntimeError(
+                        "STS3215 single-turn mode was repaired for "
+                        f"{changed}. The existing calibration cannot be reused; "
+                        "run calibration again and choose 'c'."
+                    )
+                self._require_single_turn_calibration_metadata(list(self._bus.motors))
+                self._apply_hardware_calibration(existing)
                 logger.info("calibration.loaded", lamp_id=self._config.lamp_id)
                 return
 
         logger.info("calibration.start")
-        self._release_torque_for_manual_motion(strict=True)
         for motor in self._bus.motors:
             self._write_register_or_raise("Operating_Mode", motor, OperatingMode.POSITION.value)
         self._open_manual_calibration_range()
@@ -293,6 +326,7 @@ class HardwareAbstraction:
 
         print("Move all joints through their full ranges of motion.\nPress ENTER to stop recording...")
         range_mins, range_maxes = self._bus.record_ranges_of_motion()
+        self._validate_recorded_calibration(neutral_raw, range_mins, range_maxes)
 
         calibration: dict[str, MotorCalibration] = {}
         for motor_name, m in self._bus.motors.items():
@@ -304,7 +338,8 @@ class HardwareAbstraction:
                 range_max=range_maxes[motor_name],
             )
 
-        self._bus.write_calibration(calibration)
+        self._apply_hardware_calibration(calibration)
+        self._wait_for_safe_neutral_pose(neutral_raw, calibration)
         self._save_calibration(calibration, neutral_raw=neutral_raw)
         logger.info("calibration.saved", lamp_id=self._config.lamp_id)
 
@@ -379,10 +414,17 @@ class HardwareAbstraction:
             logger.warning("hal.configure_skipped_all_motors")
             return
 
-        for motor in healthy_motors:
-            self._safe_bus_write("Torque_Enable", motor, 0)
-            self._safe_bus_write("Lock", motor, 0)
+        self._release_torque_for_manual_motion(strict=True)
 
+        changed_mode = self._ensure_sts3215_single_turn(healthy_motors)
+        if changed_mode:
+            changed = ", ".join(sorted(changed_mode))
+            raise RuntimeError(
+                "STS3215 single-turn mode was repaired for "
+                f"{changed}. Existing calibration is no longer trusted; "
+                "run `uv run lampgo calibrate` before enabling torque."
+            )
+        self._require_single_turn_calibration_metadata(healthy_motors)
         self._ensure_hardware_calibration()
 
         # Torque_Limit (0-1000) caps stall current for every motor.
@@ -397,17 +439,17 @@ class HardwareAbstraction:
             if getattr(self._bus, "protocol_version", None) == 0:
                 self._safe_bus_write("Maximum_Acceleration", motor, 50)
             self._safe_bus_write("Acceleration", motor, 50)
-            self._safe_bus_write("Operating_Mode", motor, OperatingMode.POSITION.value)
+            self._write_register_or_raise("Operating_Mode", motor, OperatingMode.POSITION.value)
             self._safe_bus_write("P_Coefficient", motor, 16)
             self._safe_bus_write("I_Coefficient", motor, 0)
             self._safe_bus_write("D_Coefficient", motor, 32)
-            self._safe_bus_write("Torque_Limit", motor, torque_limit_raw, normalize=False)
+            self._write_register_or_raise("Torque_Limit", motor, torque_limit_raw, normalize=False)
         logger.info("hal.torque_limit_set", pct=self._config.max_torque_pct, raw=torque_limit_raw)
 
         self._seed_goal_positions_to_present(healthy_motors)
         for motor in healthy_motors:
-            self._safe_bus_write("Lock", motor, 1)
-            self._safe_bus_write("Torque_Enable", motor, 1)
+            self._write_register_or_raise("Lock", motor, 1)
+            self._write_register_or_raise("Torque_Enable", motor, 1)
 
     def _safe_bus_write(
         self,
@@ -455,20 +497,157 @@ class HardwareAbstraction:
 
         try:
             actual = self._bus.read(data_name, motor, normalize=normalize)
-        except Exception:
-            logger.warning(
-                "hal.register_verify_read_failed",
-                motor=motor,
-                register=data_name,
-                expected=value,
-                exc_info=True,
-            )
-            return
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot read back {data_name} for '{motor}' after writing {value!r}."
+            ) from exc
 
         if int(actual) != int(value):
             raise RuntimeError(
                 f"Cannot verify {data_name} for '{motor}': expected {value}, got {actual}."
             )
+
+    def _ensure_sts3215_single_turn(self, motors: list[str]) -> set[str]:
+        """Force STS3215 angle feedback into single-turn mode and verify it."""
+        if self._bus is None:
+            return set()
+
+        changed: set[str] = set()
+        for motor in motors:
+            motor_config = self._bus.motors[motor]
+            if getattr(motor_config, "model", "") != "sts3215":
+                continue
+
+            phase = int(self._bus.read("Phase", motor, normalize=False))
+            if phase & self._STS3215_MULTI_TURN_PHASE_BIT:
+                single_turn_phase = phase & ~self._STS3215_MULTI_TURN_PHASE_BIT
+                self._write_register_or_raise("Phase", motor, single_turn_phase, normalize=False)
+                changed.add(motor)
+                phase = int(self._bus.read("Phase", motor, normalize=False))
+
+            if phase & self._STS3215_MULTI_TURN_PHASE_BIT:
+                raise RuntimeError(
+                    f"Motor '{motor}' is still in unsafe STS3215 multi-turn feedback mode. "
+                    "Torque will remain disabled."
+                )
+
+        logger.info("hal.sts3215_single_turn_verified", motors=sorted(motors), changed=sorted(changed))
+        return changed
+
+    def _require_single_turn_calibration_metadata(self, motors: list[str]) -> None:
+        """Reject calibration captured before single-turn mode was verified."""
+        if self._bus is None or not self._bus.calibration:
+            return
+        if not any(getattr(self._bus.motors[motor], "model", "") == "sts3215" for motor in motors):
+            return
+
+        data = self._load_calibration_data() or {}
+        metadata = data.get("_meta", {}) if isinstance(data, dict) else {}
+        if not isinstance(metadata, dict) or metadata.get("sts3215_single_turn_verified") is not True:
+            raise RuntimeError(
+                "Calibration predates STS3215 single-turn safety verification. "
+                "Torque will remain disabled; run `uv run lampgo calibrate` to create a safe profile."
+            )
+
+    def _validate_recorded_calibration(
+        self,
+        neutral_raw: dict[str, float],
+        range_mins: dict[str, float],
+        range_maxes: dict[str, float],
+    ) -> None:
+        """Reject overflowed or severely off-centre ranges before hardware limits are written."""
+        if self._bus is None:
+            raise RuntimeError("Cannot validate calibration without a motor bus")
+
+        errors: list[str] = []
+        for motor, motor_config in self._bus.motors.items():
+            resolution_max = int(self._bus.model_resolution_table[motor_config.model]) - 1
+            neutral = int(neutral_raw[motor])
+            range_min = int(range_mins[motor])
+            range_max = int(range_maxes[motor])
+            span = range_max - range_min
+            margin = min(neutral - range_min, range_max - neutral)
+
+            if not (0 <= range_min < range_max <= resolution_max):
+                errors.append(
+                    f"{motor}: range {range_min}..{range_max} is outside single-turn 0..{resolution_max}"
+                )
+                continue
+            if span < self._MIN_VALID_RANGE_COUNTS or span > self._MAX_VALID_RANGE_COUNTS:
+                errors.append(f"{motor}: unsafe range span {span}")
+                continue
+            if margin < span * self._MIN_NEUTRAL_MARGIN_RATIO:
+                errors.append(
+                    f"{motor}: neutral {neutral} is too close to range edge {range_min}..{range_max}"
+                )
+
+        if errors:
+            raise RuntimeError(
+                "Unsafe calibration rejected before motor limits were written:\n- " + "\n- ".join(errors)
+            )
+
+    def _validate_neutral_return(
+        self,
+        neutral_raw: dict[str, float],
+        final_raw: dict[str, float],
+    ) -> None:
+        """Require the arm to be returned near its recorded neutral before saving."""
+        errors: list[str] = []
+        for motor, neutral in neutral_raw.items():
+            if motor not in final_raw:
+                errors.append(f"{motor}: final position could not be read")
+                continue
+            final = int(final_raw[motor])
+            if abs(final - int(neutral)) > self._NEUTRAL_CONFIRM_TOLERANCE_COUNTS:
+                errors.append(f"{motor}: expected near {int(neutral)}, got {final}")
+        if errors:
+            raise RuntimeError(
+                "Arm is not close to its recorded neutral pose:\n- " + "\n- ".join(errors)
+            )
+
+    def _wait_for_safe_neutral_pose(
+        self,
+        neutral_raw: dict[str, float],
+        calibration: dict[str, Any],
+    ) -> dict[str, float]:
+        """Keep torque off and let the user correct the final pose without recalibrating."""
+        if self._bus is None:
+            raise RuntimeError("Cannot confirm neutral pose without a motor bus")
+
+        while True:
+            input(
+                "Move every joint to a safe supported pose, preferably the recorded neutral pose; "
+                "do not leave a joint at its range limit. Press ENTER to verify..."
+            )
+            final_raw = self._bus.sync_read(
+                "Present_Position",
+                list(self._bus.motors),
+                normalize=False,
+            )
+            try:
+                self._validate_startup_positions(final_raw, calibration=calibration)
+            except RuntimeError as exc:
+                print(
+                    f"{exc}\nCalibration has not been saved yet. "
+                    "Torque remains disabled; reposition the reported joint and try again."
+                )
+                continue
+            try:
+                self._validate_neutral_return(neutral_raw, final_raw)
+            except RuntimeError as exc:
+                # Exact neutral is a convenience for the subsequent return_safe
+                # motion, not a prerequisite for safely enabling torque. A pose
+                # well inside every calibrated limit is safe to save and hold.
+                logger.warning(
+                    "calibration.final_pose_away_from_neutral",
+                    detail=str(exc),
+                    final_raw={motor: int(raw) for motor, raw in final_raw.items()},
+                )
+                print(
+                    f"Warning: {exc}\nThe pose is safely inside all calibrated limits, "
+                    "so calibration will be saved."
+                )
+            return final_raw
 
     def _release_torque_for_manual_motion(self, *, strict: bool) -> None:
         """Release every motor before hand-guided calibration/recording.
@@ -542,18 +721,21 @@ class HardwareAbstraction:
     def _ensure_hardware_calibration(self) -> None:
         if self._bus is None or not self._bus.calibration:
             return
-        try:
-            if self._bus.is_calibrated:
-                logger.info("hal.calibration_already_active", lamp_id=self._config.lamp_id)
-                return
-            self._bus.write_calibration(self._bus.calibration)
-            logger.info("hal.calibration_applied", lamp_id=self._config.lamp_id)
-        except Exception:
-            logger.warning(
-                "hal.calibration_apply_failed",
-                lamp_id=self._config.lamp_id,
-                exc_info=True,
+        if self._bus.is_calibrated:
+            logger.info("hal.calibration_already_active", lamp_id=self._config.lamp_id)
+            return
+        self._apply_hardware_calibration(self._bus.calibration)
+
+    def _apply_hardware_calibration(self, calibration: dict[str, Any]) -> None:
+        """Write calibration and refuse torque unless every register reads back."""
+        if self._bus is None:
+            raise RuntimeError("Cannot apply calibration without a motor bus")
+        self._bus.write_calibration(calibration)
+        if not self._bus.is_calibrated:
+            raise RuntimeError(
+                "Motor calibration register verification failed. Torque will remain disabled."
             )
+        logger.info("hal.calibration_applied", lamp_id=self._config.lamp_id)
 
     def _seed_goal_positions_to_present(self, motors: list[str]) -> None:
         if self._bus is None or not motors:
@@ -570,51 +752,73 @@ class HardwareAbstraction:
                 except Exception:
                     logger.warning("hal.goal_seed_read_failed", motor=motor, exc_info=True)
 
-        if not present_raw:
-            logger.warning("hal.goal_seed_no_present_position", motors=motors)
-            return
+        missing = [motor for motor in motors if motor not in present_raw]
+        if missing:
+            raise RuntimeError(f"Cannot safely seed Goal_Position; missing Present_Position for {missing}.")
 
-        self._expand_hardware_limits_to_present(present_raw)
+        for motor, raw in present_raw.items():
+            motor_config = self._bus.motors[motor]
+            resolution_max = int(self._bus.model_resolution_table[motor_config.model]) - 1
+            if not 0 <= int(raw) <= resolution_max:
+                raise RuntimeError(
+                    f"Unsafe Present_Position for '{motor}': {int(raw)} is outside 0..{resolution_max}. "
+                    "Torque will remain disabled."
+                )
+
+        self._validate_startup_positions(present_raw)
 
         seeded: dict[str, int] = {}
-        failed: list[str] = []
         for motor, raw in present_raw.items():
             raw_int = int(raw)
-            if self._safe_bus_write("Goal_Position", motor, raw_int, normalize=False):
-                seeded[motor] = raw_int
-            else:
-                failed.append(motor)
+            self._write_register_or_raise("Goal_Position", motor, raw_int, normalize=False)
+            seeded[motor] = raw_int
 
         if seeded:
             logger.info("hal.goal_seeded_to_present", present_raw=seeded)
-        if failed:
-            logger.warning("hal.goal_seed_failed", motors=failed)
 
-    def _expand_hardware_limits_to_present(self, present_raw: dict[str, float]) -> None:
-        if self._bus is None or not self._bus.calibration:
+    def _validate_startup_positions(
+        self,
+        present_raw: dict[str, float],
+        *,
+        calibration: dict[str, Any] | None = None,
+    ) -> None:
+        """Refuse to energize a joint outside or too close to a calibrated stop."""
+        if self._bus is None:
+            raise RuntimeError("Cannot validate startup positions without a motor bus")
+        active_calibration = calibration if calibration is not None else self._bus.calibration
+        if not active_calibration:
             return
 
+        errors: list[str] = []
         for motor, raw in present_raw.items():
-            cal = self._bus.calibration.get(motor)
+            cal = active_calibration.get(motor)
             if cal is None:
+                errors.append(f"{motor}: calibration is missing")
                 continue
 
             raw_int = int(raw)
-            recovery_min = max(0, min(cal.range_min, raw_int - self._RECOVERY_LIMIT_MARGIN_COUNTS))
-            recovery_max = min(4095, max(cal.range_max, raw_int + self._RECOVERY_LIMIT_MARGIN_COUNTS))
-            if recovery_min == cal.range_min and recovery_max == cal.range_max:
-                continue
+            range_min = int(cal.range_min)
+            range_max = int(cal.range_max)
+            span = range_max - range_min
+            margin = min(raw_int - range_min, range_max - raw_int)
+            required_margin = max(
+                self._MIN_STARTUP_EDGE_MARGIN_COUNTS,
+                int(span * self._STARTUP_EDGE_MARGIN_RATIO),
+            )
+            if raw_int < range_min or raw_int > range_max:
+                errors.append(
+                    f"{motor}: position {raw_int} is outside calibrated range {range_min}..{range_max}"
+                )
+            elif margin < required_margin:
+                errors.append(
+                    f"{motor}: position {raw_int} is only {margin} counts from calibrated limit "
+                    f"{range_min}..{range_max} (need at least {required_margin})"
+                )
 
-            self._safe_bus_write("Min_Position_Limit", motor, recovery_min, normalize=False)
-            self._safe_bus_write("Max_Position_Limit", motor, recovery_max, normalize=False)
-            logger.warning(
-                "hal.recovery_limits_expanded",
-                motor=motor,
-                present_raw=raw_int,
-                range_min=cal.range_min,
-                range_max=cal.range_max,
-                recovery_min=recovery_min,
-                recovery_max=recovery_max,
+        if errors:
+            raise RuntimeError(
+                "Unsafe startup pose; torque will remain disabled. Support the structure, move each "
+                "reported joint away from its hard stop, then retry:\n- " + "\n- ".join(errors)
             )
 
     def _calibration_path(self) -> Any:
@@ -689,7 +893,12 @@ class HardwareAbstraction:
 
         path = self._calibration_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
+        data = {
+            "_meta": {
+                "schema_version": self._CALIBRATION_SCHEMA_VERSION,
+                "sts3215_single_turn_verified": True,
+            }
+        }
         for name, cal in calibration.items():
             data[name] = {
                 "id": cal.id,
