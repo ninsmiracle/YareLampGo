@@ -255,6 +255,19 @@ def test_no_hw_server_uses_virtual_motion_for_skills(tmp_path):
     asyncio.run(run())
 
 
+def test_server_status_exposes_hardware_startup_error() -> None:
+    from lampgo.core.config import LampgoConfig
+    from lampgo.server import LampgoServer
+
+    server = LampgoServer(LampgoConfig(no_hw=True))
+    server._hal_startup_error = "Unsafe startup pose; torque remains disabled"
+
+    status = server._handle_status()["result"]
+
+    assert status["device_health"] == "degraded"
+    assert status["hardware_error"] == "Unsafe startup pose; torque remains disabled"
+
+
 def test_cmd_ping_reports_status_error(monkeypatch, capsys):
     args = argparse.Namespace(port="/dev/tty.test", config=None)
 

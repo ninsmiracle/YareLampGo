@@ -43,6 +43,16 @@ class SkillExecutor:
         self._current_task: asyncio.Task | None = None
         self._current_skill: Skill | None = None
         self._current_invocation_id: str | None = None
+        self._motion_block_reason: str | None = None
+
+    def set_motion_block_reason(self, reason: str | None) -> None:
+        """Block physical motion skills after a failed hardware startup.
+
+        Explicit ``--no-hw`` sessions leave this unset and may still use the
+        virtual runtime for simulation. A hardware failure must never be
+        presented as a successful virtual movement.
+        """
+        self._motion_block_reason = reason
 
     async def invoke(self, skill_id: str, ctx: SkillContext, **params) -> InvokeResult:
         invocation_id = uuid.uuid4().hex[:12]
@@ -54,6 +64,19 @@ class SkillExecutor:
                 status="rejected",
                 error_code="unknown_skill",
                 error_detail=f"Skill '{skill_id}' not registered",
+            )
+
+        if skill_id in _MOTION_SKILLS and self._motion_block_reason:
+            logger.warning(
+                "executor.motion_blocked_hardware_unavailable",
+                skill_id=skill_id,
+                reason=self._motion_block_reason,
+            )
+            return InvokeResult(
+                invocation_id=invocation_id,
+                status="rejected",
+                error_code="motor_hardware_unavailable",
+                error_detail=self._motion_block_reason,
             )
 
         # Hardware not connected → return fake ok to prevent LLM retry loops

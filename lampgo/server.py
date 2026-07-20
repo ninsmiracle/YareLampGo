@@ -140,6 +140,7 @@ class LampgoServer:
         self._last_foreground_activity_at = time.monotonic()
         self._next_idle_sway_at = 0.0
         self._auto_idle_sway_invoking = False
+        self._hal_startup_error: str | None = None
         self._started = False
         self.events.subscribe(SkillStarted, self._on_skill_started)
 
@@ -1462,6 +1463,8 @@ class LampgoServer:
         virtual = bool(getattr(self.motion, "is_virtual", False))
         if not self.hal.is_connected and not virtual:
             health = "disconnected"
+        if self._hal_startup_error:
+            health = "degraded"
         cat_teaser_camera = self._cat_teaser_camera_status()
         camera_ready = self._cat_teaser_camera_ready(cat_teaser_camera)
         return {
@@ -1477,6 +1480,7 @@ class LampgoServer:
                 "estop_reason": self.safety.last_estop_reason,
                 "recording": self._record_status(),
                 "hal_connected": bool(self.hal.is_connected),
+                "hardware_error": self._hal_startup_error,
                 "led_ready": bool(self.led.is_connected),
                 "camera_ready": camera_ready,
                 "cat_teaser_camera": cat_teaser_camera,
@@ -1926,6 +1930,8 @@ class LampgoServer:
             try:
                 self.hal.connect()
             except Exception as exc:  # noqa: BLE001
+                self._hal_startup_error = str(exc)
+                self.executor.set_motion_block_reason(self._hal_startup_error)
                 logger.warning(
                     "server.hal_connect_failed_degrading_to_no_hw",
                     motor_port=self.config.device.motor_port,
@@ -1941,6 +1947,8 @@ class LampgoServer:
                 self.config.home_on_start = False
                 self._use_virtual_motion()
             else:
+                self._hal_startup_error = None
+                self.executor.set_motion_block_reason(None)
                 try:
                     self.led.connect()
                 except Exception as exc:  # noqa: BLE001
@@ -2001,6 +2009,8 @@ class LampgoServer:
 
             self.hal = HardwareAbstraction(self.config.device)
             if not port:
+                self._hal_startup_error = None
+                self.executor.set_motion_block_reason(None)
                 self.config.no_hw = True
                 self._use_virtual_motion()
                 logger.info("server.motor_runtime_reload_virtual", reason="empty_motor_port")
@@ -2020,6 +2030,8 @@ class LampgoServer:
                 except Exception:
                     pass
                 self.hal = HardwareAbstraction(self.config.device)
+                self._hal_startup_error = str(exc)
+                self.executor.set_motion_block_reason(self._hal_startup_error)
                 self.config.no_hw = True
                 self._use_virtual_motion()
                 logger.warning(
@@ -2036,6 +2048,8 @@ class LampgoServer:
                 }
 
             self.hal = new_hal
+            self._hal_startup_error = None
+            self.executor.set_motion_block_reason(None)
             self.motion = MotionRuntime(self.hal, self.safety, self.config.motion)
             self.config.no_hw = False
             self.motion.start()
