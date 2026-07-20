@@ -32,9 +32,46 @@ jobs:
         uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
+          version: "0.11.29"
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: ./install.sh --dev
 
       - name: Run pytest
         run: uv run pytest
+
+  installer-compatibility:
+    name: install and verify / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure uv dependency cache
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          version: "0.11.29"
+
+      - name: Bootstrap uv, install, and verify (macOS)
+        if: runner.os != 'Windows'
+        env:
+          LAMPGO_FORCE_UV_BOOTSTRAP: "1"
+          LAMPGO_UV_INSTALL_DIR: ${{ runner.temp }}/lampgo-uv
+        run: ./install.sh --skip-system-deps
+
+      - name: Bootstrap uv, install, and verify (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LAMPGO_FORCE_UV_BOOTSTRAP: "1"
+          LAMPGO_UV_INSTALL_DIR: ${{ runner.temp }}/lampgo-uv
+        run: .\install.ps1 --skip-system-deps

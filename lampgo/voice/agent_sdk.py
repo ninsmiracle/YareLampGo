@@ -664,7 +664,7 @@ class AgentSDKManager:
                 "agent_sdk.package_not_found",
                 package=AGENT_SDK_PACKAGE,
                 module=AGENT_SDK_MODULE,
-                hint="Install voice extras: uv pip install lampgo[voice]",
+                hint="Run the dependency installer: ./install.sh (Windows: .\\install.ps1)",
             )
             return False
         return True

@@ -39,25 +39,28 @@ YareLampGo ships with a local Web console, CLI, HTTP / WebSocket APIs, and zero-
 
 ## Quick Start
 
-### 1. Install uv
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-On macOS, you can also use Homebrew:
-
-```bash
-brew install uv
-```
-
-### 2. Clone And Install
+### 1. Clone The Repository
 
 ```bash
 git clone https://github.com/ninsmiracle/YareLampGo.git
 cd YareLampGo
-uv sync
 ```
+
+### 2. Install Everything With One Command
+
+macOS / Linux:
+
+```bash
+./install.sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer detects the OS and CPU, bootstraps `uv` and Python 3.12, then uses `uv.lock` to install every runtime dependency, including the public LiveKit voice SDK. Failures identify the exact stage and write a complete log under `~/.lampgo/logs/`. The complete dependency matrix currently covers macOS 14+ on Apple Silicon, Windows x64, and common glibc Linux distributions. Windows dependency installation is supported, while LampGo's runtime IPC and process management are still being ported.
 
 ### 3. Run First-Time Setup
 
@@ -186,7 +189,7 @@ We welcome shared motions, desktop interaction cases, composed skill scenarios, 
 Minimal contribution flow:
 
 ```bash
-uv sync --group dev
+./install.sh --dev
 uv run ruff check lampgo tests
 uv run pytest
 ```

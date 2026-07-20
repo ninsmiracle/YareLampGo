@@ -5,39 +5,45 @@
 ## 环境要求
 
 - Python 3.12+
-- `uv`
+- `uv`（一键安装器会自动准备）
 - macOS、Linux 或 Windows
 - 可选硬件：兼容的 5-DOF Feetech 机械臂台灯、ESP32 LED 控制器、摄像头、麦克风
 
 Python 由 `uv` 自动管理，通常不需要手工创建虚拟环境。
-
-## 安装 uv
-
-macOS / Linux:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-macOS 也可以使用 Homebrew:
-
-```bash
-brew install uv
-```
-
-Windows PowerShell:
-
-```powershell
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
 
 ## 获取代码
 
 ```bash
 git clone https://github.com/ninsmiracle/YareLampGo.git
 cd YareLampGo
-uv sync
 ```
+
+## 一键安装全部依赖
+
+macOS / Linux：
+
+```bash
+./install.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+安装器自动完成平台与 CPU 检查、已验证 `uv` 版本和 Python 3.12 准备、Linux PortAudio/源码构建工具安装、锁定的 Python 依赖同步，以及 LiveKit SDK import/CLI 验证。Python 包全部由 `uv sync --locked` 管理，不会混用系统 `pip`。SDK 使用公网 PyPI 的 `lampgo-livekit-agent-sdk`，不需要连接小米内网。
+
+安装输出会实时显示在终端，同时写入 `~/.lampgo/logs/install-*.log`。失败后请保留终端最后的“失败阶段”和日志文件；修复网络、权限或系统版本问题后直接重跑同一命令即可，`uv` 会复用已下载缓存。
+
+当前完整依赖矩阵：
+
+| 平台 | 安装状态 | 说明 |
+| --- | --- | --- |
+| macOS 14+ Apple Silicon | 支持 | 包含预编译系统音频组件。 |
+| Windows x64 | 支持依赖安装 | LampGo 运行时的 Unix IPC、信号和进程组逻辑仍在适配。 |
+| 常见 glibc Linux x64 / ARM64 | 支持 | 自动识别 apt、dnf、yum、zypper 或 pacman 安装 PortAudio。 |
+| Intel Mac / Windows ARM64 | 暂不支持 | 当前锁定的原生 wheel 不完整，安装器会提前给出明确提示。 |
 
 如果只想先调试 Web、配置和 Agent 链路，可以不连接硬件。
 

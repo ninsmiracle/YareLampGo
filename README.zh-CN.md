@@ -1,6 +1,6 @@
 # YareLampGo
 
-[English](README.md) | 简体中文
+[默认 README](README.md) | 简体中文 | [English](README.en.md)
 
 > 把机械臂台灯变成普通人也能玩起来的桌面小伙伴：能听你说话，能看见环境，能自己动起来，还会用动作和表情回应你。
 
@@ -14,7 +14,9 @@ YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本
 
 仓库内的 `lampgo` 仍作为 **YareLampGo** 项目的内部简称，用于简化 Python 包名、CLI 命令和配置目录。
 
-> 图片占位：这里放一张当前开源版本的真实桌面演示图或动图，建议路径 `docs/images/readme/hero-demo.gif`。
+<p align="center">
+  <img src="docs/images/readme/lampgo_dance.gif" alt="YareLampGo dance demo" width="360">
+</p>
 
 项目默认提供本地 Web 控制台、CLI、HTTP / WebSocket 接口和零配置 Codex 接入，也支持无硬件模式。你可以先把软件玩法跑通，再接真实设备。
 
@@ -22,13 +24,13 @@ YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本
 
 - **自然语言控制真实台灯**：一句“点个头”“看向我”“做个害羞表情”，就能触发动作、灯光、语音和 Agent 行动。
 - **Web 控制台开箱可用**：浏览器里完成聊天、动作播放、动作录制、表情切换、设备状态和配置管理。
-- **友好的机器校准流程**：第一次拿到机器、换电机或重装结构件后，先 `detect` 再 `calibrate`，减少新设备误动风险。
+- **复刻主线完整**：依赖安装、舵机编号、S3/C6 烧录、整机组装、串口探测、校准和 Web 启动都有明确入口。
 - **动作可以录制和复用**：手动摆动台灯录制参数文件，之后可以通过 Web、CLI、自然语言或 Codex 再次调用。
 - **非技术用户也能扩展玩法**：可以用自然语言描述“欢迎回家”“被夸后害羞一下”这类场景，新增自己的原子动作或组合动作，并沉淀成适合自己的桌面 skill。
 - **Codex 可以调用真实硬件**：LampGo 自动注册本机 MCP 工具，让 Codex 读取状态、控制关节、抓取摄像头画面并向用户确认。
 - **无硬件也能先开发**：没有真实台灯时使用 `--no-hw`，仍然可以调 Web UI、配置、技能、路由和 Agent 流程。
 
-> 图片占位：这里放 Web 控制台截图，建议路径 `docs/images/readme/web-console.png`。
+![YareLampGo Web 控制台](docs/images/readme/用户主页面.jpeg)
 
 ## 适合谁
 
@@ -37,52 +39,145 @@ YareLampGo 把电机、灯光、摄像头、麦克风和大模型接成一个本
 - **AI 硬件原型团队**：想快速验证桌面机械臂、智能台灯和具身 AI 的新场景。
 - **Agent 应用团队**：想让 Agent 不只操作网页和文件，也能调用真实电机、灯光、摄像头和语音。
 
-## 快速开始
+## 复刻主线：从源码到成品
 
-### 1. 安装 uv
+DIY 复刻请严格按下面的顺序完成：
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+**安装依赖 → 舵机编号 → 烧录 S3/C6 → 整机组装 → 探测与校准 → 启动 Web**
 
-macOS 也可以使用：
+如果你拿到的是已经完成舵机编号、固件烧录和组装的成品，可以直接从第 5 步开始。
 
-```bash
-brew install uv
-```
-
-### 2. 获取源码并安装依赖
+### 1. 获取源码并安装全部依赖
 
 ```bash
 git clone https://github.com/ninsmiracle/YareLampGo.git
 cd YareLampGo
-uv sync
 ```
 
-### 3. 完成首次配置
+macOS / Linux：
 
 ```bash
-uv run lampgo onboard
+./install.sh
 ```
 
-引导流程会检查环境、配置硬件串口、写入模型凭证、创建人设文件，并自动发现和接通已登录的本机 Codex。配置文件默认写入 `~/.lampgo/`，敏感凭证保存在 `~/.lampgo/credentials.json`。
+Windows PowerShell：
 
-### 4. 新机器先校准
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
 
-首次连接真实硬件、换过电机、重装结构件或更换控制板后，请先完成电机校准，再运行大幅动作。
+安装器会自动识别系统和 CPU、准备 `uv` 与 Python 3.12，并由 `uv` 按 `uv.lock` 安装包括 LiveKit 语音 SDK 在内的全部运行依赖。失败时终端会显示具体阶段，完整日志保存在 `~/.lampgo/logs/`。当前完整依赖矩阵支持 macOS 14+ Apple Silicon、Windows x64 和常见 glibc Linux；Windows 的依赖安装已覆盖，但 LampGo 运行时的 IPC 与进程管理仍在适配中。
+
+### 2. 给五颗舵机编号（组装前必做）
+
+新买的 Feetech STS3215 舵机可能使用相同的出厂 ID，不能直接全部串到同一条总线上。请在安装进结构件之前，通过舵机驱动板一次只连接一颗舵机，然后运行：
 
 ```bash
+uv run lampgo setup-motors
+```
+
+如果自动探测到多个串口，请显式指定舵机驱动板端口：
+
+```bash
+# macOS 示例
+uv run lampgo setup-motors --port /dev/cu.usbmodemXXXX
+
+# Linux 示例
+uv run lampgo setup-motors --port /dev/ttyACM0
+```
+
+Windows PowerShell 使用同一个命令，把端口替换成实际的 `COM` 口：
+
+```powershell
+uv run lampgo setup-motors --port COM5
+```
+
+默认编号如下；如果你修改过 `~/.lampgo/config.toml` 的 `device.motors`，以实际配置为准。
+
+| 安装位置 | 程序名称 | 目标 ID |
+| --- | --- | ---: |
+| 底座水平旋转 | `base_yaw` | 1 |
+| 底座俯仰 | `base_pitch` | 2 |
+| 肘部俯仰 | `elbow_pitch` | 3 |
+| 手腕滚转 | `wrist_roll` | 4 |
+| 手腕俯仰 | `wrist_pitch` | 5 |
+
+程序会按上表逐颗提示。每次提示后：关闭 12V 舵机电源，只接入对应的一颗舵机，重新上电，再按回车。显示成功后先断电，再更换下一颗。这个命令会实际写入舵机的持久化 ID，并把总线波特率统一为 `1,000,000`；它不是只修改软件配置。
+
+> **关键安全要求：按回车时总线上只能有一颗舵机。** 多颗未编号或重复 ID 的舵机同时连接，可能导致编号写到错误的舵机。换插舵机线前必须先关闭 12V 电源。
+
+### 3. 分别烧录 S3 和 C6
+
+固件位于独立仓库 [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32)。S3 负责摄像头、麦克风、扬声器、LED、网络和上位机通信；C6 负责 LCD 眼睛显示。建议在组装前分别用 USB 烧录并确认能够启动。
+
+先获取固件源码：
+
+```bash
+cd ..
+git clone https://github.com/shelly-tang/YareLampGo_esp32.git
+cd YareLampGo_esp32
+```
+
+烧录 XIAO ESP32-S3（首次烧录保留 `--erase`）：
+
+```bash
+./scripts/flash.sh --list-ports
+./scripts/flash.sh --port /dev/cu.usbmodemXXXX --erase --monitor
+```
+
+烧录 8MB ESP32-C6 LCD 板；C6 的端口通常和 S3 不同：
+
+```bash
+arduino-cli compile --upload \
+  --port /dev/cu.usbmodemYYYY \
+  --fqbn esp32:esp32:esp32c6:FlashSize=8M \
+  ESP32_C6_LCD_1_47_UART
+```
+
+Windows 请在 Arduino IDE 中选择对应开发板和 `COM` 口进行烧录。S3 的预编译包、无 Arduino 烧录方式、BOOT/RESET 救援步骤见[固件烧录指南](https://github.com/shelly-tang/YareLampGo_esp32/blob/main/README.zh-CN.md)，C6 的 8MB 分区要求见 [C6 固件说明](https://github.com/shelly-tang/YareLampGo_esp32/blob/main/ESP32_C6_LCD_1_47_UART/README.md)。
+
+### 4. 断电组装整机
+
+两块控制板和五颗舵机都准备好以后，再完成机械结构和整机接线：
+
+1. 断开 12V 主电源和两块控制板的 USB。
+2. 按第 2 步的 ID/关节对应关系安装五颗舵机，保证线束不会进入齿轮、转轴和夹点。
+3. 按[公开接线表](docs/hardware/wiring.md)连接舵机总线、5V 降压、S3、麦克风、功放、扬声器和 LED，并确保所有低压模块共地。
+4. 连接显示串口：S3 GPIO43 TX → C6 GPIO17 RX、S3 GPIO44 RX ← C6 GPIO16 TX，并连接 GND。
+5. 对照[结构件文件和预览](assets/printable/README.md)装好底座、连杆、灯头和盖板，检查所有插头、螺丝及活动范围。
+
+到这里才算完成硬件成品。首次上电时先扶稳机构、保持关节远离机械限位，并随时准备断开 12V 主电源。
+
+### 5. 探测串口、检查电机并校准
+
+整机上电后回到 `YareLampGo` 软件仓库，先探测端口和五颗舵机，再进行校准：
+
+```bash
+cd ../YareLampGo
 uv run lampgo detect
+uv run lampgo scan-motors --ids 1-5
+uv run lampgo ping
 uv run lampgo calibrate
 ```
 
-### 5. 启动 Web 控制台
+正常结果应能看到 ID 1～5 全部在线。若电脑连接了多个串口，给 `scan-motors`、`ping` 和 `calibrate` 增加 `--port <舵机端口>`。首次连接、换过舵机、重装结构件或更换控制板后，都必须重新校准，再运行大幅动作。
+
+### 6. 完成首次配置并启动 Web
+
+首次使用先运行配置向导，然后启动 Web 控制台：
 
 ```bash
+uv run lampgo onboard
 uv run lampgo run --web
 ```
 
-打开 [http://127.0.0.1:8420](http://127.0.0.1:8420)，即可使用聊天、动作、录制、表情和设置面板。
+打开 [http://127.0.0.1:8420](http://127.0.0.1:8420)，即可使用聊天、动作、录制、表情和设置面板。配置向导会检查环境、保存硬件串口、模型凭证和人设文件，并自动发现已登录的本机 Codex；敏感凭证保存在 `~/.lampgo/credentials.json`。
+
+S3 首次烧录或执行过 `--erase` 后，还需要在 Web 配置页完成 Wi-Fi 配网：连接设备热点 `Lampgo-Setup-XXXX`（默认密码 `lampgo123`），再选择和电脑相同的 2.4GHz Wi-Fi，等待设备回连。
+
+| 连接设备热点 | 选择 2.4GHz Wi-Fi | 等待设备回连 |
+| --- | --- | --- |
+| ![连接设备热点](docs/images/readme/配网1.jpeg) | ![选择可用 Wi-Fi](docs/images/readme/配网2.jpeg) | ![设备回连后选择网络设备](docs/images/readme/配网3.jpeg) |
 
 没有硬件时可以先启动纯软件模式：
 
@@ -100,6 +195,8 @@ uv run lampgo run --web --no-hw
 uv run lampgo help                         # 查看常用调试命令
 uv run lampgo status                       # 查询守护进程状态
 uv run lampgo detect                       # 自动探测串口
+uv run lampgo setup-motors                 # 组装前逐颗写入舵机 ID
+uv run lampgo scan-motors --ids 1-20       # 电机总线原始扫描
 uv run lampgo skills                       # 列出可用技能
 
 uv run lampgo text "做个害羞的表情"          # 自然语言路由
@@ -115,7 +212,11 @@ uv run lampgo clear                        # 清理进程并释放串口
 
 更多步骤见 [快速上手](docs/getting-started/quick-start.md)。
 
-> 图片占位：这里放 1-2 张动作演示 GIF，例如点头、害羞、跳舞或回安全位，建议路径 `docs/images/readme/motion-demo.gif`。
+### 动作演示
+
+| 爱心回应 | 眨眼互动 |
+| --- | --- |
+| <img src="docs/images/readme/lampgo_love.gif" alt="YareLampGo 爱心回应演示" width="240"> | <img src="docs/images/readme/lampgo_wink.gif" alt="YareLampGo 眨眼互动演示" width="240"> |
 
 ## 架构一眼看懂
 
@@ -137,7 +238,7 @@ flowchart LR
 
 | 分类   | 文档                                                                                                                  |
 | ---- | ------------------------------------------------------------------------------------------------------------------- |
-| 入门   | [文档中心](docs/README_zh.md)、[快速上手](docs/getting-started/quick-start.md)、[配置说明](docs/getting-started/configuration.md) |
+| 入门   | [文档中心](docs/README.md)、[快速上手](docs/getting-started/quick-start.md)、[配置说明](docs/getting-started/configuration.md) |
 | 使用指南 | [动作与表情](docs/guides/motion-and-expression.md)、[Codex 集成](docs/guides/codex-integration.md)                         |
 | 硬件   | [硬件公开资料](docs/hardware/README.md)、[接线表](docs/hardware/wiring.md)、[结构件文件](assets/printable/README.md)                |
 | 架构   | [系统架构](docs/architecture.md)、[项目说明](docs/project_description.md)                                                    |
@@ -165,7 +266,7 @@ uv run lampgo run --web
 最简贡献流程：
 
 ```bash
-uv sync --group dev
+./install.sh --dev
 uv run ruff check lampgo tests
 uv run pytest
 ```

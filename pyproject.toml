@@ -24,6 +24,12 @@ dependencies = [
     "uvicorn>=0.34",
     "websockets>=14.0",
     "zeroconf>=0.131",
+    # Voice is a core LampGo capability.  Keep it in the default dependency
+    # set so a plain `uv sync` cannot silently remove the LiveKit runtime.
+    "livekit>=0.17",
+    "livekit-api>=0.7",
+    "lampgo-livekit-agent-sdk>=0.3.0",
+    "psutil>=7.0",
 ]
 
 [project.optional-dependencies]
@@ -31,10 +37,7 @@ perception = [
     "opencv-python>=4.8",
 ]
 voice = [
-    "livekit>=0.17",
-    "livekit-api>=0.7",
-    "lampgo-livekit-agent-sdk>=0.3.0",
-    "psutil>=7.0",
+    # Backward-compatible extra: voice is installed by default since 0.1.0.
 ]
 bridge = [
     "pyautogui>=0.9",
