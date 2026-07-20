@@ -1691,7 +1691,7 @@
     releaseWebPageOwner();
     try { stopAllTts(); } catch (_) { /* ignore */ }
     try {
-      if (lkRoom || browserCallStartPromise) stopBrowserLiveKitCall();
+      if (lkRoom || browserCallStartPromise) void stopBrowserLiveKitCall("page_deactivated");
     } catch (_) {
       // The call module may not be initialized yet.
     }
@@ -5904,6 +5904,8 @@
   const CALL_WAKE_FRESH_MS = 15000;
   const CALL_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
   const CALL_AUDIO_ACTIVITY_THROTTLE_MS = 1000;
+  const CALL_DISCONNECT_TIMEOUT_MS = 5000;
+  const CALL_END_NOTIFY_TIMEOUT_MS = 3000;
   const browserCallClientId = (() => {
     try {
       let id = sessionStorage.getItem("lampgo.browserCallClientId");
@@ -5924,6 +5926,12 @@
   let browserCallLastAudioActivityAt = 0;
   let lkRoomName = "";
   let lkClientCallId = "";
+  let browserCallJoiningRoom = null;
+  let browserCallDisconnectingRoom = null;
+  let browserCallHangupPromise = null;
+  let browserCallStopRequested = false;
+  let browserCallPageExitNotified = false;
+  const browserCallDisconnectPromises = new WeakMap();
 
   let esp32AudioCtx = null;
   let esp32WorkletNode = null;
@@ -5966,7 +5974,7 @@
       if (idleMs >= CALL_IDLE_TIMEOUT_MS) {
         console.info("[call] idle timeout; closing LiveKit room", { idleMs });
         addCallSystemNote("5 分钟没有输入或输出，已自动结束通话");
-        stopBrowserLiveKitCall("idle_timeout");
+        void stopBrowserLiveKitCall("idle_timeout");
       } else {
         scheduleBrowserCallIdleTimer();
       }
@@ -6022,7 +6030,7 @@
     browserCallLockTimer = window.setInterval(() => {
       if (!refreshBrowserCallLock(reason || "call")) {
         console.warn("[call] lost call owner lock; stopping local call");
-        if (lkRoom || browserCallStartPromise) stopBrowserLiveKitCall();
+        if (lkRoom || browserCallStartPromise) void stopBrowserLiveKitCall("lock_lost");
       }
     }, CALL_LOCK_REFRESH_MS);
     return true;
@@ -6513,6 +6521,13 @@
     return startBrowserLiveKitCall({ reason });
   }
 
+  function throwIfBrowserCallStopRequested() {
+    if (!browserCallStopRequested) return;
+    const err = new Error("LiveKit call start cancelled");
+    err.name = "AbortError";
+    throw err;
+  }
+
   async function startBrowserLiveKitCall(options = {}) {
     const reason = options.reason || "manual";
     if (browserCallStartPromise) return browserCallStartPromise;
@@ -6524,6 +6539,8 @@
       if (reason === "manual") addCallSystemNote("已有另一个页面正在通话，已忽略本次启动");
       return null;
     }
+    browserCallStopRequested = false;
+    browserCallPageExitNotified = false;
 
     browserCallStartPromise = (async () => {
       if (btnCallStart) btnCallStart.disabled = true;
@@ -6533,6 +6550,7 @@
       browserCallPendingId = callAttemptId;
       const modeLabel = VOICE_CALL_MODE_LABELS[voiceCallMode] || VOICE_CALL_MODE_LABELS.stable;
       let room = null;
+      let issuedRoomName = "";
       try {
         console.log("[call] starting LiveKit call", {
           reason,
@@ -6563,9 +6581,15 @@
           }
           throw new Error(error);
         }
-        const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
         const { token, serverUrl, roomName } = body.result;
+        issuedRoomName = roomName || "";
+        lkRoomName = issuedRoomName;
+        lkClientCallId = callAttemptId;
+        throwIfBrowserCallStopRequested();
+        const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
+        throwIfBrowserCallStopRequested();
         room = new Room({ adaptiveStream: false, dynacast: false });
+        browserCallJoiningRoom = room;
         room.on("trackSubscribed", (track) => {
           if (track.kind !== Track.Kind.Audio) return;
           remoteAudioTrack = track;
@@ -6618,13 +6642,15 @@
           });
         });
         room.on("disconnected", () => {
-          const endedRoomName = lkRoomName;
-          const endedClientCallId = lkClientCallId;
-          cleanupBrowserLiveKitCall();
-          setBrowserCallState("idle");
-          notifyLiveKitRoomEnded(endedRoomName, "livekit_disconnected", endedClientCallId);
+          if (browserCallDisconnectingRoom === room || browserCallDisconnectPromises.has(room)) return;
+          if (lkRoom !== room && browserCallJoiningRoom !== room) return;
+          void stopBrowserLiveKitCall("livekit_disconnected", {
+            room,
+            alreadyDisconnected: true,
+          });
         });
         await room.connect(serverUrl, token);
+        throwIfBrowserCallStopRequested();
         if (typeof room.startAudio === "function") {
           try {
             await room.startAudio();
@@ -6657,9 +6683,12 @@
           lkLocalTrack = await createLocalAudioTrack(audioOptions);
         }
 
+        throwIfBrowserCallStopRequested();
         await room.localParticipant.publishTrack(lkLocalTrack, { source: Track.Source.Microphone });
+        throwIfBrowserCallStopRequested();
         console.log("[call] local microphone track published", { reason, roomName: lkRoomName, mic: useEsp32 ? "esp32" : (selectedMicId || "default") });
         lkRoom = room;
+        browserCallJoiningRoom = null;
         setBrowserCallState("active");
         touchBrowserCallActivity("room_connected");
         addCallSystemNote("通话已连接，正在等待语音识别…");
@@ -6667,13 +6696,32 @@
         return room;
       } catch (err) {
         browserCallPendingId = "";
-        console.error("[call] browser LiveKit start failed:", err);
-        addCallSystemNote(`通话启动失败：${err.message || err}`);
-        if (room) {
-          try { room.disconnect(); } catch (_) { /* ignore */ }
+        const cancelled = browserCallStopRequested || (err && err.name === "AbortError");
+        if (cancelled) {
+          console.info("[call] browser LiveKit start cancelled");
+        } else {
+          console.error("[call] browser LiveKit start failed:", err);
+          addCallSystemNote(`通话启动失败：${err.message || err}`);
         }
-        cleanupBrowserLiveKitCall();
-        setBrowserCallState("idle");
+        if (!browserCallHangupPromise) {
+          if (room) {
+            try {
+              browserCallDisconnectingRoom = room;
+              await disconnectBrowserLiveKitRoom(room);
+            } catch (disconnectErr) {
+              console.warn("[call] failed to disconnect partially started room:", disconnectErr);
+            } finally {
+              if (browserCallDisconnectingRoom === room) browserCallDisconnectingRoom = null;
+            }
+          }
+          await notifyLiveKitRoomEnded(
+            lkRoomName || issuedRoomName || (room && room.name) || "",
+            cancelled ? "start_cancelled" : "start_failed",
+            lkClientCallId || callAttemptId,
+          );
+          cleanupBrowserLiveKitCall();
+          setBrowserCallState("idle");
+        }
         return null;
       }
     })();
@@ -6701,7 +6749,7 @@
     const mediaStreamTrack = track && (track.mediaStreamTrack || track._mediaStreamTrack);
     if (!mediaStreamTrack) {
       await new Promise((resolve) => window.setTimeout(resolve, 7000));
-      stopBrowserLiveKitCall();
+      await stopBrowserLiveKitCall("goodbye");
       return;
     }
 
@@ -6768,7 +6816,30 @@
       cleanup();
     }
 
-    if (lkRoom) stopBrowserLiveKitCall("goodbye");
+    if (lkRoom) await stopBrowserLiveKitCall("goodbye");
+  }
+
+  function withBrowserCallTimeout(promise, timeoutMs, label) {
+    let timeoutId = null;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = window.setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    return Promise.race([Promise.resolve(promise), timeout]).finally(() => {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    });
+  }
+
+  function disconnectBrowserLiveKitRoom(room) {
+    if (!room || typeof room.disconnect !== "function") return Promise.resolve();
+    const existing = browserCallDisconnectPromises.get(room);
+    if (existing) return existing;
+    const pending = withBrowserCallTimeout(
+      Promise.resolve().then(() => room.disconnect()),
+      CALL_DISCONNECT_TIMEOUT_MS,
+      "LiveKit disconnect",
+    );
+    browserCallDisconnectPromises.set(room, pending);
+    return pending;
   }
 
   function cleanupBrowserLiveKitCall() {
@@ -6788,50 +6859,122 @@
     lkAudioEls.forEach((el) => el.remove());
     lkAudioEls.clear();
     lkRoom = null;
+    browserCallJoiningRoom = null;
     browserCallPendingId = "";
     releaseBrowserCallLock();
   }
 
-  function stopBrowserLiveKitCall(reason = "manual") {
-    if (lkRoom) {
-      const room = lkRoom;
-      const roomName = lkRoomName;
-      const clientCallId = lkClientCallId;
+  function stopBrowserLiveKitCall(reason = "manual", options = {}) {
+    browserCallStopRequested = true;
+    if (browserCallHangupPromise) return browserCallHangupPromise;
+
+    const startPromise = browserCallStartPromise;
+    const initialRoom = options.room || lkRoom || browserCallJoiningRoom;
+    if (!initialRoom && !startPromise) {
       cleanupBrowserLiveKitCall();
-      try { room.disconnect(); } catch (_) { /* ignore */ }
-      notifyLiveKitRoomEnded(roomName, reason, clientCallId);
+      setBrowserCallState("idle");
+      return Promise.resolve();
     }
-    setBrowserCallState("idle");
+
+    setBrowserCallState("leaving");
+    browserCallHangupPromise = (async () => {
+      let room = initialRoom;
+      if (!room && startPromise) {
+        try {
+          await withBrowserCallTimeout(startPromise, CALL_DISCONNECT_TIMEOUT_MS, "LiveKit call start cancellation");
+        } catch (err) {
+          console.warn("[call] call start did not settle before hangup cleanup:", err);
+        }
+        room = lkRoom || browserCallJoiningRoom;
+      }
+
+      const roomName = lkRoomName || (room && room.name) || "";
+      const clientCallId = lkClientCallId || browserCallPendingId;
+      if (room && !options.alreadyDisconnected) {
+        browserCallDisconnectingRoom = room;
+        try {
+          await disconnectBrowserLiveKitRoom(room);
+          console.info("[call] LiveKit room disconnected", { roomName, reason });
+        } catch (err) {
+          console.warn("[call] LiveKit disconnect did not complete cleanly:", err);
+        }
+      }
+      if (startPromise && initialRoom) {
+        try {
+          await withBrowserCallTimeout(startPromise, CALL_DISCONNECT_TIMEOUT_MS, "LiveKit call start teardown");
+        } catch (err) {
+          console.warn("[call] call start did not settle after disconnect:", err);
+        }
+      }
+
+      await notifyLiveKitRoomEnded(roomName, reason, clientCallId);
+    })().finally(() => {
+      cleanupBrowserLiveKitCall();
+      if (browserCallDisconnectingRoom === initialRoom || !initialRoom) {
+        browserCallDisconnectingRoom = null;
+      }
+      browserCallHangupPromise = null;
+      setBrowserCallState("idle");
+    });
+    return browserCallHangupPromise;
   }
 
-  function notifyLiveKitRoomEnded(roomName, reason = "manual", clientCallId = "") {
-    if (!roomName) return;
+  async function notifyLiveKitRoomEnded(roomName, reason = "manual", clientCallId = "", options = {}) {
+    if (!roomName) return false;
     const payload = JSON.stringify({
       room_name: roomName,
       reason,
       client_call_id: clientCallId,
     });
-    try {
-      if (navigator.sendBeacon) {
+    if (options.preferBeacon) {
+      try {
         const blob = new Blob([payload], { type: "application/json" });
-        if (navigator.sendBeacon("/api/livekit/room/end", blob)) return;
+        if (navigator.sendBeacon && navigator.sendBeacon("/api/livekit/room/end", blob)) return true;
+      } catch (_) {
+        // Fall through to keepalive fetch.
       }
-    } catch (_) {
-      // Fall through to fetch.
     }
-    fetch("/api/livekit/room/end", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-      keepalive: true,
-    }).catch((err) => {
+
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeoutId = controller
+      ? window.setTimeout(() => controller.abort(), CALL_END_NOTIFY_TIMEOUT_MS)
+      : null;
+    try {
+      const response = await fetch("/api/livekit/room/end", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: true,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return true;
+    } catch (err) {
       console.warn("[call] failed to notify room end:", err);
-    });
+      return false;
+    } finally {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    }
   }
 
-  window.addEventListener("beforeunload", () => {
-    if (lkRoomName) notifyLiveKitRoomEnded(lkRoomName, "page_unload", lkClientCallId);
-  });
+  function endBrowserLiveKitCallForPageExit() {
+    if (!lkRoomName || browserCallPageExitNotified) return;
+    browserCallPageExitNotified = true;
+    const room = lkRoom || browserCallJoiningRoom;
+    if (room && typeof room.disconnect === "function") {
+      browserCallDisconnectingRoom = room;
+      try {
+        const pending = room.disconnect();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+      } catch (_) {
+        // Unload teardown is best effort only.
+      }
+    }
+    void notifyLiveKitRoomEnded(lkRoomName, "page_unload", lkClientCallId, { preferBeacon: true });
+  }
+
+  window.addEventListener("pagehide", endBrowserLiveKitCallForPageExit);
+  window.addEventListener("beforeunload", endBrowserLiveKitCallForPageExit);
 
   function createCallSession() {
     const id = `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -6936,7 +7079,7 @@
   if (btnCallEnd) {
     btnCallEnd.addEventListener("click", () => {
       btnCallEnd.disabled = true;
-      if (lkRoom) stopBrowserLiveKitCall();
+      if (lkRoom || browserCallStartPromise) void stopBrowserLiveKitCall();
       else send({ type: "stop_conversation" });
     });
   }

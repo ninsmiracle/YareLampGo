@@ -2375,9 +2375,13 @@ class LampgoServer:
             if ready:
                 logger.info("server.agent_sdk_ready")
             else:
-                logger.warning("server.agent_sdk_ready_timeout")
+                error = self._agent_sdk.last_error or "voice agent SDK readiness timeout"
+                logger.warning("server.agent_sdk_ready_timeout", error=error)
+                await self._agent_sdk.stop()
         except Exception:
             logger.exception("server.agent_sdk_start_failed")
+            if self._agent_sdk is not None:
+                await self._agent_sdk.stop()
 
     async def ensure_agent_sdk_ready(self, *, timeout_s: float = 10.0) -> tuple[bool, str]:
         """Ensure the LiveKit Agent SDK is running for a manual browser call."""
@@ -2389,7 +2393,7 @@ class LampgoServer:
             return False, self._agent_sdk.last_error or "voice agent SDK is not running"
         ready = await self._agent_sdk.wait_ready(timeout_s=timeout_s)
         if not ready:
-            return False, "voice agent SDK is still starting"
+            return False, self._agent_sdk.last_error or "voice agent SDK is still starting"
         return True, ""
 
 

@@ -859,13 +859,48 @@ def _resolve_calibration_port(args: argparse.Namespace, config) -> str | None:
     return port
 
 
+def _require_calibration_project_root() -> Path:
+    """Abort before hardware access unless calibration starts from the repo root."""
+    from lampgo.core.config import _find_project_root
+
+    project_root = _find_project_root().resolve()
+    current_dir = Path.cwd().resolve()
+    is_lampgo_project = (project_root / "pyproject.toml").is_file() and (project_root / "lampgo" / "cli.py").is_file()
+    if current_dir != project_root or not is_lampgo_project:
+        print(
+            "Error: calibration must be run from the LampGo project root; "
+            f"current directory is {current_dir}.\n"
+            f"Run: cd {project_root} && uv run lampgo calibrate\n"
+            "Calibration aborted before accessing hardware.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return project_root
+
+
+def _require_calibration_path_in_project(project_root: Path, calibration_dir: Path, lamp_id: str) -> None:
+    """Prevent a calibration profile from being written outside this checkout."""
+    target = (calibration_dir / f"{lamp_id}.json").resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError:
+        print(
+            "Error: calibration target must stay inside the LampGo project root; "
+            f"got {target}.\nCalibration aborted before accessing hardware.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def _cmd_calibrate(args: argparse.Namespace) -> None:
-    from lampgo.core.config import DeviceConfig, load_config
+    from lampgo.core.config import load_config
     from lampgo.core.hal import HardwareAbstraction
 
+    project_root = _require_calibration_project_root()
     config = load_config(config_path=getattr(args, "config", None))
     port = _resolve_calibration_port(args, config)
     lamp_id = args.id or config.device.lamp_id
+    _require_calibration_path_in_project(project_root, config.device.calibration_dir, lamp_id)
 
     if not port:
         print(
@@ -874,7 +909,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    dev_config = DeviceConfig(motor_port=port, lamp_id=lamp_id)
+    dev_config = config.device.model_copy(update={"motor_port": port, "lamp_id": lamp_id})
     hal = HardwareAbstraction(dev_config)
     try:
         hal.connect(calibrate=False, configure=False)
