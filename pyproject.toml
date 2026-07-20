@@ -12,7 +12,7 @@ license-files = ["LICENSE", "NOTICE", "AUTHORS.md", "COPYRIGHT", "ASSET_LICENSES
 
 dependencies = [
     "pydantic>=2.0",
-    "structlog>=24.0",
+    "structlog>=26.1.0",
     "pyserial>=3.5",
     "python-dotenv>=1.2.2",
     "numpy>=2.0",
