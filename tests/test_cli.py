@@ -8,6 +8,8 @@ import sys
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from lampgo import cli
 
 
@@ -70,6 +72,51 @@ def test_resolve_calibration_port_falls_back_to_autodetect(monkeypatch):
     monkeypatch.setattr(autodetect, "detect_ports", _detect_ports)
     port = cli._resolve_calibration_port(args, config)
     assert port == "/dev/tty.usbmodemB"
+
+
+def test_calibration_aborts_outside_project_root(monkeypatch, tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'lampgo-test'\n", encoding="utf-8")
+    subdirectory = tmp_path / "assets"
+    subdirectory.mkdir()
+    monkeypatch.chdir(subdirectory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._require_calibration_project_root()
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "project root" in error
+    assert "before accessing hardware" in error
+
+
+def test_calibration_accepts_project_root(monkeypatch, tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'lampgo-test'\n", encoding="utf-8")
+    (tmp_path / "lampgo").mkdir()
+    (tmp_path / "lampgo" / "cli.py").touch()
+    monkeypatch.chdir(tmp_path)
+
+    assert cli._require_calibration_project_root() == tmp_path.resolve()
+
+
+def test_calibration_aborts_outside_a_lampgo_project(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._require_calibration_project_root()
+
+    assert exc_info.value.code == 2
+    assert "project root" in capsys.readouterr().err
+
+
+def test_calibration_aborts_when_target_is_outside_project(monkeypatch, tmp_path, capsys):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._require_calibration_path_in_project(project_root, tmp_path / "outside", "AL03")
+
+    assert exc_info.value.code == 2
+    assert "must stay inside" in capsys.readouterr().err
 
 
 def test_load_config_from_args_degrades_to_no_hw_when_motor_port_missing(monkeypatch, capsys):
