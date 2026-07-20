@@ -42,7 +42,7 @@ bridge = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.4",
+    "ruff>=0.15.17",
 ]
 
 [project.scripts]
@@ -52,7 +52,7 @@ lampgo = "lampgo.cli:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.4",
+    "ruff>=0.15.17",
 ]
 
 [build-system]
