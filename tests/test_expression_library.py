@@ -206,6 +206,7 @@ def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monke
     assert sent[0][1]["eye_clip_id"] == "focused_eyes"
     assert sent[0][1]["led_effect_id"] == "soft_mouth"
     assert sent[0][1]["led_program"]["template"] == "mouth"
+    assert sent[0][1]["led_params"]["brightness"] == 32
     assert [item["preset_id"] for item in list_expression_presets()] == ["focus"]
 
 

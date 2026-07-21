@@ -49,6 +49,8 @@
   const btnLedPasteFrame = document.getElementById("btn-led-paste-frame");
   const btnLedMirrorFrame = document.getElementById("btn-led-mirror-frame");
   const btnLedClearFrame = document.getElementById("btn-led-clear-frame");
+  const btnLedCopyFrameToAll = document.getElementById("btn-led-copy-frame-to-all");
+  const btnLedClearAllFrames = document.getElementById("btn-led-clear-all-frames");
   const btnLedEditorPreview = document.getElementById("btn-led-editor-preview");
   const btnLedEditorSave = document.getElementById("btn-led-editor-save");
   const composerEye = document.getElementById("composer-eye");
@@ -88,6 +90,9 @@
   const esp32VolumeControl = document.getElementById("esp32-volume-control");
   const esp32VolumeSlider = document.getElementById("esp32-volume-slider");
   const esp32VolumeValue = document.getElementById("esp32-volume-value");
+  const esp32LedBrightnessControl = document.getElementById("esp32-led-brightness-control");
+  const esp32LedBrightnessSlider = document.getElementById("esp32-led-brightness-slider");
+  const esp32LedBrightnessValue = document.getElementById("esp32-led-brightness-value");
   const btnRefreshAgent = document.getElementById("btn-refresh-agent");
   const btnAgentHealth = document.getElementById("btn-agent-health-details");
   const agentHealthCard = document.getElementById("agent-health-card");
@@ -114,6 +119,10 @@
   const recordEditDesc = document.getElementById("record-edit-desc");
   const recordEditDescriptionInput = document.getElementById("record-edit-description-input");
   const recordEditExpressionSelect = document.getElementById("record-edit-expression-select");
+  const recordEditPresetField = document.getElementById("record-edit-preset-field");
+  const recordEditCustomFields = document.getElementById("record-edit-custom-fields");
+  const recordEditEyeSelect = document.getElementById("record-edit-eye-select");
+  const recordEditLedSelect = document.getElementById("record-edit-led-select");
   const recordEditError = document.getElementById("record-edit-error");
   const btnRecordEditCancel = document.getElementById("btn-record-edit-cancel");
   const recordNameError = document.getElementById("record-name-error");
@@ -244,6 +253,7 @@
   let expressionPlayback = "loop";
   let expressionPreviewTimer = null;
   let expressionPreviewImage = null;
+  let recordEditExpressionMode = "preset";
   let clockPreviewTimer = null;
   const ledEffectSourceCache = new Map();
   const LED_EDITOR_WIDTH = 51;
@@ -263,6 +273,7 @@
   let ledEditorPreviewTimer = null;
   let ledEditorClipboard = null;
   let ledEditorClipboardSource = -1;
+  let ledEditorNotice = "";
   let latestStatusData = {};
 
   function expressionMeta(name) {
@@ -401,6 +412,41 @@
     populateExpressionSelect(recordExpressionSelect, preferred);
   }
 
+  function populateRecordEditCustomExpressionSelects(recording) {
+    const preset = expressionPresetById(getRecordingExpressionPreset(recording));
+    const selectedEye = String((preset && preset.eye_clip_id) || "");
+    const selectedLed = String((preset && preset.led_effect_id) || "");
+    if (recordEditEyeSelect) {
+      recordEditEyeSelect.innerHTML = '<option value="">无眼睛</option>';
+      expressionEyes.forEach((eye) => {
+        const option = document.createElement("option");
+        option.value = eye.eye_clip_id;
+        option.textContent = `${eye.label || eye.eye_clip_id}（${eye.eye_clip_id}）`;
+        recordEditEyeSelect.appendChild(option);
+      });
+      recordEditEyeSelect.value = expressionEyes.some((eye) => eye.eye_clip_id === selectedEye) ? selectedEye : "";
+    }
+    if (recordEditLedSelect) {
+      recordEditLedSelect.innerHTML = '<option value="">无 LED</option>';
+      expressionLedEffects.forEach((effect) => {
+        const option = document.createElement("option");
+        option.value = effect.effect_id;
+        option.textContent = `${effect.label || effect.effect_id}（${effect.effect_id} · ${effect.role || "accent"}）`;
+        recordEditLedSelect.appendChild(option);
+      });
+      recordEditLedSelect.value = expressionLedEffects.some((effect) => effect.effect_id === selectedLed) ? selectedLed : "";
+    }
+  }
+
+  function setRecordEditExpressionMode(mode) {
+    recordEditExpressionMode = mode === "custom" ? "custom" : "preset";
+    document.querySelectorAll("[data-record-edit-expression-mode]").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.recordEditExpressionMode === recordEditExpressionMode);
+    });
+    if (recordEditPresetField) recordEditPresetField.classList.toggle("hidden", recordEditExpressionMode !== "preset");
+    if (recordEditCustomFields) recordEditCustomFields.classList.toggle("hidden", recordEditExpressionMode !== "custom");
+  }
+
   function recordingLabel(name) {
     return RECORDING_LABELS_CN[name] || name;
   }
@@ -454,6 +500,7 @@
   const AGENT_TASK_SESSION_KEY = "lampgo.agentTaskSessions";
   const AGENT_FOLLOWUP_KEY = "lampgo.agentFollowups";
   const ESP32_VOLUME_KEY = "lampgo.esp32SpeakerVolume";
+  const ESP32_LED_BRIGHTNESS_KEY = "lampgo.esp32LedBrightness";
   const MAX_SESSIONS = 40;
   const DEFAULT_SIDEBAR_WIDTH = 232;
   const MIN_SIDEBAR_WIDTH = 200;
@@ -469,6 +516,9 @@
   let esp32VolumeTimer = null;
   let esp32VolumePending = false;
   let esp32VolumeInitialSyncDone = false;
+  let esp32LedBrightnessTimer = null;
+  let esp32LedBrightnessPending = false;
+  let esp32LedBrightnessInitialSyncDone = false;
   let voiceCallMode = "stable";
   let voiceEchoGateHangoverMs = 1000;
   let voiceEchoTextFilterEnabled = true;
@@ -542,6 +592,83 @@
     if (!esp || esp.enabled === false || esp.online === false) return;
     esp32VolumeInitialSyncDone = true;
     syncEsp32Volume(esp32VolumeSlider.value);
+  }
+
+  function clampEsp32LedBrightness(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 32;
+    return Math.max(1, Math.min(96, Math.round(n)));
+  }
+
+  function setEsp32LedBrightnessUi(value, { persist = false } = {}) {
+    const level = clampEsp32LedBrightness(value);
+    if (esp32LedBrightnessSlider) esp32LedBrightnessSlider.value = String(level);
+    if (esp32LedBrightnessValue) esp32LedBrightnessValue.textContent = String(level);
+    if (persist) {
+      try { localStorage.setItem(ESP32_LED_BRIGHTNESS_KEY, String(level)); } catch (_) { /* ignore */ }
+    }
+    return level;
+  }
+
+  async function syncEsp32LedBrightness(value) {
+    const level = clampEsp32LedBrightness(value);
+    if (esp32LedBrightnessControl) {
+      esp32LedBrightnessControl.classList.add("is-syncing");
+      esp32LedBrightnessControl.classList.remove("is-error");
+    }
+    try {
+      const resp = await fetch("/api/config/device_esp32", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ "device_esp32.led_brightness": level }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok || body.ok === false) {
+        throw new Error(body.error || `HTTP ${resp.status}`);
+      }
+      if (body.result && body.result.led_brightness_sync && !body.result.led_brightness_sync.ok) {
+        throw new Error("设备暂时离线，亮度已保存，恢复连接后会自动应用");
+      }
+      return true;
+    } catch (err) {
+      console.warn("[esp32] LED brightness sync failed:", err);
+      if (esp32LedBrightnessControl) esp32LedBrightnessControl.classList.add("is-error");
+      return false;
+    } finally {
+      if (esp32LedBrightnessControl) esp32LedBrightnessControl.classList.remove("is-syncing");
+      esp32LedBrightnessPending = false;
+    }
+  }
+
+  function scheduleEsp32LedBrightnessSync(value) {
+    const level = setEsp32LedBrightnessUi(value, { persist: true });
+    esp32LedBrightnessPending = true;
+    if (esp32LedBrightnessTimer) clearTimeout(esp32LedBrightnessTimer);
+    esp32LedBrightnessTimer = setTimeout(() => {
+      syncEsp32LedBrightness(level);
+    }, 150);
+  }
+
+  function initEsp32LedBrightnessControl() {
+    if (!esp32LedBrightnessSlider) return;
+    let initial = 32;
+    try {
+      const stored = localStorage.getItem(ESP32_LED_BRIGHTNESS_KEY);
+      if (stored != null) initial = clampEsp32LedBrightness(stored);
+    } catch (_) { /* ignore */ }
+    setEsp32LedBrightnessUi(initial);
+    esp32LedBrightnessSlider.addEventListener("input", () => {
+      scheduleEsp32LedBrightnessSync(esp32LedBrightnessSlider.value);
+    });
+  }
+
+  function maybeSyncInitialEsp32LedBrightness() {
+    if (esp32LedBrightnessInitialSyncDone || !esp32LedBrightnessSlider) return;
+    const esp = cameraCache && cameraCache.esp32 ? cameraCache.esp32 : null;
+    if (!esp || esp.enabled === false || esp.online === false) return;
+    syncEsp32LedBrightness(esp32LedBrightnessSlider.value).then((ok) => {
+      esp32LedBrightnessInitialSyncDone = ok;
+    });
   }
 
   function clampSidebarWidth(width) {
@@ -2318,6 +2445,7 @@
         }));
         repopulateCameraPortSelect();
         maybeSyncInitialEsp32Volume();
+        maybeSyncInitialEsp32LedBrightness();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
       }
       return;
@@ -2331,6 +2459,7 @@
         const displayPort = msg.result.active === "esp32" ? "" : (msg.result.active || "");
         repopulateCameraPortSelect(displayPort);
         maybeSyncInitialEsp32Volume();
+        maybeSyncInitialEsp32LedBrightness();
         if (isCameraPopoverOpen()) renderCameraPopover(false);
         send({ type: "status", request_id: `cam_refresh_${Date.now()}` });
       } else {
@@ -3286,19 +3415,23 @@
           : `播放录制动作：${labelCn}（${name}） · 配套表情：${expressionMeta}`,
         onClick: () => invokeRecording(name),
       });
+      card.classList.add("skill-card--recording");
+      const edit = document.createElement("button");
+      edit.className = "skill-card-action skill-card-action--edit";
+      edit.type = "button";
+      edit.title = isUserRecording
+        ? "编辑配套表情和动作说明"
+        : "编辑本机的配套表情和动作说明，不会改动出厂动作轨迹";
+      edit.setAttribute("aria-label", edit.title);
+      edit.textContent = "✎";
+      edit.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        openEditRecordingDialog(recording);
+      });
+      card.appendChild(edit);
       if (isUserRecording) {
         card.classList.add("skill-card--recording-user");
-        const edit = document.createElement("button");
-        edit.className = "skill-card-action skill-card-action--edit";
-        edit.type = "button";
-        edit.title = "编辑配套表情和动作说明";
-        edit.textContent = "✎";
-        edit.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          ev.preventDefault();
-          openEditRecordingDialog(recording);
-        });
-        card.appendChild(edit);
         const del = document.createElement("button");
         del.className = "skill-card-action skill-card-action--delete";
         del.type = "button";
@@ -3321,10 +3454,14 @@
     if (!recordEditDialog || !recording || !recording.name) return;
     recordEditDialog.dataset.recordingName = recording.name;
     if (recordEditDesc) {
-      recordEditDesc.textContent = `编辑 ${recordingLabel(recording.name)}（${recording.name}）的绑定表情和动作说明；不会改动录制动作轨迹。`;
+      recordEditDesc.textContent = recording.source === "builtin"
+        ? `编辑 ${recordingLabel(recording.name)}（${recording.name}）的本机配套表情和动作说明；不会改动出厂动作轨迹。`
+        : `编辑 ${recordingLabel(recording.name)}（${recording.name}）的绑定表情和动作说明；不会改动录制动作轨迹。`;
     }
     if (recordEditDescriptionInput) recordEditDescriptionInput.value = recording.description || "";
     populateExpressionSelect(recordEditExpressionSelect, recordingExpressionChoiceValue(recording));
+    populateRecordEditCustomExpressionSelects(recording);
+    setRecordEditExpressionMode("preset");
     if (recordEditError) recordEditError.textContent = "";
     recordEditDialog.showModal();
     if (recordEditDescriptionInput) recordEditDescriptionInput.focus();
@@ -3336,8 +3473,7 @@
     recordEditDialog.close();
   }
 
-  async function updateRecordingMetadata(name, description, expressionChoice) {
-    const pairing = splitRecordingExpressionChoice(expressionChoice);
+  async function updateRecordingMetadata(name, description, pairing) {
     const resp = await fetch("/api/recordings/update", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3461,7 +3597,8 @@
     context.shadowBlur = 0;
     if (ledEditorStatus) {
       const copied = ledEditorClipboard ? ` · 已复制第 ${ledEditorClipboardSource + 1} 帧` : "";
-      ledEditorStatus.textContent = `第 ${ledEditorFrame + 1} / ${LED_EDITOR_FRAMES} 帧 · 10 FPS${copied}`;
+      const notice = ledEditorNotice ? ` · ${ledEditorNotice}` : "";
+      ledEditorStatus.textContent = `第 ${ledEditorFrame + 1} / ${LED_EDITOR_FRAMES} 帧 · 10 FPS${copied}${notice}`;
     }
     if (btnLedPasteFrame) {
       btnLedPasteFrame.disabled = !ledEditorClipboard;
@@ -3479,6 +3616,7 @@
 
   function setLedEditorFrame(index) {
     ledEditorFrame = Math.max(0, Math.min(LED_EDITOR_FRAMES - 1, Number(index) || 0));
+    ledEditorNotice = "";
     drawLedEditor();
   }
 
@@ -3536,6 +3674,7 @@
     if (!cell) return;
     ledEditorFrames[ledEditorFrame][cell.row * LED_EDITOR_WIDTH + cell.col] =
       ledEditorTool === "erase" ? 0 : ledEditorSymbol;
+    ledEditorNotice = "";
     drawLedEditor();
   }
 
@@ -3548,18 +3687,40 @@
       }
     }
     ledEditorFrames[ledEditorFrame] = mirrored;
+    ledEditorNotice = "已镜像当前帧";
     drawLedEditor();
   }
 
   function copyLedEditorFrame() {
     ledEditorClipboard = new Uint8Array(ledEditorFrames[ledEditorFrame]);
     ledEditorClipboardSource = ledEditorFrame;
+    ledEditorNotice = "已复制当前帧";
     drawLedEditor();
   }
 
   function pasteLedEditorFrame() {
     if (!ledEditorClipboard) return;
     ledEditorFrames[ledEditorFrame] = new Uint8Array(ledEditorClipboard);
+    ledEditorNotice = `已粘贴第 ${ledEditorClipboardSource + 1} 帧`;
+    drawLedEditor();
+  }
+
+  function copyLedEditorFrameToAll() {
+    const sourceFrame = new Uint8Array(ledEditorFrames[ledEditorFrame]);
+    const sourceNumber = ledEditorFrame + 1;
+    if (!window.confirm(`用第 ${sourceNumber} 帧覆盖全部 ${LED_EDITOR_FRAMES} 帧？其他帧的内容会被替换。`)) return;
+    ledEditorFrames = Array.from(
+      { length: LED_EDITOR_FRAMES },
+      () => new Uint8Array(sourceFrame),
+    );
+    ledEditorNotice = `已用第 ${sourceNumber} 帧覆盖全部帧`;
+    drawLedEditor();
+  }
+
+  function clearAllLedEditorFrames() {
+    if (!window.confirm(`清空全部 ${LED_EDITOR_FRAMES} 帧？此操作会移除当前未保存的全部画面。`)) return;
+    ledEditorFrames.forEach((frame) => frame.fill(0));
+    ledEditorNotice = "已清空全部帧";
     drawLedEditor();
   }
 
@@ -4394,8 +4555,11 @@
   if (btnLedMirrorFrame) btnLedMirrorFrame.addEventListener("click", mirrorLedEditorFrame);
   if (btnLedClearFrame) btnLedClearFrame.addEventListener("click", () => {
     ledEditorFrames[ledEditorFrame].fill(0);
+    ledEditorNotice = "已清空当前帧";
     drawLedEditor();
   });
+  if (btnLedCopyFrameToAll) btnLedCopyFrameToAll.addEventListener("click", copyLedEditorFrameToAll);
+  if (btnLedClearAllFrames) btnLedClearAllFrames.addEventListener("click", clearAllLedEditorFrames);
   if (btnLedEditorPreview) btnLedEditorPreview.addEventListener("click", toggleLedEditorPreview);
   if (btnLedEditorSave) btnLedEditorSave.addEventListener("click", () => { void saveLedEditor({ sync: false }); });
   initializeLedEditor();
@@ -7413,32 +7577,48 @@
       e.preventDefault();
       const name = (recordEditDialog && recordEditDialog.dataset.recordingName) || "";
       const description = ((recordEditDescriptionInput && recordEditDescriptionInput.value) || "").trim();
-      const expressionChoice = ((recordEditExpressionSelect && recordEditExpressionSelect.value) || "").trim();
       if (!name) {
         if (recordEditError) recordEditError.textContent = "缺少动作名称";
         return;
       }
-      if (!description) {
-        if (recordEditError) recordEditError.textContent = "请输入动作说明，AI 会根据它判断什么时候播放这个动作";
-        if (recordEditDescriptionInput) recordEditDescriptionInput.focus();
-        return;
-      }
-      if (!expressionChoice) {
-        if (recordEditError) recordEditError.textContent = "请选择配套表情";
-        if (recordEditExpressionSelect) recordEditExpressionSelect.focus();
-        return;
+      let pairing;
+      if (recordEditExpressionMode === "custom") {
+        const eyeClipId = ((recordEditEyeSelect && recordEditEyeSelect.value) || "").trim();
+        const ledEffectId = ((recordEditLedSelect && recordEditLedSelect.value) || "").trim();
+        if (!eyeClipId && !ledEffectId) {
+          if (recordEditError) recordEditError.textContent = "至少选择一个眼睛动画或 LED 效果";
+          if (recordEditEyeSelect) recordEditEyeSelect.focus();
+          return;
+        }
+        pairing = { eye_clip_id: eyeClipId, led_effect_id: ledEffectId };
+      } else {
+        const expressionChoice = ((recordEditExpressionSelect && recordEditExpressionSelect.value) || "").trim();
+        if (!expressionChoice) {
+          if (recordEditError) recordEditError.textContent = "请选择配套表情";
+          if (recordEditExpressionSelect) recordEditExpressionSelect.focus();
+          return;
+        }
+        pairing = splitRecordingExpressionChoice(expressionChoice);
       }
       if (recordEditError) recordEditError.textContent = "";
-      updateRecordingMetadata(name, description, expressionChoice)
-        .then(() => {
+      updateRecordingMetadata(name, description, pairing)
+        .then((data) => {
           closeEditRecordingDialog();
-          addSystemMessage(`录制动作已更新：${recordingLabel(name)}（${name}） · ${recordingExpressionChoiceLabel({ name, ...splitRecordingExpressionChoice(expressionChoice) })}`);
+          const result = (data && data.result) || {};
+          addSystemMessage(`录制动作已更新：${recordingLabel(name)}（${name}） · ${recordingExpressionChoiceLabel({
+            name,
+            expression: result.expression || "",
+            expression_preset: result.expression_preset || "",
+          })}`);
         })
         .catch((err) => {
           if (recordEditError) recordEditError.textContent = `保存失败：${err && err.message ? err.message : err}`;
         });
     });
   }
+  document.querySelectorAll("[data-record-edit-expression-mode]").forEach((button) => {
+    button.addEventListener("click", () => setRecordEditExpressionMode(button.dataset.recordEditExpressionMode));
+  });
 
   if (catTeaserForm) {
     catTeaserForm.addEventListener("submit", (e) => {
@@ -10121,6 +10301,7 @@
   ensureIdleTimer();
   updateRecordButtonState();
   initEsp32VolumeControl();
+  initEsp32LedBrightnessControl();
   startWebPageOwnerHeartbeat();
   connect();
 })();

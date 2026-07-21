@@ -107,7 +107,7 @@ class LampgoServer:
         self.led = LEDController(LEDConfig(port="", baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
         self.clock = ClockController(
             self.led,
-            brightness_ceiling=lambda: getattr(self.config.device_esp32, "led_brightness", 96),
+            brightness_ceiling=lambda: self.config.device_esp32.led_brightness,
         )
         self.fsm = StateMachine()
         self.registry = SkillRegistry()

@@ -148,6 +148,31 @@ def test_api_config_post_device_bare_field_name_is_accepted(monkeypatch, tmp_pat
     assert gateway.server.config.device.lamp_id == "AL42"
 
 
+def test_led_brightness_is_persisted_and_caps_direct_led_commands(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_proxy_post(path: str, payload: dict):
+        sent.append((path, payload))
+        return 200, {"ok": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+
+    with TestClient(gateway.app) as client:
+        saved = client.post("/api/config/device_esp32", json={"led_brightness": 24})
+        direct = client.post("/api/device/led", json={"expression": "heart", "brightness": 96})
+
+    assert saved.status_code == 200
+    assert saved.json()["result"]["led_brightness_sync"] == {"ok": True, "level": 24}
+    assert gateway.server.config.device_esp32.led_brightness == 24
+    assert personastore.get_overrides_toml()["device_esp32"]["led_brightness"] == 24
+    assert direct.status_code == 200
+    assert sent[0][0] == "/device/led"
+    assert sent[0][1]["brightness"] == 24
+    assert sent[1][0] == "/device/led"
+    assert sent[1][1]["brightness"] == 24
+
+
 def test_api_config_post_rejects_unknown_fields(monkeypatch, tmp_path):
     gateway = _make_gateway(monkeypatch, tmp_path)
 
