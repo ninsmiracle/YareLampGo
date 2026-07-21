@@ -6,11 +6,17 @@ V2.0 is the only currently maintained public hardware structure. The V1.0 packag
 
 ![YareLampGo V2.0 assembly preview](YareLampGo_V2.0/assembly-preview.png)
 
+## Download The Complete STEP Assembly
+
+[**Download the complete YareLampGo V2.0 STEP assembly (73 MB)**](YareLampGo_V2.0/YareLampGo_V2.0_assembly.step)
+
+This is a complete assembly for CAD tools such as SolidWorks, Fusion 360, and FreeCAD—not a per-part STL/3MF printing package.
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `YareLampGo_V2.0/YareLampGo_V2.0_assembly.step` | Complete STEP AP214 assembly exported by SolidWorks 2022, in millimetres. |
+| [YareLampGo_V2.0_assembly.step](YareLampGo_V2.0/YareLampGo_V2.0_assembly.step) | Complete STEP AP214 assembly exported by SolidWorks 2022, in millimetres. |
 | `YareLampGo_V2.0/assembly-preview.png` | Assembly preview extracted from the official guide. |
 | [`../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx`](../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) | Illustrated BOM, fastener, cable-routing, and assembly guide. |
 | [`../../docs/hardware/v2/README.en.md`](../../docs/hardware/v2/README.en.md) | Searchable V2.0 assembly, electrical, and first-power guide. |
