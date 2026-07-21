@@ -18,6 +18,8 @@ Imported on 2026-07-21 from the approved local release folder `lampgo_v2版本�
 
 The public DOCX copy has SHA-256 `dc1a8b7bde0bd94ab490378cba6f75ba6086543aae21045f5fcafbe3708f9b45`. It differs from the original only because publishing metadata was scrubbed: creator/last-modifier values, WPS custom identifiers, and custom-property relationships were removed. A temporary copy produced a 13-page render pixel-identical to the source; the final public file was not opened by the renderer.
 
+`YareLampGo_V2.0_assembly_manual.md` is the GitHub-readable counterpart. Its `assembly-manual-media/` directory contains the 42 images extracted unchanged from the public DOCX; the Markdown keeps their original document order and adds links to the current safety and wiring guides.
+
 ## Structural inspection
 
 - Format: ISO 10303-21, STEP AP214 / `AUTOMOTIVE_DESIGN`.

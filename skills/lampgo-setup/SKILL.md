@@ -209,7 +209,7 @@ Confirm S3 and C6 ports separately. A successful compile is not a successful upl
 
 ## Phase 5: Assembly and electrical checkpoint
 
-Open `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx` for the illustrated sequence and `docs/hardware/v2/README.md` for searchable notes.
+Open `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.md` for the GitHub-readable illustrated sequence and `docs/hardware/v2/README.md` for searchable notes. The DOCX remains the source download when offline viewing or printing helps.
 
 The user must confirm all of the following before first 12V power:
 

@@ -18,7 +18,8 @@ This is a complete assembly for CAD tools such as SolidWorks, Fusion 360, and Fr
 | --- | --- |
 | [YareLampGo_V2.0_assembly.step](YareLampGo_V2.0/YareLampGo_V2.0_assembly.step) | Complete STEP AP214 assembly exported by SolidWorks 2022, in millimetres. |
 | `YareLampGo_V2.0/assembly-preview.png` | Assembly preview extracted from the official guide. |
-| [`../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx`](../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) | Illustrated BOM, fastener, cable-routing, and assembly guide. |
+| [GitHub-readable assembly guide (Chinese)](../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.md) | Browse the illustrated BOM, fastener, cable-routing, and assembly guide. |
+| [Original assembly DOCX](../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) | Download the original guide for offline viewing or printing. |
 | [`../../docs/hardware/v2/README.en.md`](../../docs/hardware/v2/README.en.md) | Searchable V2.0 assembly, electrical, and first-power guide. |
 
 ## Boundaries

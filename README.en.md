@@ -98,7 +98,8 @@ V2.0 replaces V1.0. Do not mix structures, wiring, or calibration files across g
 | V2 hardware, assembly, and first power | [V2.0 Hardware and Assembly](docs/hardware/v2/README.en.md) |
 | Power, S3/C6, audio, LED, and servo wiring | [V2.0 Wiring](docs/hardware/wiring.md) |
 | Complete STEP assembly | [V2.0 Structure](assets/printable/README.en.md) |
-| Illustrated assembly guide | [Assembly DOCX](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) |
+| GitHub-readable illustrated assembly guide | [Assembly guide Markdown (Chinese)](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.md) |
+| Original illustrated assembly guide | [Assembly DOCX download](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) |
 | S3/C6 firmware | [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) |
 
 The current release contains a complete STEP assembly, not pre-split STL/3MF files. The electrical PNGs are wiring and routing references, not a board-house-ready Gerber package.

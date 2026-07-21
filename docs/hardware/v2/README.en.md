@@ -12,7 +12,8 @@ V2.0 is the only maintained public hardware and mechanical version. Because V1.0
 | --- | --- |
 | [Manual setup, flashing, and first start](../../getting-started/manual-hardware-setup.en.md) | Complete flow from servo IDs and S3/C6 flashing through calibration and Web startup. |
 | [Complete STEP assembly](../../../assets/printable/YareLampGo_V2.0/YareLampGo_V2.0_assembly.step) | Structural relationships and purchased-component reference geometry; units are millimetres. |
-| [Assembly manual DOCX](YareLampGo_V2.0_assembly_manual.docx) | Illustrated BOM, insert/screw locations, cable routing, and assembly sequence. |
+| [GitHub-readable assembly guide (Chinese)](YareLampGo_V2.0_assembly_manual.md) | Full BOM, wiring, fabrication, and assembly images in the browser. |
+| [Assembly manual DOCX download](YareLampGo_V2.0_assembly_manual.docx) | Original illustrated file for offline viewing or printing. |
 | [Current wiring guide](../wiring.md) | Searchable power, S3/C6, audio, LED, and servo wiring tables. |
 | [`schematics/`](schematics/) | Four schematic/interface images and top/bottom PCB reference views. |
 | [Source manifest](SOURCE_MANIFEST.md) | Original names, checksums, STEP/DOCX/GIF inspection results, and publication limits. |

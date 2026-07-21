@@ -68,7 +68,9 @@ Current public entry points:
 - `docs/hardware/README.md`
 - `docs/hardware/wiring.md`
 - `docs/hardware/v2/README.md`
+- `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.md`
 - `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx`
+- `docs/hardware/v2/assembly-manual-media/`
 - `docs/hardware/v2/schematics/`
 
 ## Printable Appearance And Structural Files

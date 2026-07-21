@@ -16,7 +16,8 @@ Keep these references open:
 
 - [V2.0 Hardware and Assembly](../hardware/v2/README.en.md)
 - [V2.0 Wiring Guide](../hardware/wiring.md)
-- [Illustrated Assembly DOCX](../hardware/v2/YareLampGo_V2.0_assembly_manual.docx)
+- [GitHub-readable illustrated assembly guide (Chinese)](../hardware/v2/YareLampGo_V2.0_assembly_manual.md)
+- [Original illustrated assembly DOCX download](../hardware/v2/YareLampGo_V2.0_assembly_manual.docx)
 
 ## 1. Install LampGo
 

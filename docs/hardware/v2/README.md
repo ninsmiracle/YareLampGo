@@ -12,7 +12,8 @@ V2.0 是当前公开硬件和机械结构的唯一维护版本。由于 V1.0 用
 | --- | --- |
 | [手动安装、烧录与首次启动](../../getting-started/manual-hardware-setup.md) | 从舵机编号、S3/C6 烧录到校准和 Web 启动的完整命令流程。 |
 | [完整 STEP 总成](../../../assets/printable/YareLampGo_V2.0/YareLampGo_V2.0_assembly.step) | 查看结构、装配关系和采购件占位；单位为毫米。 |
-| [组装说明 DOCX](YareLampGo_V2.0_assembly_manual.docx) | 查看物料图片、嵌件/螺钉位置、走线与装配过程。 |
+| [GitHub 网页版组装说明](YareLampGo_V2.0_assembly_manual.md) | 直接在网页查看完整物料、线路、加工和组装图片。 |
+| [组装说明 DOCX 下载](YareLampGo_V2.0_assembly_manual.docx) | 原始图文文件；适合离线查看或打印。 |
 | [当前接线指南](../wiring.md) | 可搜索的电源域、S3/C6、音频、LED 和舵机接线表。 |
 | [`schematics/`](schematics/) | 4 张原理/接口图和 2 张 PCB 顶/底层参考图。 |
 | [源文件清单](SOURCE_MANIFEST.md) | 原始文件名、SHA-256、STEP/DOCX/GIF 检查结果和发布边界。 |

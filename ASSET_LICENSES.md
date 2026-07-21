@@ -43,6 +43,7 @@ default open-hardware license.
 | `assets/printable/**/*.stp` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
 | `assets/printable/YareLampGo_V2.0/*.png` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Preview images for the V2.0 public structure package. |
 | `docs/hardware/v2/schematics/*.png` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | V2.0 schematic, connector, and PCB-routing reference images; not fabrication outputs. |
+| `docs/hardware/v2/assembly-manual-media/*` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Images extracted unchanged from the public V2.0 assembly DOCX for the GitHub-readable assembly guide. |
 | `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Illustrated V2.0 assembly and BOM-reference document. |
 
 License URL: <https://opensource.org/license/CERN-OHL-W-2.0>
