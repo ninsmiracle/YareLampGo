@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YareLampGo 控制台</title>
   <link rel="icon" href="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg">
-  <link rel="stylesheet" href="/style.css?v=led-pixel-clips-20260715">
+  <link rel="stylesheet" href="/style.css?v=clock-prominent-20260721">
   <link rel="stylesheet" href="/setup.css?v=secret-inputs-20260602">
 </head>
 <body>
@@ -348,6 +348,33 @@
               </div>
               <div class="skill-section-count" id="expression-count">0</div>
             </div>
+            <section class="clock-quick-panel" aria-labelledby="clock-quick-title">
+              <div class="clock-quick-head">
+                <div>
+                  <div id="clock-quick-title" class="clock-quick-title">LED 点阵时钟</div>
+                  <div class="clock-quick-desc">显示电脑当前时间，后端会在每个整分钟自动更新。</div>
+                </div>
+                <div id="clock-status" class="clock-status">显示后由本机后端每分钟更新一次。</div>
+              </div>
+              <div class="clock-workspace">
+                <div id="clock-preview" class="clock-preview" aria-live="polite">--:--</div>
+                <div class="clock-controls">
+                  <label>颜色<input id="clock-color" type="color" value="#37d6ff" /></label>
+                  <label>亮度<input id="clock-brightness" type="range" min="1" max="96" value="32" /></label>
+                  <label>特效
+                    <select id="clock-effect">
+                      <option value="steady">常亮</option>
+                      <option value="blink">闪烁</option>
+                      <option value="orbit">光效环绕</option>
+                    </select>
+                  </label>
+                  <div class="clock-command-row">
+                    <button id="btn-clock-show" class="primary-button" type="button">显示时钟</button>
+                    <button id="btn-clock-stop" class="ghost-button" type="button">停止</button>
+                  </div>
+                </div>
+              </div>
+            </section>
             <div class="expression-tabs" role="tablist" aria-label="表情工作区">
               <button type="button" class="expression-tab is-active" data-expression-tab="eyes" role="tab">眼睛素材</button>
               <button type="button" class="expression-tab" data-expression-tab="led" role="tab">LED 效果</button>
@@ -1438,7 +1465,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=led-frame-clipboard-20260715"></script>
+  <script src="/app.js?v=clock-prominent-20260721"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

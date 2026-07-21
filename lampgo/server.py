@@ -38,6 +38,7 @@ from lampgo.core.events import (
 )
 from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.led import LEDController
+from lampgo.clock import ClockController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.virtual_motion import VirtualMotionRuntime
@@ -53,7 +54,7 @@ from lampgo.recordings import (
 )
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.cat_teaser import CatTeaserSkill
-from lampgo.skills.builtin.expression_skills import SetExpressionSkill
+from lampgo.skills.builtin.expression_skills import SetExpressionSkill, ShowClockSkill
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
 from lampgo.skills.builtin.music_skills import DanceToMusicSkill
 from lampgo.skills.builtin.parametric_skills import (
@@ -104,6 +105,10 @@ class LampgoServer:
         # the old serial config fields readable for legacy files, but do not
         # open a local LED serial port from the web runtime.
         self.led = LEDController(LEDConfig(port="", baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
+        self.clock = ClockController(
+            self.led,
+            brightness_ceiling=lambda: getattr(self.config.device_esp32, "led_brightness", 96),
+        )
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
@@ -168,6 +173,7 @@ class LampgoServer:
         self.registry.register(EStopSkill())
         self.registry.register(PlayRecordingSkill(recordings_dir))
         self.registry.register(SetExpressionSkill())
+        self.registry.register(ShowClockSkill())
         self.registry.register(NodSkill())
         self.registry.register(HeadShakeSkill())
         self.registry.register(LookAtSkill())
@@ -247,6 +253,7 @@ class LampgoServer:
             led=self.led,
             events=self.events,
             state=self.motion.current_state,
+            clock=self.clock,
         )
 
     async def _on_skill_started(self, event: SkillStarted) -> None:

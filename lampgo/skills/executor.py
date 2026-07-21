@@ -28,6 +28,7 @@ _MOTION_SKILLS = {
 }
 _LED_SKILLS = {
     "set_expression",
+    "show_clock",
     "presence_react",
     "teleop_mouse", "teleop_gamepad",
 }
@@ -102,6 +103,8 @@ class SkillExecutor:
                 status="ok",
                 result={"note": "LED not connected, skipped"},
             )
+        if skill_id in _LED_SKILLS and skill_id != "show_clock" and ctx.clock is not None:
+            ctx.clock.deactivate()
 
         async with self._lock:
             # Cancel current skill if running. This gives rapid UI clicks

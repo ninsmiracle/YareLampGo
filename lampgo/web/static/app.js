@@ -69,6 +69,13 @@
   const btnExpressionPlay = document.getElementById("btn-expression-play");
   const btnExpressionStop = document.getElementById("btn-expression-stop");
   const btnExpressionSave = document.getElementById("btn-expression-save");
+  const clockPreview = document.getElementById("clock-preview");
+  const clockColor = document.getElementById("clock-color");
+  const clockBrightness = document.getElementById("clock-brightness");
+  const clockEffect = document.getElementById("clock-effect");
+  const clockStatus = document.getElementById("clock-status");
+  const btnClockShow = document.getElementById("btn-clock-show");
+  const btnClockStop = document.getElementById("btn-clock-stop");
   const agentTaskList = document.getElementById("agent-task-list");
   const chipJoint = document.getElementById("chip-joint");
   const chipJointDot = document.getElementById("chip-joint-dot");
@@ -237,6 +244,7 @@
   let expressionPlayback = "loop";
   let expressionPreviewTimer = null;
   let expressionPreviewImage = null;
+  let clockPreviewTimer = null;
   const ledEffectSourceCache = new Map();
   const LED_EDITOR_WIDTH = 51;
   const LED_EDITOR_HEIGHT = 9;
@@ -3776,6 +3784,80 @@
     renderExpressionPresets();
   }
 
+  function renderClockPreview() {
+    if (!clockPreview) return;
+    const now = new Date();
+    clockPreview.textContent = now.toLocaleTimeString("zh-CN", {
+      hour12: false, hour: "2-digit", minute: "2-digit",
+    });
+    const color = (clockColor && clockColor.value) || "#37d6ff";
+    const effect = (clockEffect && clockEffect.value) || "steady";
+    clockPreview.style.color = color;
+    clockPreview.classList.toggle("is-blink", effect === "blink");
+    clockPreview.classList.toggle("is-orbit", effect === "orbit");
+  }
+
+  function startClockPreview() {
+    if (clockPreviewTimer) return;
+    renderClockPreview();
+    clockPreviewTimer = window.setInterval(renderClockPreview, 1000);
+  }
+
+  function applyClockState(state) {
+    if (!state || typeof state !== "object") return;
+    if (clockColor && state.color) clockColor.value = state.color;
+    if (clockBrightness && state.brightness) clockBrightness.value = String(state.brightness);
+    if (clockEffect && state.effect) clockEffect.value = state.effect;
+    renderClockPreview();
+    if (clockStatus) {
+      clockStatus.textContent = state.enabled
+        ? `已显示 ${state.time || "--:--"}，后端每分钟更新一次。`
+        : "显示后由本机后端每分钟更新一次。";
+    }
+  }
+
+  async function refreshClock() {
+    try {
+      const result = await fetchJson("/api/clock");
+      applyClockState(result);
+    } catch (error) {
+      if (clockStatus) clockStatus.textContent = `时钟状态加载失败：${error.message || error}`;
+    }
+  }
+
+  async function showClock() {
+    if (btnClockShow) btnClockShow.disabled = true;
+    try {
+      const result = await fetchJson("/api/clock/show", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          color: (clockColor && clockColor.value) || "#37d6ff",
+          brightness: Number((clockBrightness && clockBrightness.value) || 32),
+          effect: (clockEffect && clockEffect.value) || "steady",
+        }),
+      });
+      applyClockState(result);
+    } catch (error) {
+      if (clockStatus) clockStatus.textContent = `显示失败：${error.message || error}`;
+    } finally {
+      if (btnClockShow) btnClockShow.disabled = false;
+    }
+  }
+
+  async function stopClock() {
+    if (btnClockStop) btnClockStop.disabled = true;
+    try {
+      const result = await fetchJson("/api/clock/stop", { method: "POST" });
+      applyClockState(result);
+      if (clockStatus) clockStatus.textContent = "时钟已停止。";
+    } catch (error) {
+      if (clockStatus) clockStatus.textContent = `停止失败：${error.message || error}`;
+    } finally {
+      if (btnClockStop) btnClockStop.disabled = false;
+    }
+  }
+
   async function refreshExpressionStudio() {
     try {
       const [eyes, effects, presets, capacity] = await Promise.all([
@@ -3811,6 +3893,7 @@
           device ? `S3 可用 ${formatBytes(device.spiffs_free_bytes)}` : "设备未连接",
         ].join("  |  ");
       }
+      void refreshClock();
     } catch (error) {
       if (expressionCapacityEl) expressionCapacityEl.textContent = `表情库加载失败：${error.message || error}`;
     }
@@ -4287,6 +4370,10 @@
   if (btnExpressionPlay) btnExpressionPlay.addEventListener("click", () => { void playExpression(); });
   if (btnExpressionStop) btnExpressionStop.addEventListener("click", () => { void stopExpression(); });
   if (btnExpressionSave) btnExpressionSave.addEventListener("click", () => { void saveExpressionPresetFromComposer(); });
+  if (btnClockShow) btnClockShow.addEventListener("click", () => { void showClock(); });
+  if (btnClockStop) btnClockStop.addEventListener("click", () => { void stopClock(); });
+  if (clockColor) clockColor.addEventListener("input", renderClockPreview);
+  if (clockEffect) clockEffect.addEventListener("change", renderClockPreview);
   if (btnEyeUpload) btnEyeUpload.addEventListener("click", () => { void uploadExpressionEye(); });
   if (ledEffectForm) {
     ledEffectForm.addEventListener("submit", (event) => {
@@ -4313,6 +4400,7 @@
   if (btnLedEditorSave) btnLedEditorSave.addEventListener("click", () => { void saveLedEditor({ sync: false }); });
   initializeLedEditor();
   ensureLedPreviewCells();
+  startClockPreview();
   void refreshSkillsAndRecordings();
   void refreshExpressionStudio();
   if (btnUserSkillsReload) {

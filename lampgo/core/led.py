@@ -242,6 +242,38 @@ class LEDController:
         """Stop a composed eye/LED expression on the paired device."""
         return self._send_remote_path("/device/expressions/stop", {}, reason="expression_stop")
 
+    def show_clock(
+        self,
+        *,
+        hour: int,
+        minute: int,
+        color: str,
+        brightness: int,
+        effect: str,
+    ) -> bool:
+        """Render a backend-sourced local time on the S3 LED matrix."""
+        if self._serial is not None:
+            logger.warning("led.clock_requires_paired_esp32")
+            return False
+        return self._send_remote_path(
+            "/device/clock",
+            {
+                "enabled": True,
+                "hour": max(0, min(23, int(hour))),
+                "minute": max(0, min(59, int(minute))),
+                "color": str(color),
+                "brightness": max(1, min(96, int(brightness))),
+                "effect": str(effect),
+            },
+            reason="clock",
+        )
+
+    def stop_clock(self) -> bool:
+        """Disable the device clock renderer without changing eye playback."""
+        if self._serial is not None:
+            return self.off()
+        return self._send_remote_path("/device/clock", {"enabled": False}, reason="clock_stop")
+
     def _send(self, command: str) -> bool:
         if self._serial is None:
             logger.debug("led.send_skipped (not connected)", cmd=command.strip())

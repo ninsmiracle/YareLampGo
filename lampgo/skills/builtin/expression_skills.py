@@ -64,3 +64,46 @@ class SetExpressionSkill(Skill):
                 "mode": LED_EXPRESSIONS[canonical],
             },
         )
+
+
+class ShowClockSkill(Skill):
+    """Show the backend's local time on the S3 LED matrix."""
+
+    skill_id = "show_clock"
+    description = "Show the backend local time on the S3 LED display and keep it updated once per minute."
+    parameters = {
+        "color": ParameterSpec(
+            name="color",
+            type="str",
+            required=False,
+            default="#37d6ff",
+            description="Clock color as #RRGGBB.",
+        ),
+        "brightness": ParameterSpec(
+            name="brightness",
+            type="int",
+            required=False,
+            default=32,
+            description="Clock brightness from 1 to 96.",
+        ),
+        "effect": ParameterSpec(
+            name="effect",
+            type="str",
+            required=False,
+            default="steady",
+            description="Clock effect: steady, blink, or orbit.",
+        ),
+    }
+
+    async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        clock = ctx.clock
+        if clock is None:
+            return SkillResult(status="error", message="Clock controller unavailable")
+        result = clock.show(
+            color=params.get("color"),
+            brightness=params.get("brightness"),
+            effect=params.get("effect"),
+        )
+        if not result.get("ok"):
+            return SkillResult(status="error", message="LED clock could not reach the paired device", data=result)
+        return SkillResult(status="ok", data=result)
