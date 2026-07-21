@@ -205,6 +205,7 @@ class WebGateway:
         self._status_task: asyncio.Task | None = None
         self._pet_pose_task: asyncio.Task | None = None
         self._clock_task: asyncio.Task | None = None
+        self._ocean_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self._background_ws_tasks: set[asyncio.Task[None]] = set()
         self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
@@ -260,6 +261,9 @@ class WebGateway:
             Route("/api/clock", self.api_clock, methods=["GET"]),
             Route("/api/clock/show", self.api_clock_show, methods=["POST"]),
             Route("/api/clock/stop", self.api_clock_stop, methods=["POST"]),
+            Route("/api/electronic-ocean", self.api_electronic_ocean, methods=["GET"]),
+            Route("/api/electronic-ocean/start", self.api_electronic_ocean_start, methods=["POST"]),
+            Route("/api/electronic-ocean/stop", self.api_electronic_ocean_stop, methods=["POST"]),
             Route("/api/camera/snap", self.api_camera_snap),
             Route("/api/sensor/context", self.api_sensor_context),
             Route("/api/agent/ask", self.api_agent_ask, methods=["POST"]),
@@ -330,8 +334,9 @@ class WebGateway:
             self._status_task = asyncio.create_task(self._status_loop())
             self._pet_pose_task = asyncio.create_task(self._pet_pose_loop())
             self._clock_task = asyncio.create_task(self._clock_loop())
+            self._ocean_task = asyncio.create_task(self._ocean_loop())
             yield
-            for task in (self._status_task, self._pet_pose_task, self._clock_task):
+            for task in (self._status_task, self._pet_pose_task, self._clock_task, self._ocean_task):
                 if not task:
                     continue
                 task.cancel()
@@ -376,6 +381,15 @@ class WebGateway:
             except Exception:
                 logger.exception("web.clock_refresh_failed")
             await asyncio.sleep(1.0)
+
+    async def _ocean_loop(self) -> None:
+        """Send coalesced wrist telemetry while S3 renders the ocean locally."""
+        while True:
+            try:
+                await self.server.electronic_ocean.refresh()
+            except Exception:
+                logger.exception("web.electronic_ocean_refresh_failed")
+            await asyncio.sleep(0.1)
 
     async def _pet_pose_loop(self) -> None:
         """Broadcast joint poses at animation-friendly cadence for the Web pet."""
@@ -1130,6 +1144,7 @@ class WebGateway:
         if not self.server.esp32:
             return 503, {"ok": False, "error": "no_device"}
         self.server.clock.deactivate()
+        self.server.electronic_ocean.deactivate()
         effect = composition.get("led_effect") or {}
         if effect.get("kind") == "pixel_clip" and composition.get("led_effect_id"):
             sync_status, sync_body, _ = await self._sync_led_effect_to_device(
@@ -1174,6 +1189,7 @@ class WebGateway:
 
     async def api_expression_stop(self, request: Request) -> JSONResponse:
         self.server.clock.deactivate()
+        self.server.electronic_ocean.deactivate()
         if not self.server.esp32:
             return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
         payload = self.server.esp32.with_owner_auth({}, reason="expression_stop")
@@ -1190,6 +1206,7 @@ class WebGateway:
             body = {}
         if not isinstance(body, dict):
             return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        self.server.electronic_ocean.deactivate()
         result = await asyncio.to_thread(
             self.server.clock.show,
             color=body.get("color"),
@@ -1201,6 +1218,26 @@ class WebGateway:
 
     async def api_clock_stop(self, request: Request) -> JSONResponse:
         result = await asyncio.to_thread(self.server.clock.stop)
+        status = 200 if result.get("ok") else 503
+        return JSONResponse({"ok": bool(result.get("ok")), "result": result}, status_code=status)
+
+    async def api_electronic_ocean(self, request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "result": self.server.electronic_ocean.snapshot()})
+
+    async def api_electronic_ocean_start(self, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        self.server.clock.deactivate()
+        result = await self.server.electronic_ocean.start(**body)
+        status = 200 if result.get("ok") else 503
+        return JSONResponse({"ok": bool(result.get("ok")), "result": result}, status_code=status)
+
+    async def api_electronic_ocean_stop(self, request: Request) -> JSONResponse:
+        result = await self.server.electronic_ocean.stop()
         status = 200 if result.get("ok") else 503
         return JSONResponse({"ok": bool(result.get("ok")), "result": result}, status_code=status)
 
@@ -2805,6 +2842,7 @@ class WebGateway:
             patch["brightness"] = brightness_ceiling
         if any(key in patch for key in ("mode", "expression", "name", "clip_id")):
             self.server.clock.deactivate()
+            self.server.electronic_ocean.deactivate()
         if self.server.esp32 and hasattr(self.server.esp32, "with_owner_auth"):
             patch = self.server.esp32.with_owner_auth(patch, reason="led")
         status, body, _ = await self.server.esp32.proxy_post("/device/led", patch)

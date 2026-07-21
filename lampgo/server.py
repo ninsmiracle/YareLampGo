@@ -22,6 +22,7 @@ from typing import Any
 import structlog
 
 from lampgo.agent import AgentLedIndicator, AgentManager
+from lampgo.clock import ClockController
 from lampgo.core.config import LampgoConfig, LEDConfig
 from lampgo.core.events import (
     AgentAskRequested,
@@ -38,11 +39,11 @@ from lampgo.core.events import (
 )
 from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.led import LEDController
-from lampgo.clock import ClockController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.virtual_motion import VirtualMotionRuntime
 from lampgo.device import Esp32DeviceManager
+from lampgo.electronic_ocean import ElectronicOceanController
 from lampgo.ipc import IPCServer
 from lampgo.perception.cat_teaser import CatTeaserFrameSource, is_supported_local_camera_port
 from lampgo.perception.router import IntentRouter, IntentType
@@ -54,7 +55,12 @@ from lampgo.recordings import (
 )
 from lampgo.skills.base import SkillContext
 from lampgo.skills.builtin.cat_teaser import CatTeaserSkill
-from lampgo.skills.builtin.expression_skills import SetExpressionSkill, ShowClockSkill
+from lampgo.skills.builtin.expression_skills import (
+    SetExpressionSkill,
+    ShowClockSkill,
+    StartElectronicOceanSkill,
+    StopElectronicOceanSkill,
+)
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
 from lampgo.skills.builtin.music_skills import DanceToMusicSkill
 from lampgo.skills.builtin.parametric_skills import (
@@ -107,6 +113,11 @@ class LampgoServer:
         self.led = LEDController(LEDConfig(port="", baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
         self.clock = ClockController(
             self.led,
+            brightness_ceiling=lambda: self.config.device_esp32.led_brightness,
+        )
+        self.electronic_ocean = ElectronicOceanController(
+            self.esp32,
+            lambda: self.motion.current_state.get("wrist_pitch") if self.motion.current_state else None,
             brightness_ceiling=lambda: self.config.device_esp32.led_brightness,
         )
         self.fsm = StateMachine()
@@ -174,6 +185,8 @@ class LampgoServer:
         self.registry.register(PlayRecordingSkill(recordings_dir))
         self.registry.register(SetExpressionSkill())
         self.registry.register(ShowClockSkill())
+        self.registry.register(StartElectronicOceanSkill())
+        self.registry.register(StopElectronicOceanSkill())
         self.registry.register(NodSkill())
         self.registry.register(HeadShakeSkill())
         self.registry.register(LookAtSkill())
@@ -254,6 +267,7 @@ class LampgoServer:
             events=self.events,
             state=self.motion.current_state,
             clock=self.clock,
+            electronic_ocean=self.electronic_ocean,
         )
 
     async def _on_skill_started(self, event: SkillStarted) -> None:
