@@ -2584,6 +2584,36 @@ button.device-chip.is-active {
   color: #155f59;
 }
 
+.clock-quick-panel {
+  margin: 12px 0 14px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid #9ecfc9;
+  border-bottom: 1px solid #9ecfc9;
+  border-left: 4px solid #227c75;
+  background: #f1f9f8;
+}
+
+.clock-quick-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.clock-quick-title {
+  color: #155f59;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.clock-quick-desc {
+  margin-top: 3px;
+  color: #596169;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .expression-capacity {
   min-height: 28px;
   margin-bottom: 12px;
@@ -3701,6 +3731,63 @@ button.device-chip.is-active {
   min-height: 92px;
   resize: vertical;
   line-height: 1.5;
+}
+
+.clock-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 0.85fr);
+  gap: 18px;
+  align-items: center;
+  padding: 8px 0 0;
+}
+
+.clock-preview {
+  min-height: 126px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #25343a;
+  border-radius: 8px;
+  background: #0d1316;
+  color: #37d6ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 58px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-shadow: 0 0 14px currentColor;
+}
+
+.clock-preview.is-blink { animation: clock-preview-blink 1s steps(1, end) infinite; }
+.clock-preview.is-orbit { box-shadow: inset 0 0 0 1px currentColor, 0 0 14px currentColor; }
+
+@keyframes clock-preview-blink {
+  50% { opacity: 0.2; }
+}
+
+.clock-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.clock-controls label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.clock-controls input,
+.clock-controls select { width: 100%; min-width: 0; }
+.clock-controls input[type="color"] { height: 34px; padding: 2px; }
+.clock-command-row,
+.clock-status { grid-column: 1 / -1; }
+.clock-command-row { display: flex; gap: 8px; }
+.clock-status { color: var(--text-faint); font-size: 12px; }
+
+@media (max-width: 860px) {
+  .clock-workspace { grid-template-columns: 1fr; }
+  .clock-quick-head { display: grid; gap: 6px; }
 }
 
 .record-dialog-input:focus {

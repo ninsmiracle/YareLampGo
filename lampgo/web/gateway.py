@@ -201,6 +201,7 @@ class WebGateway:
         self.bridge = WsBridge(server.events)
         self._status_task: asyncio.Task | None = None
         self._pet_pose_task: asyncio.Task | None = None
+        self._clock_task: asyncio.Task | None = None
         self._active_request_tasks: dict[WebSocket, asyncio.Task] = {}
         self._background_ws_tasks: set[asyncio.Task[None]] = set()
         self._esp32_relay_tasks: dict[WebSocket, asyncio.Task] = {}
@@ -253,6 +254,9 @@ class WebGateway:
             Route("/api/expressions/play", self.api_expression_play, methods=["POST"]),
             Route("/api/expressions/stop", self.api_expression_stop, methods=["POST"]),
             Route("/api/device/expression-capabilities", self.api_expression_capabilities, methods=["GET"]),
+            Route("/api/clock", self.api_clock, methods=["GET"]),
+            Route("/api/clock/show", self.api_clock_show, methods=["POST"]),
+            Route("/api/clock/stop", self.api_clock_stop, methods=["POST"]),
             Route("/api/camera/snap", self.api_camera_snap),
             Route("/api/sensor/context", self.api_sensor_context),
             Route("/api/agent/ask", self.api_agent_ask, methods=["POST"]),
@@ -322,8 +326,9 @@ class WebGateway:
             app.state.lampgo_server = self.server
             self._status_task = asyncio.create_task(self._status_loop())
             self._pet_pose_task = asyncio.create_task(self._pet_pose_loop())
+            self._clock_task = asyncio.create_task(self._clock_loop())
             yield
-            for task in (self._status_task, self._pet_pose_task):
+            for task in (self._status_task, self._pet_pose_task, self._clock_task):
                 if not task:
                     continue
                 task.cancel()
@@ -359,6 +364,15 @@ class WebGateway:
                 await self.bridge.broadcast_status(status.get("result", {}))
             except Exception:
                 logger.exception("web.status_loop_error")
+
+    async def _clock_loop(self) -> None:
+        """Refresh an enabled LED clock once per backend minute."""
+        while True:
+            try:
+                await asyncio.to_thread(self.server.clock.refresh)
+            except Exception:
+                logger.exception("web.clock_refresh_failed")
+            await asyncio.sleep(1.0)
 
     async def _pet_pose_loop(self) -> None:
         """Broadcast joint poses at animation-friendly cadence for the Web pet."""
@@ -1074,6 +1088,7 @@ class WebGateway:
     async def _play_resolved_expression(self, composition: dict[str, Any]) -> tuple[int, Any]:
         if not self.server.esp32:
             return 503, {"ok": False, "error": "no_device"}
+        self.server.clock.deactivate()
         effect = composition.get("led_effect") or {}
         if effect.get("kind") == "pixel_clip" and composition.get("led_effect_id"):
             sync_status, sync_body, _ = await self._sync_led_effect_to_device(
@@ -1113,11 +1128,36 @@ class WebGateway:
         )
 
     async def api_expression_stop(self, request: Request) -> JSONResponse:
+        self.server.clock.deactivate()
         if not self.server.esp32:
             return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
         payload = self.server.esp32.with_owner_auth({}, reason="expression_stop")
         status, body, _ = await self.server.esp32.proxy_post("/device/expressions/stop", payload)
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_clock(self, request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "result": self.server.clock.snapshot()})
+
+    async def api_clock_show(self, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "body must be object"}, status_code=400)
+        result = await asyncio.to_thread(
+            self.server.clock.show,
+            color=body.get("color"),
+            brightness=body.get("brightness"),
+            effect=body.get("effect"),
+        )
+        status = 200 if result.get("ok") else 503
+        return JSONResponse({"ok": bool(result.get("ok")), "result": result}, status_code=status)
+
+    async def api_clock_stop(self, request: Request) -> JSONResponse:
+        result = await asyncio.to_thread(self.server.clock.stop)
+        status = 200 if result.get("ok") else 503
+        return JSONResponse({"ok": bool(result.get("ok")), "result": result}, status_code=status)
 
     async def api_expression_capabilities(self, request: Request) -> JSONResponse:
         local = expression_capabilities()
@@ -2575,6 +2615,9 @@ class WebGateway:
                         "brightness": device_body.get("led_brightness"),
                         "last_command": device_body.get("led_last_command"),
                         "last_write_ms": device_body.get("led_last_write_ms"),
+                        "clock_active": bool(device_body.get("led_clock_active")),
+                        "clock_effect": device_body.get("led_clock_effect"),
+                        "clock_time": device_body.get("led_clock_time"),
                         "driver": device_body.get("led_driver"),
                         "pixel_pin": device_body.get("led_pixel_pin"),
                         "pixel_count": device_body.get("led_pixel_count"),
@@ -2686,6 +2729,8 @@ class WebGateway:
                 return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
             status, body = await self._play_resolved_expression(composition)
             return JSONResponse(self._with_expression_catalog(body), status_code=status)
+        if any(key in patch for key in ("mode", "expression", "name", "clip_id")):
+            self.server.clock.deactivate()
         if self.server.esp32 and hasattr(self.server.esp32, "with_owner_auth"):
             patch = self.server.esp32.with_owner_auth(patch, reason="led")
         status, body, _ = await self.server.esp32.proxy_post("/device/led", patch)

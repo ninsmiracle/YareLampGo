@@ -50,6 +50,7 @@ class SkillContext:
     led: LEDController
     events: EventBus
     state: JointState
+    clock: Any | None = None
 
     async def play_frames(
         self,
