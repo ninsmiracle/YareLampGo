@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -71,7 +72,9 @@ from lampgo.recordings import (
     list_recording_catalog,
     normalize_recording_name,
     recording_description_path,
+    recording_override_path,
     write_recording_description,
+    write_recording_metadata_path,
 )
 from lampgo.web.ws_bridge import WsBridge
 
@@ -762,24 +765,61 @@ class WebGateway:
         )
 
     async def api_recordings_update(self, request: Request) -> JSONResponse:
-        """POST /api/recordings/update — edit metadata for a user-created recording."""
+        """POST /api/recordings/update — edit a recording's local metadata."""
         body = await request.json()
         name = normalize_recording_name(body.get("name", ""))
         description = str(body.get("description", "") or body.get("prompt", "")).strip()
         expression = str(body.get("expression", "")).strip()
         expression_preset = str(body.get("expression_preset", "") or body.get("preset_id", "")).strip()
+        has_custom_expression = "eye_clip_id" in body or "led_effect_id" in body
         if not name:
             return JSONResponse({"ok": False, "error": RECORDING_NAME_ERROR}, status_code=400)
 
         recordings_dir = Path(self.server.config.recordings_dir)
         user_dir = recordings_dir / "user"
-        csv_path = user_dir / f"{name}.csv"
-        if not csv_path.exists():
-            if (recordings_dir / f"{name}.csv").exists():
-                return JSONResponse({"ok": False, "error": "built-in recording cannot be edited"}, status_code=400)
-            return JSONResponse({"ok": False, "error": "user recording not found"}, status_code=404)
+        user_csv_path = user_dir / f"{name}.csv"
+        builtin_csv_path = recordings_dir / f"{name}.csv"
+        if user_csv_path.exists():
+            csv_path = user_csv_path
+            metadata_path = recording_description_path(csv_path)
+            source = "user"
+        elif builtin_csv_path.exists():
+            csv_path = builtin_csv_path
+            metadata_path = recording_override_path(recordings_dir, name)
+            source = "builtin"
+        else:
+            return JSONResponse({"ok": False, "error": "recording not found"}, status_code=404)
 
-        write_recording_description(csv_path, description, expression, expression_preset)
+        if has_custom_expression:
+            eye_clip_id = str(body.get("eye_clip_id") or "").strip().lower() or None
+            led_effect_id = str(body.get("led_effect_id") or "").strip().lower() or None
+            if not eye_clip_id and not led_effect_id:
+                return JSONResponse(
+                    {"ok": False, "error": "custom expression requires an eye or LED effect"},
+                    status_code=400,
+                )
+            preset_id = f"motion_{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}"
+            try:
+                preset = save_expression_preset(
+                    {
+                        "preset_id": preset_id,
+                        "label": f"动作：{name}",
+                        "description": "录制动作专用组合",
+                        "eye_clip_id": eye_clip_id,
+                        "led_effect_id": led_effect_id,
+                        "playback": "loop",
+                        "duration_ms": 3000,
+                    }
+                )
+            except (ExpressionLibraryError, ValueError, TypeError) as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            expression_preset = str(preset["preset_id"])
+            expression = ""
+
+        if source == "builtin":
+            write_recording_metadata_path(metadata_path, description, expression, expression_preset)
+        else:
+            write_recording_description(csv_path, description, expression, expression_preset)
         self.server._refresh_llm_skill_tools()
         return JSONResponse(
             {
@@ -788,6 +828,7 @@ class WebGateway:
                     "status": "updated",
                     "name": name,
                     "path": str(csv_path),
+                    "source": source,
                     "description": description or None,
                     "expression": expression or None,
                     "expression_preset": expression_preset or None,
@@ -1096,10 +1137,14 @@ class WebGateway:
             )
             if sync_status >= 400 or (isinstance(sync_body, dict) and sync_body.get("ok") is False):
                 return sync_status, sync_body
+        brightness_ceiling = int(self.server.config.device_esp32.led_brightness)
+        led_params = dict(composition.get("led_params") or {})
+        requested_brightness = led_params.get("brightness", brightness_ceiling)
+        led_params["brightness"] = min(int(requested_brightness), brightness_ceiling)
         payload: dict[str, Any] = {
             "eye_clip_id": composition.get("eye_storage_clip_id"),
             "led_effect_id": composition.get("led_effect_id"),
-            "led_params": composition.get("led_params") or {},
+            "led_params": led_params,
             "playback": composition.get("playback") or "loop",
             "duration_ms": int(composition.get("duration_ms") or 3000),
         }
@@ -1783,6 +1828,7 @@ class WebGateway:
             "device_esp32.jpeg_quality",
             "device_esp32.framesize",
             "device_esp32.mic_enabled",
+            "device_esp32.led_brightness",
             "device_esp32.http_timeout_s",
         ),
     }
@@ -1932,6 +1978,11 @@ class WebGateway:
                 self._derive_voice_mode_fields(flat)
             if section == "safety":
                 self._validate_safety_fields(flat)
+            if "device_esp32.led_brightness" in flat:
+                level = int(flat["device_esp32.led_brightness"])
+                if not 1 <= level <= 96:
+                    raise ValueError("device_esp32.led_brightness must be 1-96")
+                flat["device_esp32.led_brightness"] = level
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"invalid value: {exc}"}, status_code=400)
 
@@ -2056,7 +2107,22 @@ class WebGateway:
                 self.server.esp32.reset_session()
         except Exception:
             logger.exception("web.device_esp32_toggle_failed")
-        return response
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except Exception:
+            return response
+        saved = set((payload.get("result") or {}).get("saved") or [])
+        if "device_esp32.led_brightness" in saved and self.server.esp32:
+            level = int(self.server.config.device_esp32.led_brightness)
+            status, body, _ = await self.server.esp32.proxy_post(
+                "/device/led",
+                self.server.esp32.with_owner_auth({"brightness": level}, reason="led_brightness_config"),
+            )
+            payload.setdefault("result", {})["led_brightness_sync"] = {
+                "ok": 200 <= status < 300 and not (isinstance(body, dict) and body.get("ok") is False),
+                "level": level,
+            }
+        return JSONResponse(payload, status_code=response.status_code)
 
     async def api_config_detect(self, request: Request) -> JSONResponse:
         """Run hardware autodetect on demand (used by the 硬件 tab button)."""
@@ -2729,6 +2795,14 @@ class WebGateway:
                 return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
             status, body = await self._play_resolved_expression(composition)
             return JSONResponse(self._with_expression_catalog(body), status_code=status)
+        brightness_ceiling = int(self.server.config.device_esp32.led_brightness)
+        if "brightness" in patch:
+            try:
+                patch["brightness"] = min(int(patch["brightness"]), brightness_ceiling)
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "error": "brightness must be an integer"}, status_code=400)
+        else:
+            patch["brightness"] = brightness_ceiling
         if any(key in patch for key in ("mode", "expression", "name", "clip_id")):
             self.server.clock.deactivate()
         if self.server.esp32 and hasattr(self.server.esp32, "with_owner_auth"):

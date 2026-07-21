@@ -131,6 +131,11 @@
             <input id="esp32-volume-slider" class="volume-slider" type="range" min="0" max="100" value="70" step="1" />
             <span id="esp32-volume-value" class="volume-value">70%</span>
           </label>
+          <label id="esp32-led-brightness-control" class="volume-control" title="调节 S3 LED 灯板亮度（安全上限 96）">
+            <span class="volume-label">灯板</span>
+            <input id="esp32-led-brightness-slider" class="volume-slider" type="range" min="1" max="96" value="32" step="1" />
+            <span id="esp32-led-brightness-value" class="volume-value">32</span>
+          </label>
         </div>
 
         <div class="topbar-right">
@@ -427,6 +432,10 @@
                       <button id="btn-led-mirror-frame" type="button" title="左右镜像">镜像</button>
                       <button id="btn-led-clear-frame" type="button" title="清空当前帧">清空</button>
                     </div>
+                    <div class="led-editor-bulk-row" role="group" aria-label="批量帧操作">
+                      <button id="btn-led-copy-frame-to-all" type="button" title="用当前帧覆盖全部 30 帧">当前帧复制到全部</button>
+                      <button id="btn-led-clear-all-frames" class="is-danger" type="button" title="清空全部 30 帧">清空全部帧</button>
+                    </div>
                     <div class="led-editor-command-row">
                       <button id="btn-led-editor-preview" class="ghost-button" type="button">播放预览</button>
                       <button id="btn-led-editor-save" class="ghost-button" type="button">仅保存</button>
@@ -476,6 +485,7 @@
               </div>
               <div id="expression-preset-grid" class="expression-resource-list"></div>
             </div>
+
           </div>
         </div>
       </section>
@@ -1295,11 +1305,29 @@
         maxlength="500"
         placeholder="例如：开心打招呼、看见用户靠近时挥动灯头，适合回应问候或活跃气氛。"
       ></textarea>
-      <label class="record-dialog-field">
+      <div class="record-dialog-field">
+        <span class="record-dialog-label">配套表情</span>
+        <div class="record-expression-mode" role="group" aria-label="配套表情来源">
+          <button type="button" class="is-active" data-record-edit-expression-mode="preset">已有组合</button>
+          <button type="button" data-record-edit-expression-mode="custom">自定义组合</button>
+        </div>
+      </div>
+      <label id="record-edit-preset-field" class="record-dialog-field">
         <span class="record-dialog-label">绑定组合表情（眼睛 + LED）</span>
         <select id="record-edit-expression-select" class="record-dialog-input record-dialog-select"></select>
         <span class="record-dialog-hint">组合表情会在整个动作期间循环播放；“仅 LED 灯板”分组不会改变当前眼睛画面。</span>
       </label>
+      <div id="record-edit-custom-fields" class="record-expression-custom hidden">
+        <label class="record-dialog-field">
+          <span class="record-dialog-label">眼睛动画</span>
+          <select id="record-edit-eye-select" class="record-dialog-input record-dialog-select"></select>
+        </label>
+        <label class="record-dialog-field">
+          <span class="record-dialog-label">LED 效果</span>
+          <select id="record-edit-led-select" class="record-dialog-input record-dialog-select"></select>
+        </label>
+        <span class="record-dialog-hint">保存后会为这个动作维护一个专用组合；动作播放期间会循环它，不复制眼睛或 LED 资源。</span>
+      </div>
       <div id="record-edit-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
         <button id="btn-record-edit-cancel" class="ghost-button" type="button">取消</button>

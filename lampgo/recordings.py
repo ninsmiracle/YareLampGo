@@ -3,7 +3,8 @@
 Recorded motions are data, not code: a ``.csv`` file means the action exists,
 and an optional sibling ``.txt`` file describes when the LLM should use it.
 User recordings live in ``user/`` and shadow built-in recordings of the same
-name.
+name. Users can also keep local metadata overrides for built-in recordings
+without changing the shipped motion CSV files.
 """
 
 from __future__ import annotations
@@ -115,6 +116,11 @@ def recording_description_path(csv_path: Path) -> Path:
     return csv_path.with_suffix(".txt")
 
 
+def recording_override_path(recordings_dir: Path, name: str) -> Path:
+    """Return the user-owned metadata sidecar for a built-in recording."""
+    return recordings_dir / "user" / "overrides" / f"{name}.txt"
+
+
 def parse_recording_metadata(text: str) -> dict[str, str]:
     """Parse optional recording sidecar metadata, preserving old plain text files."""
     description_parts: list[str] = []
@@ -143,8 +149,7 @@ def parse_recording_metadata(text: str) -> dict[str, str]:
     }
 
 
-def read_recording_metadata(csv_path: Path) -> dict[str, str]:
-    path = recording_description_path(csv_path)
+def read_recording_metadata_path(path: Path) -> dict[str, str]:
     if not path.exists():
         return {"description": "", "expression": "", "expression_preset": ""}
     try:
@@ -153,12 +158,16 @@ def read_recording_metadata(csv_path: Path) -> dict[str, str]:
         return {"description": "", "expression": "", "expression_preset": ""}
 
 
+def read_recording_metadata(csv_path: Path) -> dict[str, str]:
+    return read_recording_metadata_path(recording_description_path(csv_path))
+
+
 def read_recording_description(csv_path: Path) -> str:
     return read_recording_metadata(csv_path)["description"]
 
 
-def write_recording_description(
-    csv_path: Path,
+def write_recording_metadata_path(
+    path: Path,
     description: str,
     expression: str = "",
     expression_preset: str = "",
@@ -166,7 +175,6 @@ def write_recording_description(
     text = normalize_recording_description(description)
     expression = _normalize_expression(expression)
     expression_preset = _normalize_expression_preset(expression_preset)
-    path = recording_description_path(csv_path)
     lines = []
     if expression_preset:
         lines.append(f"expression_preset={expression_preset}")
@@ -175,9 +183,24 @@ def write_recording_description(
     if text:
         lines.append(f"prompt={text}")
     if lines:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     elif path.exists():
         path.unlink()
+
+
+def write_recording_description(
+    csv_path: Path,
+    description: str,
+    expression: str = "",
+    expression_preset: str = "",
+) -> None:
+    write_recording_metadata_path(
+        recording_description_path(csv_path),
+        description,
+        expression,
+        expression_preset,
+    )
 
 
 def _stable_name_index(name: str) -> int:
@@ -217,7 +240,12 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
         return []
     entries: dict[str, dict[str, str]] = {}
     for csv_path in recordings_dir.glob("*.csv"):
-        metadata = read_recording_metadata(csv_path)
+        override_path = recording_override_path(recordings_dir, csv_path.stem)
+        metadata = (
+            read_recording_metadata_path(override_path)
+            if override_path.exists()
+            else read_recording_metadata(csv_path)
+        )
         entries[csv_path.stem] = {
             "name": csv_path.stem,
             "source": "builtin",

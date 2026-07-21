@@ -2654,7 +2654,8 @@ button.device-chip.is-active {
 
 .led-editor-head,
 .led-editor-command-row,
-.led-editor-tool-row {
+.led-editor-tool-row,
+.led-editor-bulk-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2768,6 +2769,18 @@ button.device-chip.is-active {
   border-color: #176d68;
   background: #e3f3f0;
   color: #125b57;
+}
+.led-editor-bulk-row button {
+  flex: 1 1 82px;
+  min-height: 30px;
+  border: 1px solid #ccd3d8;
+  border-radius: 5px;
+  background: #fff;
+  color: #4f5b63;
+}
+.led-editor-bulk-row button.is-danger {
+  border-color: #d9918d;
+  color: #a4514d;
 }
 .led-editor-command-row { align-items: stretch; }
 .led-editor-command-row button { flex: 1 1 80px; }
@@ -2939,6 +2952,7 @@ button.device-chip.is-active {
 
 @media (max-width: 860px) {
   .expression-composer { grid-template-columns: 1fr; }
+  .clock-workspace { grid-template-columns: 1fr; }
   .expression-toolbar input[type="file"] { width: 100%; }
   .expression-resource-list { grid-template-columns: 1fr; }
   .led-editor-workspace { grid-template-columns: 1fr; }
@@ -2963,6 +2977,7 @@ button.device-chip.is-active {
     width: 100%;
     min-width: 0;
   }
+  .record-expression-custom { grid-template-columns: 1fr; }
   .led-editor-status { margin-left: 0; }
 }
 
@@ -2976,8 +2991,12 @@ button.device-chip.is-active {
   background: linear-gradient(180deg, #fbf9ff 0%, #ffffff 40%);
 }
 
+.skill-card--recording,
 .skill-card--recording-user {
   position: relative;
+}
+
+.skill-card--recording-user {
   border-left: 3px solid #e5a15b;
 }
 
@@ -3003,6 +3022,10 @@ button.device-chip.is-active {
 
 .skill-card-action--edit {
   right: 32px;
+}
+
+.skill-card--recording:not(.skill-card--recording-user) .skill-card-action--edit {
+  right: 6px;
 }
 
 .skill-card-action:hover {
@@ -3725,6 +3748,38 @@ button.device-chip.is-active {
 
 .record-dialog-select {
   width: 100%;
+}
+
+.record-expression-mode {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.record-expression-mode button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-soft);
+}
+
+.record-expression-mode button:last-child {
+  border-right: 0;
+}
+
+.record-expression-mode button.is-active {
+  background: #e4f3f1;
+  color: #155f59;
+}
+
+.record-expression-custom {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .record-dialog-textarea {

@@ -407,6 +407,12 @@ class DeviceEsp32Config(BaseModel):
         default=False,
         description="Enable ESP32 PDM microphone stream (still falls back to sounddevice when offline).",
     )
+    led_brightness: int = Field(
+        default=32,
+        ge=1,
+        le=96,
+        description="Global S3 LED brightness ceiling. Expression brightness may be lower but never higher.",
+    )
     http_timeout_s: float = Field(
         default=5.0,
         gt=0,
