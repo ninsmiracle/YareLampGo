@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -182,6 +183,13 @@ def _format_command(command: Sequence[str]) -> str:
     return shlex.join(command)
 
 
+def _console_safe(message: str, encoding: str | None = None) -> str:
+    """Render text without failing on legacy Windows console encodings."""
+
+    target_encoding = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    return message.encode(target_encoding, errors="backslashreplace").decode(target_encoding)
+
+
 class Installer:
     def __init__(self, project_root: Path, log_path: Path) -> None:
         self.project_root = project_root
@@ -195,7 +203,7 @@ class Installer:
 
     def emit(self, message: str = "") -> None:
         safe = redact(message.rstrip("\n"))
-        print(safe, flush=True)
+        print(_console_safe(safe), flush=True)
         self._log.write(safe + "\n")
 
     def run(self, command: Sequence[str], *, stage: str) -> None:
