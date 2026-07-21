@@ -124,9 +124,7 @@ class SafetyKernel:
                     value = prev + direction * self._config.max_velocity * dt
                     value = max(limits.min, min(limits.max, value))
                     clamped_velocity = abs(value - prev) / dt
-                    retained_ratio = (
-                        clamped_velocity / raw_velocity if raw_velocity > 1e-9 else 1.0
-                    )
+                    retained_ratio = clamped_velocity / raw_velocity if raw_velocity > 1e-9 else 1.0
                     clip_ratio = 1.0 - retained_ratio
                     if clip_events is not None:
                         clip_events.append(
@@ -148,6 +146,96 @@ class SafetyKernel:
                         retained_ratio=retained_ratio,
                         clip_ratio=clip_ratio,
                     )
+
+            safe[joint] = value
+
+        return safe
+
+    def validate_recovery_frame(
+        self,
+        current: JointState,
+        next_frame: dict[str, float],
+        target: dict[str, float],
+        dt: float,
+        max_velocity: float | None = None,
+        command_reference: dict[str, float] | None = None,
+        max_command_lead: float | None = None,
+        clip_events: list[dict[str, float | str]] | None = None,
+    ) -> dict[str, float]:
+        """Validate a prechecked one-way escape from a calibrated edge.
+
+        A naturally resting joint can be outside both the normal software limits
+        and the user-recorded calibration range while still inside a guarded,
+        non-wrapping subset of its verified single-turn encoder range. HAL
+        validates that raw envelope before torque is enabled. During recovery
+        this gate only permits monotonic movement toward a target that is itself
+        inside the normal software limits. Runtime recovery may advance from the
+        previous command rather than raw feedback so it can overcome servo
+        deadband, but the lead over measured feedback stays explicitly bounded.
+        """
+        if self._estopped:
+            return dict(current.positions)
+
+        safe: dict[str, float] = {}
+        for joint, requested in next_frame.items():
+            limits = self._config.joint_limits.get(joint)
+            goal = target.get(joint)
+            actual = current.get(joint, requested)
+            prev = float(command_reference.get(joint, actual)) if command_reference is not None else actual
+            if limits is None or goal is None or not limits.min <= goal <= limits.max:
+                safe[joint] = actual
+                continue
+
+            # If feedback has already advanced past the previous command, adopt
+            # it as the new command reference so we never pull back against the
+            # intended recovery direction.
+            if goal > actual and prev < actual:
+                prev = actual
+            elif goal < actual and prev > actual:
+                prev = actual
+
+            # Never command past the final target or back toward the physical
+            # edge. Velocity is measured from the previous command so a small,
+            # bounded position error can accumulate across ticks instead of
+            # remaining forever inside the servo's deadband.
+            lower = min(prev, goal)
+            upper = max(prev, goal)
+            value = max(lower, min(upper, requested))
+
+            if dt > 0:
+                velocity_limit = min(
+                    self._config.max_velocity,
+                    max_velocity if max_velocity is not None else self._config.max_velocity,
+                )
+                raw_velocity = abs(value - prev) / dt
+                if raw_velocity > velocity_limit:
+                    direction = 1.0 if value > prev else -1.0
+                    unclamped = value
+                    value = prev + direction * velocity_limit * dt
+                    value = max(lower, min(upper, value))
+                    if clip_events is not None:
+                        allowed_velocity = abs(value - prev) / dt
+                        retained_ratio = allowed_velocity / raw_velocity if raw_velocity > 1e-9 else 1.0
+                        clip_events.append(
+                            {
+                                "joint": joint,
+                                "requested_velocity": raw_velocity,
+                                "allowed_velocity": allowed_velocity,
+                                "retained_ratio": retained_ratio,
+                                "clip_ratio": 1.0 - retained_ratio,
+                                "requested_value": unclamped,
+                                "clamped_value": value,
+                            }
+                        )
+
+            if max_command_lead is not None:
+                lead = max(0.0, float(max_command_lead))
+                if goal > actual:
+                    value = max(actual, min(value, min(goal, actual + lead)))
+                elif goal < actual:
+                    value = min(actual, max(value, max(goal, actual - lead)))
+                else:
+                    value = goal
 
             safe[joint] = value
 

@@ -10,7 +10,9 @@ GPL-3.0. Low-level Feetech transport is provided by lerobot.
 
 from __future__ import annotations
 
+import math
 import time
+from enum import StrEnum
 from pprint import pformat
 from typing import Any
 
@@ -31,6 +33,16 @@ except ImportError:
     logger.warning("lerobot not installed — HAL will use stub mode")
 
 
+class MotorStartupState(StrEnum):
+    """Torque/startup disposition for the physical motor bus."""
+
+    DISCONNECTED = "disconnected"
+    READY = "ready"
+    RECOVERY_REQUIRED = "recovery_required"
+    RECOVERING = "recovering"
+    HARD_FAULT = "hard_fault"
+
+
 class HardwareAbstraction:
     """Thin wrapper around the Feetech motor bus.
 
@@ -47,12 +59,32 @@ class HardwareAbstraction:
     _NEUTRAL_CONFIRM_TOLERANCE_COUNTS = 128
     _STS3215_MULTI_TURN_PHASE_BIT = 0x10
     _CALIBRATION_SCHEMA_VERSION = 2
+    _RECOVERY_STABLE_SAMPLE_COUNT = 5
+    _RECOVERY_STABLE_SAMPLE_INTERVAL_S = 0.02
+    _RECOVERY_STABLE_SPREAD_COUNTS = 8
+    _RECOVERY_MAX_FRAME_STEP_COUNTS = 8
+    # Recovery must be strong enough to lift the arm under gravity.  These are
+    # still well below the normal acceleration profile, but no longer limit an
+    # STS3215 to the near-stall crawl used by the first recovery prototype.
+    _RECOVERY_ACCELERATION_RAW = 5
+    _RECOVERY_SPEED_RAW = 8
+    _NORMAL_ACCELERATION_RAW = 50
+    # Calibration limits describe the normal user-recorded operating range,
+    # not every pose a torque-free linkage can reach under gravity. Permit a
+    # one-way recovery from at most one quarter-turn beyond that range while
+    # staying clear of the absolute encoder wrap boundary.
+    _RECOVERY_MAX_OUTSIDE_RANGE_RATIO = 0.25
+    _RECOVERY_ENCODER_WRAP_GUARD_RATIO = 1 / 64
 
     def __init__(self, config: DeviceConfig) -> None:
         self._config = config
         self._bus: Any | None = None
         self._connected = False
         self._status_error_motors: set[str] = set()
+        self._startup_state = MotorStartupState.DISCONNECTED
+        self._recovery_reason: str | None = None
+        self._recovery_expanded_limit_motors: set[str] = set()
+        self._recovery_profile_motors: set[str] = set()
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -65,13 +97,11 @@ class HardwareAbstraction:
         if not LEROBOT_AVAILABLE:
             logger.info("hal.connect: stub mode (no lerobot)")
             self._connected = True
+            self._startup_state = MotorStartupState.READY
             return
 
         norm_mode = MotorNormMode.DEGREES if self._config.use_degrees else MotorNormMode.RANGE_M100_100
-        motors = {
-            name: Motor(mc.id, mc.model, norm_mode)
-            for name, mc in self._config.motors.items()
-        }
+        motors = {name: Motor(mc.id, mc.model, norm_mode) for name, mc in self._config.motors.items()}
         calibration = self._load_calibration()
 
         self._bus = FeetechMotorsBus(
@@ -94,8 +124,11 @@ class HardwareAbstraction:
                 self.calibrate()
 
             if configure:
-                self._configure()
+                self._startup_state = self._configure()
+            else:
+                self._startup_state = MotorStartupState.READY
         except Exception:
+            self._startup_state = MotorStartupState.HARD_FAULT
             try:
                 self._bus.disconnect(disable_torque=True)
             except Exception:
@@ -103,13 +136,21 @@ class HardwareAbstraction:
             self._bus = None
             raise
         self._connected = True
-        logger.info("hal.connected", port=self._config.motor_port)
+        logger.info(
+            "hal.connected",
+            port=self._config.motor_port,
+            startup_state=self._startup_state.value,
+        )
 
     def disconnect(self) -> None:
         if not self._connected:
             return
         if self._bus is not None:
             try:
+                if self._recovery_expanded_limit_motors or self._recovery_profile_motors:
+                    self._release_torque_for_manual_motion(strict=False)
+                    self._restore_normal_motion_profile(strict=False)
+                    self._restore_calibrated_hardware_limits(strict=False)
                 self._bus.disconnect(self._config.disable_torque_on_disconnect)
             except Exception:
                 logger.exception("hal.disconnect_error")
@@ -120,11 +161,33 @@ class HardwareAbstraction:
         self._connected = False
         self._status_error_motors.clear()
         self._bus = None
+        self._startup_state = MotorStartupState.DISCONNECTED
+        self._recovery_reason = None
+        self._recovery_expanded_limit_motors.clear()
+        self._recovery_profile_motors.clear()
         logger.info("hal.disconnected")
 
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def startup_state(self) -> MotorStartupState:
+        return self._startup_state
+
+    @property
+    def recovery_required(self) -> bool:
+        return self._startup_state is MotorStartupState.RECOVERY_REQUIRED
+
+    @property
+    def recovery_reason(self) -> str | None:
+        return self._recovery_reason
+
+    @property
+    def motor_names(self) -> list[str]:
+        if self._bus is not None:
+            return list(self._bus.motors)
+        return list(self._config.motors)
 
     # ------------------------------------------------------------------
     # Read / Write
@@ -154,6 +217,19 @@ class HardwareAbstraction:
 
         self._bus.sync_write("Goal_Position", positions)
 
+    def write_recovery_positions(self, positions: dict[str, float]) -> None:
+        """Write one prevalidated recovery command with the guarded STS profile."""
+        if not self._connected:
+            raise RuntimeError("HAL not connected")
+        if self._bus is None:
+            return
+        if self._startup_state is not MotorStartupState.RECOVERING:
+            raise RuntimeError(f"Recovery write is unavailable in startup state '{self._startup_state.value}'.")
+        # The recovery profile is configured and read back before torque-on.
+        # Position-only writes preserve Goal_Time=0 and the explicit low
+        # Goal_Velocity used by Feetech's STS position command protocol.
+        self._bus.sync_write("Goal_Position", positions)
+
     # Set to True after the first successful Goal_Position+Goal_Time sync write.
     _goal_time_confirmed: bool = False
 
@@ -174,8 +250,8 @@ class HardwareAbstraction:
 
         sw = self._bus.sync_writer
         sw.clearParam()
-        sw.start_address = 42   # Goal_Position register address
-        sw.data_length = 4      # 2 B position + 2 B time (consecutive registers)
+        sw.start_address = 42  # Goal_Position register address
+        sw.data_length = 4  # 2 B position + 2 B time (consecutive registers)
 
         for id_, raw in raw_pos.items():
             pos_bytes: list[int] = self._bus._serialize_data(raw, 2)
@@ -204,6 +280,8 @@ class HardwareAbstraction:
             return DeviceHealth.DISCONNECTED
         if self._bus is None:
             return DeviceHealth.DEGRADED
+        if self._startup_state is not MotorStartupState.READY:
+            return DeviceHealth.DEGRADED
         return DeviceHealth.OK
 
     def disable_torque(self) -> None:
@@ -230,10 +308,14 @@ class HardwareAbstraction:
         # Re-run the complete fail-closed startup sequence. Recording can leave
         # an arm at a range edge, and blindly restoring torque there is unsafe.
         try:
-            self._configure()
+            state = self._configure()
         except Exception:
             self._release_torque_for_manual_motion(strict=False)
             raise
+        if state is MotorStartupState.RECOVERY_REQUIRED:
+            self._startup_state = state
+            raise RuntimeError(self._recovery_reason or "Motor recovery is required before enabling torque.")
+        self._startup_state = state
         logger.info("hal.torque_enabled")
 
     def get_calibration_home(self) -> dict[str, float] | None:
@@ -275,8 +357,7 @@ class HardwareAbstraction:
         existing = self._load_calibration()
         if existing:
             choice = input(
-                f"Press ENTER to use existing calibration for '{self._config.lamp_id}', "
-                "or type 'c' to re-calibrate: "
+                f"Press ENTER to use existing calibration for '{self._config.lamp_id}', or type 'c' to re-calibrate: "
             )
             if choice.strip().lower() != "c":
                 if changed_mode:
@@ -304,7 +385,9 @@ class HardwareAbstraction:
             if actual != expected:
                 logger.warning(
                     "calibration.homing_offset_mismatch",
-                    motor=motor_name, expected=expected, actual=actual,
+                    motor=motor_name,
+                    expected=expected,
+                    actual=actual,
                 )
                 self._bus.write("Homing_Offset", motor_name, expected, num_retry=3)
                 verify = self._bus.read("Homing_Offset", motor_name, normalize=False)
@@ -400,9 +483,9 @@ class HardwareAbstraction:
         error_lines.append(pformat(found_models, indent=4, sort_dicts=False))
         raise RuntimeError("\n".join(error_lines))
 
-    def _configure(self) -> None:
+    def _configure(self) -> MotorStartupState:
         if self._bus is None:
-            return
+            return MotorStartupState.READY
 
         healthy_motors = [m for m in self._bus.motors if m not in self._status_error_motors]
         if len(healthy_motors) != len(self._bus.motors):
@@ -412,7 +495,7 @@ class HardwareAbstraction:
             )
         if not healthy_motors:
             logger.warning("hal.configure_skipped_all_motors")
-            return
+            return MotorStartupState.READY
 
         self._release_torque_for_manual_motion(strict=True)
 
@@ -437,19 +520,35 @@ class HardwareAbstraction:
             # does not block the whole arm from starting up.
             self._safe_bus_write("Return_Delay_Time", motor, 0)
             if getattr(self._bus, "protocol_version", None) == 0:
-                self._safe_bus_write("Maximum_Acceleration", motor, 50)
-            self._safe_bus_write("Acceleration", motor, 50)
+                self._safe_bus_write("Maximum_Acceleration", motor, self._NORMAL_ACCELERATION_RAW)
+            self._safe_bus_write("Acceleration", motor, self._NORMAL_ACCELERATION_RAW)
             self._write_register_or_raise("Operating_Mode", motor, OperatingMode.POSITION.value)
             self._safe_bus_write("P_Coefficient", motor, 16)
             self._safe_bus_write("I_Coefficient", motor, 0)
             self._safe_bus_write("D_Coefficient", motor, 32)
             self._write_register_or_raise("Torque_Limit", motor, torque_limit_raw, normalize=False)
+            # Clear stale SRAM motion fields left by an interrupted process
+            # before any goal is seeded or torque can be enabled.
+            self._write_register_or_raise("Goal_Time", motor, 0, normalize=False)
+            self._write_register_or_raise("Goal_Velocity", motor, 0, normalize=False)
         logger.info("hal.torque_limit_set", pct=self._config.max_torque_pct, raw=torque_limit_raw)
 
-        self._seed_goal_positions_to_present(healthy_motors)
+        recovery_required = self._seed_goal_positions_to_present(
+            healthy_motors,
+            allow_recovery=True,
+        )
+        if recovery_required:
+            logger.warning(
+                "hal.recovery_required",
+                reason=self._recovery_reason,
+            )
+            return MotorStartupState.RECOVERY_REQUIRED
+
         for motor in healthy_motors:
             self._write_register_or_raise("Lock", motor, 1)
             self._write_register_or_raise("Torque_Enable", motor, 1)
+        self._recovery_reason = None
+        return MotorStartupState.READY
 
     def _safe_bus_write(
         self,
@@ -498,14 +597,10 @@ class HardwareAbstraction:
         try:
             actual = self._bus.read(data_name, motor, normalize=normalize)
         except Exception as exc:
-            raise RuntimeError(
-                f"Cannot read back {data_name} for '{motor}' after writing {value!r}."
-            ) from exc
+            raise RuntimeError(f"Cannot read back {data_name} for '{motor}' after writing {value!r}.") from exc
 
         if int(actual) != int(value):
-            raise RuntimeError(
-                f"Cannot verify {data_name} for '{motor}': expected {value}, got {actual}."
-            )
+            raise RuntimeError(f"Cannot verify {data_name} for '{motor}': expected {value}, got {actual}.")
 
     def _ensure_sts3215_single_turn(self, motors: list[str]) -> set[str]:
         """Force STS3215 angle feedback into single-turn mode and verify it."""
@@ -527,8 +622,7 @@ class HardwareAbstraction:
 
             if phase & self._STS3215_MULTI_TURN_PHASE_BIT:
                 raise RuntimeError(
-                    f"Motor '{motor}' is still in unsafe STS3215 multi-turn feedback mode. "
-                    "Torque will remain disabled."
+                    f"Motor '{motor}' is still in unsafe STS3215 multi-turn feedback mode. Torque will remain disabled."
                 )
 
         logger.info("hal.sts3215_single_turn_verified", motors=sorted(motors), changed=sorted(changed))
@@ -569,17 +663,13 @@ class HardwareAbstraction:
             margin = min(neutral - range_min, range_max - neutral)
 
             if not (0 <= range_min < range_max <= resolution_max):
-                errors.append(
-                    f"{motor}: range {range_min}..{range_max} is outside single-turn 0..{resolution_max}"
-                )
+                errors.append(f"{motor}: range {range_min}..{range_max} is outside single-turn 0..{resolution_max}")
                 continue
             if span < self._MIN_VALID_RANGE_COUNTS or span > self._MAX_VALID_RANGE_COUNTS:
                 errors.append(f"{motor}: unsafe range span {span}")
                 continue
             if margin < span * self._MIN_NEUTRAL_MARGIN_RATIO:
-                errors.append(
-                    f"{motor}: neutral {neutral} is too close to range edge {range_min}..{range_max}"
-                )
+                errors.append(f"{motor}: neutral {neutral} is too close to range edge {range_min}..{range_max}")
 
         if errors:
             raise RuntimeError(
@@ -601,9 +691,7 @@ class HardwareAbstraction:
             if abs(final - int(neutral)) > self._NEUTRAL_CONFIRM_TOLERANCE_COUNTS:
                 errors.append(f"{motor}: expected near {int(neutral)}, got {final}")
         if errors:
-            raise RuntimeError(
-                "Arm is not close to its recorded neutral pose:\n- " + "\n- ".join(errors)
-            )
+            raise RuntimeError("Arm is not close to its recorded neutral pose:\n- " + "\n- ".join(errors))
 
     def _wait_for_safe_neutral_pose(
         self,
@@ -643,10 +731,7 @@ class HardwareAbstraction:
                     detail=str(exc),
                     final_raw={motor: int(raw) for motor, raw in final_raw.items()},
                 )
-                print(
-                    f"Warning: {exc}\nThe pose is safely inside all calibrated limits, "
-                    "so calibration will be saved."
-                )
+                print(f"Warning: {exc}\nThe pose is safely inside all calibrated limits, so calibration will be saved.")
             return final_raw
 
     def _release_torque_for_manual_motion(self, *, strict: bool) -> None:
@@ -689,10 +774,7 @@ class HardwareAbstraction:
             logger.warning("hal.torque_release_verify_failed", motors=bad)
             if strict:
                 detail = ", ".join(f"{motor}={state}" for motor, state in bad.items())
-                raise RuntimeError(
-                    "Motor torque/lock registers did not release before manual motion: "
-                    f"{detail}"
-                )
+                raise RuntimeError(f"Motor torque/lock registers did not release before manual motion: {detail}")
 
     def _open_manual_calibration_range(self) -> None:
         """Clear stale hardware limits before asking the user to move joints by hand."""
@@ -732,14 +814,17 @@ class HardwareAbstraction:
             raise RuntimeError("Cannot apply calibration without a motor bus")
         self._bus.write_calibration(calibration)
         if not self._bus.is_calibrated:
-            raise RuntimeError(
-                "Motor calibration register verification failed. Torque will remain disabled."
-            )
+            raise RuntimeError("Motor calibration register verification failed. Torque will remain disabled.")
         logger.info("hal.calibration_applied", lamp_id=self._config.lamp_id)
 
-    def _seed_goal_positions_to_present(self, motors: list[str]) -> None:
+    def _seed_goal_positions_to_present(
+        self,
+        motors: list[str],
+        *,
+        allow_recovery: bool = False,
+    ) -> bool:
         if self._bus is None or not motors:
-            return
+            return False
 
         try:
             present_raw = self._bus.sync_read("Present_Position", motors, normalize=False)
@@ -765,7 +850,15 @@ class HardwareAbstraction:
                     "Torque will remain disabled."
                 )
 
-        self._validate_startup_positions(present_raw)
+        recovery_required = self._validate_startup_positions(
+            present_raw,
+            allow_recovery=allow_recovery,
+        )
+        if recovery_required:
+            # Do not even seed a goal in the recoverable startup state. The
+            # current position and the complete return-safe path are re-read and
+            # validated immediately before the explicit recovery action.
+            return True
 
         seeded: dict[str, int] = {}
         for motor, raw in present_raw.items():
@@ -775,25 +868,35 @@ class HardwareAbstraction:
 
         if seeded:
             logger.info("hal.goal_seeded_to_present", present_raw=seeded)
+        return False
 
     def _validate_startup_positions(
         self,
         present_raw: dict[str, float],
         *,
         calibration: dict[str, Any] | None = None,
-    ) -> None:
-        """Refuse to energize a joint outside or too close to a calibrated stop."""
+        allow_recovery: bool = False,
+    ) -> bool:
+        """Classify startup feedback without confusing calibration with trust.
+
+        Calibration limits remain the hard boundary for normal motion. A stable
+        torque-free pose may sit a bounded distance outside those limits under
+        gravity, however, so ``allow_recovery`` also accepts a guarded subset of
+        the verified single-turn encoder range. Such a pose never enables torque
+        during startup; only a prevalidated one-way ``return_safe`` may do so.
+        """
         if self._bus is None:
             raise RuntimeError("Cannot validate startup positions without a motor bus")
         active_calibration = calibration if calibration is not None else self._bus.calibration
         if not active_calibration:
-            return
+            return False
 
-        errors: list[str] = []
+        hard_errors: list[str] = []
+        recoverable_errors: list[str] = []
         for motor, raw in present_raw.items():
             cal = active_calibration.get(motor)
             if cal is None:
-                errors.append(f"{motor}: calibration is missing")
+                hard_errors.append(f"{motor}: calibration is missing")
                 continue
 
             raw_int = int(raw)
@@ -805,21 +908,445 @@ class HardwareAbstraction:
                 self._MIN_STARTUP_EDGE_MARGIN_COUNTS,
                 int(span * self._STARTUP_EDGE_MARGIN_RATIO),
             )
+            recovery_min, recovery_max = self._recovery_envelope_bounds(motor, cal)
             if raw_int < range_min or raw_int > range_max:
-                errors.append(
-                    f"{motor}: position {raw_int} is outside calibrated range {range_min}..{range_max}"
-                )
+                outside_detail = f"{motor}: position {raw_int} is outside calibrated range {range_min}..{range_max}"
+                if allow_recovery and recovery_min <= raw_int <= recovery_max:
+                    recoverable_errors.append(
+                        f"{outside_detail}, but remains inside guarded single-turn recovery "
+                        f"range {recovery_min}..{recovery_max}"
+                    )
+                else:
+                    hard_errors.append(f"{outside_detail} and trusted recovery range {recovery_min}..{recovery_max}")
             elif margin < required_margin:
-                errors.append(
+                recoverable_errors.append(
                     f"{motor}: position {raw_int} is only {margin} counts from calibrated limit "
                     f"{range_min}..{range_max} (need at least {required_margin})"
                 )
 
-        if errors:
+        if hard_errors:
+            raise RuntimeError(
+                "Unsafe startup pose; torque will remain disabled. Position feedback is outside the "
+                "trusted calibrated range:\n- " + "\n- ".join(hard_errors)
+            )
+
+        if recoverable_errors:
+            reason = (
+                "Recovery required: the torque-free arm is outside or near its calibrated operating range, "
+                "but its feedback remains inside the guarded single-turn recovery envelope. Torque remains "
+                "disabled; only a fully prevalidated return_safe trajectory may energize the motors:\n- "
+                + "\n- ".join(recoverable_errors)
+            )
+            if allow_recovery:
+                self._recovery_reason = reason
+                return True
             raise RuntimeError(
                 "Unsafe startup pose; torque will remain disabled. Support the structure, move each "
-                "reported joint away from its hard stop, then retry:\n- " + "\n- ".join(errors)
+                "reported joint away from its hard stop, then retry:\n- " + "\n- ".join(recoverable_errors)
             )
+
+        return False
+
+    def _recovery_envelope_bounds(self, motor: str, cal: Any) -> tuple[int, int]:
+        """Return a bounded non-wrapping raw envelope for torque-off recovery."""
+        if self._bus is None:
+            raise RuntimeError("Cannot calculate recovery bounds without a motor bus.")
+        motor_config = self._bus.motors[motor]
+        resolution = int(self._bus.model_resolution_table[motor_config.model])
+        resolution_max = resolution - 1
+        max_outside = max(1, int(resolution * self._RECOVERY_MAX_OUTSIDE_RANGE_RATIO))
+        wrap_guard = max(1, int(resolution * self._RECOVERY_ENCODER_WRAP_GUARD_RATIO))
+        range_min = int(cal.range_min)
+        range_max = int(cal.range_max)
+        return (
+            min(range_min, max(wrap_guard, range_min - max_outside)),
+            max(range_max, min(resolution_max - wrap_guard, range_max + max_outside)),
+        )
+
+    def read_recovery_start(self) -> dict[str, float]:
+        """Return a stable, normalized recovery start while torque stays off."""
+        if not self._connected or self._bus is None:
+            raise RuntimeError("Motor bus is not connected for recovery.")
+        if self._startup_state is not MotorStartupState.RECOVERY_REQUIRED:
+            raise RuntimeError(f"Motor recovery is unavailable in startup state '{self._startup_state.value}'.")
+
+        self._release_torque_for_manual_motion(strict=True)
+        present_raw = self._read_stable_present_raw(list(self._bus.motors))
+        self._validate_startup_positions(present_raw, allow_recovery=True)
+        return {
+            motor: self._raw_to_normalized(motor, float(raw), self._bus.calibration[motor])
+            for motor, raw in present_raw.items()
+        }
+
+    def prepare_recovery(self, frames: list[dict[str, float]]) -> dict[str, float]:
+        """Validate an entire recovery path, then enable torque at the current pose.
+
+        This method must run before the motion control thread starts. No motor is
+        energized until stable feedback, every frame, and the final target have
+        all passed validation. Goal_Position is then seeded to the latest stable
+        Present_Position and verified before torque is enabled.
+        """
+        if not self._connected or self._bus is None:
+            raise RuntimeError("Motor bus is not connected for recovery.")
+        if self._startup_state is not MotorStartupState.RECOVERY_REQUIRED:
+            raise RuntimeError(f"Motor recovery is unavailable in startup state '{self._startup_state.value}'.")
+
+        motors = list(self._bus.motors)
+        self._release_torque_for_manual_motion(strict=True)
+        present_raw = self._read_stable_present_raw(motors)
+        self._validate_recovery_plan(present_raw, frames)
+
+        try:
+            self._expand_hardware_limits_for_recovery(present_raw)
+            self._configure_recovery_motion_profile(motors)
+            for motor, raw in present_raw.items():
+                self._write_register_or_raise(
+                    "Goal_Position",
+                    motor,
+                    int(raw),
+                    normalize=False,
+                )
+            for motor in motors:
+                self._write_register_or_raise("Lock", motor, 1)
+                self._write_register_or_raise("Torque_Enable", motor, 1)
+        except Exception:
+            self._release_torque_for_manual_motion(strict=False)
+            self._restore_normal_motion_profile(strict=False)
+            self._restore_calibrated_hardware_limits(strict=False)
+            raise
+
+        self._startup_state = MotorStartupState.RECOVERING
+        logger.info(
+            "hal.recovery_torque_enabled",
+            present_raw={motor: int(raw) for motor, raw in present_raw.items()},
+            frame_count=len(frames),
+        )
+        return {
+            motor: self._raw_to_normalized(motor, float(raw), self._bus.calibration[motor])
+            for motor, raw in present_raw.items()
+        }
+
+    def complete_recovery(self) -> None:
+        """Promote a completed recovery only after the final pose is safe."""
+        if self._bus is None or self._startup_state is not MotorStartupState.RECOVERING:
+            raise RuntimeError("No motor recovery is currently active.")
+        final_raw = self._read_stable_present_raw(list(self._bus.motors))
+        self._validate_startup_positions(final_raw)
+        self._restore_normal_motion_profile(strict=True)
+        self._restore_calibrated_hardware_limits(strict=True)
+        self._startup_state = MotorStartupState.READY
+        self._recovery_reason = None
+        logger.info(
+            "hal.recovery_complete",
+            final_raw={motor: int(raw) for motor, raw in final_raw.items()},
+            torque_held=True,
+        )
+
+    def abort_recovery(self) -> None:
+        """Fail closed after an incomplete recovery."""
+        if self._bus is None:
+            return
+        if self._startup_state is MotorStartupState.READY:
+            return
+        self._release_torque_for_manual_motion(strict=False)
+        self._restore_normal_motion_profile(strict=False)
+        self._restore_calibrated_hardware_limits(strict=False)
+        self._startup_state = MotorStartupState.RECOVERY_REQUIRED
+        if not self._recovery_reason:
+            self._recovery_reason = "Recovery did not reach the verified return_safe target."
+        logger.warning("hal.recovery_aborted", reason=self._recovery_reason)
+
+    def _configure_recovery_motion_profile(self, motors: list[str]) -> None:
+        """Install and verify a guarded STS position profile before torque-on."""
+        if self._bus is None:
+            raise RuntimeError("Cannot configure recovery profile without a motor bus.")
+
+        for motor in motors:
+            # Track before writing so a partial profile is restored on failure.
+            self._recovery_profile_motors.add(motor)
+            self._write_register_or_raise(
+                "Acceleration",
+                motor,
+                self._RECOVERY_ACCELERATION_RAW,
+                normalize=False,
+            )
+            self._write_register_or_raise("Goal_Time", motor, 0, normalize=False)
+            self._write_register_or_raise(
+                "Goal_Velocity",
+                motor,
+                self._RECOVERY_SPEED_RAW,
+                normalize=False,
+            )
+
+        logger.info(
+            "hal.recovery_motion_profile_verified",
+            motors=motors,
+            acceleration_raw=self._RECOVERY_ACCELERATION_RAW,
+            speed_raw=self._RECOVERY_SPEED_RAW,
+        )
+
+    def _restore_normal_motion_profile(self, *, strict: bool) -> None:
+        """Restore normal SRAM motion fields after recovery or abort."""
+        if self._bus is None or not self._recovery_profile_motors:
+            return
+
+        failures: list[str] = []
+        restored: list[str] = []
+        for motor in sorted(self._recovery_profile_motors):
+            try:
+                self._write_register_or_raise(
+                    "Acceleration",
+                    motor,
+                    self._NORMAL_ACCELERATION_RAW,
+                    normalize=False,
+                )
+                self._write_register_or_raise("Goal_Time", motor, 0, normalize=False)
+                self._write_register_or_raise("Goal_Velocity", motor, 0, normalize=False)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{motor}: {exc}")
+            else:
+                restored.append(motor)
+
+        self._recovery_profile_motors.difference_update(restored)
+        if restored:
+            logger.info("hal.normal_motion_profile_restored", motors=restored)
+        if failures:
+            detail = "; ".join(failures)
+            logger.error("hal.normal_motion_profile_restore_failed", detail=detail)
+            if strict:
+                raise RuntimeError(
+                    "Recovery reached its target, but the normal motor profile could not be restored: " + detail
+                )
+
+    def _expand_hardware_limits_for_recovery(self, present_raw: dict[str, int]) -> None:
+        """Temporarily include a verified recovery start in servo limits.
+
+        Goal_Position is seeded only after these EPROM-backed limits read back.
+        This prevents an out-of-range seed from being clipped to the calibrated
+        boundary when torque is enabled.
+        """
+        if self._bus is None:
+            raise RuntimeError("Cannot expand recovery limits without a motor bus.")
+
+        expanded: dict[str, dict[str, int]] = {}
+        for motor, raw in present_raw.items():
+            cal = self._bus.calibration[motor]
+            range_min = int(cal.range_min)
+            range_max = int(cal.range_max)
+            recovery_min = min(range_min, int(raw))
+            recovery_max = max(range_max, int(raw))
+            if recovery_min == range_min and recovery_max == range_max:
+                continue
+
+            # Track before the first limit write so a partially successful
+            # expansion is still restored by the exception path.
+            self._recovery_expanded_limit_motors.add(motor)
+            self._write_register_or_raise("Lock", motor, 0, normalize=False)
+            if recovery_min != range_min:
+                self._write_register_or_raise(
+                    "Min_Position_Limit",
+                    motor,
+                    recovery_min,
+                    normalize=False,
+                )
+            if recovery_max != range_max:
+                self._write_register_or_raise(
+                    "Max_Position_Limit",
+                    motor,
+                    recovery_max,
+                    normalize=False,
+                )
+            expanded[motor] = {"min": recovery_min, "max": recovery_max}
+
+        if expanded:
+            logger.info("hal.recovery_hardware_limits_expanded", motors=expanded)
+
+    def _restore_calibrated_hardware_limits(self, *, strict: bool) -> None:
+        """Restore temporary recovery limits while preserving fail-closed state."""
+        if self._bus is None or not self._recovery_expanded_limit_motors:
+            return
+
+        failures: list[str] = []
+        restored: list[str] = []
+        for motor in sorted(self._recovery_expanded_limit_motors):
+            cal = self._bus.calibration[motor]
+            try:
+                self._write_register_or_raise("Lock", motor, 0, normalize=False)
+                self._write_register_or_raise(
+                    "Min_Position_Limit",
+                    motor,
+                    int(cal.range_min),
+                    normalize=False,
+                )
+                self._write_register_or_raise(
+                    "Max_Position_Limit",
+                    motor,
+                    int(cal.range_max),
+                    normalize=False,
+                )
+                self._write_register_or_raise("Lock", motor, 1, normalize=False)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{motor}: {exc}")
+            else:
+                restored.append(motor)
+
+        self._recovery_expanded_limit_motors.difference_update(restored)
+        if restored:
+            logger.info("hal.recovery_hardware_limits_restored", motors=restored)
+        if failures:
+            detail = "; ".join(failures)
+            logger.error("hal.recovery_hardware_limit_restore_failed", detail=detail)
+            if strict:
+                raise RuntimeError(
+                    "Recovery reached its target, but calibrated hardware limits could not be restored: " + detail
+                )
+
+    def _read_stable_present_raw(self, motors: list[str]) -> dict[str, int]:
+        if self._bus is None:
+            raise RuntimeError("Cannot read recovery positions without a motor bus.")
+
+        samples: list[dict[str, int]] = []
+        for sample_idx in range(self._RECOVERY_STABLE_SAMPLE_COUNT):
+            raw = self._bus.sync_read(
+                "Present_Position",
+                motors,
+                normalize=False,
+            )
+            missing = [motor for motor in motors if motor not in raw]
+            if missing:
+                raise RuntimeError(
+                    f"Recovery position feedback is incomplete; missing {missing}. Torque remains disabled."
+                )
+            samples.append({motor: int(raw[motor]) for motor in motors})
+            if sample_idx + 1 < self._RECOVERY_STABLE_SAMPLE_COUNT:
+                time.sleep(self._RECOVERY_STABLE_SAMPLE_INTERVAL_S)
+
+        unstable: list[str] = []
+        for motor in motors:
+            values = [sample[motor] for sample in samples]
+            spread = max(values) - min(values)
+            if spread > self._RECOVERY_STABLE_SPREAD_COUNTS:
+                unstable.append(f"{motor}: readings {min(values)}..{max(values)} spread {spread}")
+        if unstable:
+            raise RuntimeError(
+                "Recovery position feedback is still moving or unstable; torque remains disabled:\n- "
+                + "\n- ".join(unstable)
+            )
+        return samples[-1]
+
+    def _validate_recovery_plan(
+        self,
+        present_raw: dict[str, int],
+        frames: list[dict[str, float]],
+    ) -> None:
+        if self._bus is None:
+            raise RuntimeError("Cannot validate recovery without a motor bus.")
+        if not frames:
+            raise RuntimeError("Recovery path is empty; torque remains disabled.")
+
+        motors = list(self._bus.motors)
+        self._validate_startup_positions(present_raw, allow_recovery=True)
+
+        raw_frames: list[dict[str, int]] = []
+        for index, frame in enumerate(frames):
+            missing = [motor for motor in motors if motor not in frame]
+            if missing:
+                raise RuntimeError(f"Recovery frame {index} is incomplete; missing {missing}. Torque remains disabled.")
+            if any(not math.isfinite(float(frame[motor])) for motor in motors):
+                raise RuntimeError(f"Recovery frame {index} contains a non-finite position. Torque remains disabled.")
+            raw_frames.append(
+                {
+                    motor: self._normalized_to_raw(
+                        motor,
+                        float(frame[motor]),
+                        self._bus.calibration[motor],
+                    )
+                    for motor in motors
+                }
+            )
+
+        final_raw = raw_frames[-1]
+        self._validate_startup_positions(final_raw)
+
+        errors: list[str] = []
+        for motor in motors:
+            cal = self._bus.calibration[motor]
+            start = int(present_raw[motor])
+            goal = int(final_raw[motor])
+            direction = 1 if goal > start else -1 if goal < start else 0
+            previous = start
+            path_min = min(start, goal)
+            path_max = max(start, goal)
+            recovery_min, recovery_max = self._recovery_envelope_bounds(motor, cal)
+
+            for index, raw_frame in enumerate(raw_frames):
+                value = int(raw_frame[motor])
+                if not recovery_min <= value <= recovery_max:
+                    errors.append(
+                        f"{motor}: frame {index} position {value} is outside guarded recovery range "
+                        f"{recovery_min}..{recovery_max}"
+                    )
+                    break
+                if not path_min <= value <= path_max:
+                    errors.append(
+                        f"{motor}: frame {index} position {value} leaves verified start-to-target "
+                        f"envelope {path_min}..{path_max}"
+                    )
+                    break
+                step = value - previous
+                if abs(step) > self._RECOVERY_MAX_FRAME_STEP_COUNTS:
+                    errors.append(
+                        f"{motor}: frame {index} jumps {abs(step)} counts; maximum is "
+                        f"{self._RECOVERY_MAX_FRAME_STEP_COUNTS}"
+                    )
+                    break
+                if direction > 0 and (value < previous or value > goal):
+                    errors.append(f"{motor}: frame {index} does not move monotonically toward safe target")
+                    break
+                if direction < 0 and (value > previous or value < goal):
+                    errors.append(f"{motor}: frame {index} does not move monotonically toward safe target")
+                    break
+                if direction == 0 and value != goal:
+                    errors.append(f"{motor}: frame {index} moves a joint that should remain still")
+                    break
+                previous = value
+
+            if previous != goal:
+                errors.append(f"{motor}: recovery path does not end at verified target {goal}")
+
+        if errors:
+            raise RuntimeError("Recovery path validation failed; torque remains disabled:\n- " + "\n- ".join(errors))
+
+        logger.info(
+            "hal.recovery_plan_verified",
+            start_raw={motor: int(raw) for motor, raw in present_raw.items()},
+            target_raw={motor: int(raw) for motor, raw in final_raw.items()},
+            frame_count=len(frames),
+        )
+
+    def _raw_to_normalized(self, motor: str, raw: float, cal: Any) -> float:
+        """Convert recovery feedback without display-oriented rounding."""
+        if self._config.use_degrees:
+            if self._bus is None:
+                raise RuntimeError("Cannot convert recovery positions without a motor bus.")
+            model = self._bus.motors[motor].model
+            resolution_max = int(self._bus.model_resolution_table[model]) - 1
+            midpoint = (float(cal.range_min) + float(cal.range_max)) / 2.0
+            return (raw - midpoint) * 360.0 / resolution_max
+        span = float(cal.range_max - cal.range_min)
+        value = ((raw - float(cal.range_min)) / span) * 200.0 - 100.0
+        return -value if bool(cal.drive_mode) else value
+
+    def _normalized_to_raw(self, motor: str, value: float, cal: Any) -> int:
+        if self._bus is None:
+            raise RuntimeError("Cannot convert recovery positions without a motor bus.")
+        model = self._bus.motors[motor].model
+        resolution_max = int(self._bus.model_resolution_table[model]) - 1
+        if self._config.use_degrees:
+            midpoint = (float(cal.range_min) + float(cal.range_max)) / 2.0
+            return round((value * resolution_max / 360.0) + midpoint)
+        normalized = -value if bool(cal.drive_mode) else value
+        return round(((normalized + 100.0) / 200.0) * (cal.range_max - cal.range_min) + cal.range_min)
 
     def _calibration_path(self) -> Any:
         return self._config.calibration_dir / f"{self._config.lamp_id}.json"

@@ -268,6 +268,44 @@ def test_server_status_exposes_hardware_startup_error() -> None:
     assert status["hardware_error"] == "Unsafe startup pose; torque remains disabled"
 
 
+def test_server_status_exposes_recoverable_motor_startup_state() -> None:
+    from lampgo.core.config import LampgoConfig
+    from lampgo.core.hal import MotorStartupState
+    from lampgo.server import LampgoServer
+
+    server = LampgoServer(LampgoConfig(no_hw=True))
+    server.hal._connected = True
+    server.hal._startup_state = MotorStartupState.RECOVERY_REQUIRED
+    server.hal._recovery_reason = "Recovery required: base_pitch is near a calibrated limit"
+
+    status = server._handle_status()["result"]
+
+    assert status["device_health"] == "degraded"
+    assert status["hal_connected"] is True
+    assert status["motor_startup_state"] == "recovery_required"
+    assert status["hardware_error"].startswith("Recovery required")
+
+
+def test_server_blocks_teach_recording_until_motor_recovery_finishes() -> None:
+    async def run() -> None:
+        from lampgo.core.config import LampgoConfig
+        from lampgo.core.hal import MotorStartupState
+        from lampgo.server import LampgoServer
+
+        server = LampgoServer(LampgoConfig(no_hw=False))
+        server.hal._connected = True
+        server.hal._startup_state = MotorStartupState.RECOVERY_REQUIRED
+
+        result = await server.start_recording_session()
+
+        assert result == {
+            "ok": False,
+            "error": "motor recovery required; run return_safe before recording",
+        }
+
+    asyncio.run(run())
+
+
 def test_cmd_ping_reports_status_error(monkeypatch, capsys):
     args = argparse.Namespace(port="/dev/tty.test", config=None)
 

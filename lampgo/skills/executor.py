@@ -44,8 +44,14 @@ class SkillExecutor:
         self._current_skill: Skill | None = None
         self._current_invocation_id: str | None = None
         self._motion_block_reason: str | None = None
+        self._allow_return_safe_recovery = False
 
-    def set_motion_block_reason(self, reason: str | None) -> None:
+    def set_motion_block_reason(
+        self,
+        reason: str | None,
+        *,
+        allow_return_safe_recovery: bool = False,
+    ) -> None:
         """Block physical motion skills after a failed hardware startup.
 
         Explicit ``--no-hw`` sessions leave this unset and may still use the
@@ -53,6 +59,7 @@ class SkillExecutor:
         presented as a successful virtual movement.
         """
         self._motion_block_reason = reason
+        self._allow_return_safe_recovery = bool(reason) and allow_return_safe_recovery
 
     async def invoke(self, skill_id: str, ctx: SkillContext, **params) -> InvokeResult:
         invocation_id = uuid.uuid4().hex[:12]
@@ -66,7 +73,8 @@ class SkillExecutor:
                 error_detail=f"Skill '{skill_id}' not registered",
             )
 
-        if skill_id in _MOTION_SKILLS and self._motion_block_reason:
+        recovery_exception = self._allow_return_safe_recovery and skill_id in {"return_safe", "estop"}
+        if skill_id in _MOTION_SKILLS and self._motion_block_reason and not recovery_exception:
             logger.warning(
                 "executor.motion_blocked_hardware_unavailable",
                 skill_id=skill_id,
@@ -80,7 +88,7 @@ class SkillExecutor:
             )
 
         # Hardware not connected → return fake ok to prevent LLM retry loops
-        if skill_id in _MOTION_SKILLS and not ctx.motion.is_running:
+        if skill_id in _MOTION_SKILLS and not ctx.motion.is_running and not recovery_exception:
             logger.debug("executor.hw_skip", skill_id=skill_id, reason="motor not connected")
             return InvokeResult(
                 invocation_id=invocation_id,
@@ -127,6 +135,15 @@ class SkillExecutor:
         except Exception as e:
             logger.exception("executor.skill_error", skill_id=skill_id)
             result = SkillResult(status="error", message=str(e))
+
+        if (
+            skill_id == "return_safe"
+            and result.status == "ok"
+            and self._allow_return_safe_recovery
+            and not bool(getattr(ctx.motion, "recovery_required", False))
+        ):
+            self.set_motion_block_reason(None)
+            logger.info("executor.motor_recovery_unblocked")
 
         await self._events.publish(
             SkillFinished(skill_id=skill_id, invocation_id=invocation_id, status=result.status)

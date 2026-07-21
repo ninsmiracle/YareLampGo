@@ -22,10 +22,13 @@ from lampgo.core.config import DEFAULT_JOINT_LIMITS
 from lampgo.core.trajectory import generate_sine_frames, generate_waypoint_frames
 from lampgo.core.types import MotionTarget, SkillResult
 from lampgo.skills.base import ParameterSpec, Skill, SkillContext
+from lampgo.skills.builtin.motion_skills import get_safe_position
 
 logger = structlog.get_logger(__name__)
 
 _FPS = 50  # matches MotionRuntime's default control rate
+_IDLE_SWAY_RECENTER_VELOCITY = 30.0
+_IDLE_SWAY_RECENTER_TIMEOUT_S = 15.0
 
 
 async def _await_done(done_event, timeout: float) -> bool:
@@ -272,11 +275,29 @@ class IdleSwaySkill(Skill):
         yaw_scale = random.uniform(0.22, 0.42)
         yaw_period_ratio = random.uniform(0.62, 0.82)
 
-        base_pitch = ctx.state.get("base_pitch", 0.0)
-        base_yaw = ctx.state.get("base_yaw", 0.0)
+        # Anchor every invocation to the calibration-derived safe pose. Using
+        # the current feedback as the next centre compounds any small settling
+        # error, making repeated automatic sways progressively lower.
+        safe_position = get_safe_position()
+        centre = {
+            "base_pitch": safe_position["base_pitch"],
+            "base_yaw": safe_position["base_yaw"],
+        }
+        current = {
+            "base_pitch": ctx.state.get("base_pitch", centre["base_pitch"]),
+            "base_yaw": ctx.state.get("base_yaw", centre["base_yaw"]),
+        }
 
-        frames = generate_sine_frames(
-            base={"base_pitch": base_pitch, "base_yaw": base_yaw},
+        max_recentering_distance = max(abs(current[joint] - centre[joint]) for joint in centre)
+        recenter_duration = max(0.4, max_recentering_distance / _IDLE_SWAY_RECENTER_VELOCITY)
+        recenter_frames = generate_waypoint_frames(
+            [(current, 0.0), (centre, recenter_duration)],
+            fps=_FPS,
+            ease_fn="ease_in_out_cubic",
+        )
+
+        sway_frames = generate_sine_frames(
+            base=centre,
             axes={
                 "base_pitch": {
                     "amplitude": amplitude * pitch_direction,
@@ -292,12 +313,27 @@ class IdleSwaySkill(Skill):
             duration=duration,
             fps=_FPS,
         )
+        frames = recenter_frames + sway_frames
 
         try:
             done = ctx.motion.stream_frames(frames, fps=_FPS)
-            if not await _await_done(done, timeout=duration + 5.0):
+            if not await _await_done(done, timeout=len(frames) / _FPS + 5.0):
                 logger.warning("idle_sway.timeout", frames=len(frames))
                 return SkillResult(status="error", message="IdleSway timed out")
+
+            # Use an absolute point-to-point hold after the streamed gesture.
+            # This removes any residual hardware lag before the scheduler can
+            # launch another sway, and leaves the lamp holding the safe centre.
+            recenter_done = ctx.motion.move_to(
+                MotionTarget(
+                    joints=dict(centre),
+                    max_velocity=_IDLE_SWAY_RECENTER_VELOCITY,
+                    anticipation=False,
+                )
+            )
+            if not await _await_done(recenter_done, timeout=_IDLE_SWAY_RECENTER_TIMEOUT_S):
+                logger.warning("idle_sway.recenter_timeout", target=centre)
+                return SkillResult(status="error", message="IdleSway could not return to its safe centre")
         finally:
             self._motion = None
 
@@ -307,6 +343,7 @@ class IdleSwaySkill(Skill):
                 "amplitude": round(amplitude, 2),
                 "period": round(period, 2),
                 "duration": round(duration, 2),
+                "centre": centre,
             },
         )
 
