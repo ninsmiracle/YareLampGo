@@ -1,37 +1,29 @@
-# Printable Appearance And Structural Files
+# YareLampGo V2.0 Structure
 
 [简体中文](README.md) | English
 
-This folder contains the public YareLampGo V1.0 appearance and structural files for community review, remixing, and reproduction.
+V2.0 is the only currently maintained public hardware structure. The V1.0 package has been removed from the main line; do not mix V1.0 and V2.0 bases, arms, motor shells, or head parts.
 
-## Preview Images
+![YareLampGo V2.0 assembly preview](YareLampGo_V2.0/assembly-preview.png)
 
-| File | Purpose |
-| --- | --- |
-| `structure-front.jpeg` | Front structural preview. |
-| `structure-side.jpeg` | Side structural preview. |
-| `print-plate-01.png` | Print plate / layout preview. |
-| `print-plate-02.png` | Print plate / layout preview. |
-
-## V1.0 STEP/STP Package
-
-The public V1.0 appearance and structural source package is in `YareLampGo_V1.0/`:
+## Files
 
 | File | Purpose |
 | --- | --- |
-| `YareLampGo_V1.0/lampgo-0527.stp` | Public assembly/reference source file. |
-| `YareLampGo_V1.0/卡口1.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/卡口2.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/底座.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/底座盖板.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/灯头.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/灯罩.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/盖板.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/连杆1.STEP` | Printable structural part. |
-| `YareLampGo_V1.0/连杆2.STEP` | Printable structural part. |
+| `YareLampGo_V2.0/YareLampGo_V2.0_assembly.step` | Complete STEP AP214 assembly exported by SolidWorks 2022, in millimetres. |
+| `YareLampGo_V2.0/assembly-preview.png` | Assembly preview extracted from the official guide. |
+| [`../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx`](../../docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) | Illustrated BOM, fastener, cable-routing, and assembly guide. |
+| [`../../docs/hardware/v2/README.en.md`](../../docs/hardware/v2/README.en.md) | Searchable V2.0 assembly, electrical, and first-power guide. |
 
-## License And Boundary
+## Boundaries
 
-These public STEP/STP files and preview images are published as the community printable/open-hardware appearance and structural package under `CERN-OHL-W-2.0`, unless a local notice says otherwise. See [ASSET_LICENSES.md](../../ASSET_LICENSES.md) for the repository-level asset license table.
+- The STEP file is a complete assembly, not a print-ready per-part STL/3MF package. Export printable bodies or parts in CAD and verify units, tolerances, wall thickness, insert holes, and print orientation.
+- Purchased components such as the S3, C6, PCB, LED board, and servos are included as reference geometry. Exclude them when exporting structural parts.
+- Recalibrate after the first assembly or any structural change. Do not reuse V1.0 or another unit's calibration data.
+- Source names, checksums, and publication limits are recorded in [`../../docs/hardware/v2/SOURCE_MANIFEST.md`](../../docs/hardware/v2/SOURCE_MANIFEST.md).
 
-This package is not a supplier production drawing set and does not include private manufacturing process files, quotations, tooling documents, or factory part numbers. Confirm dimensions, units, tolerances, print orientation, and material choice before manufacturing or printing.
+## License
+
+Unless a local notice says otherwise, the public STEP and preview image use `CERN-OHL-W-2.0`. See [ASSET_LICENSES.md](../../ASSET_LICENSES.md).
+
+This package is not a production-approved supplier drawing set. Verify dimensions, tolerances, materials, loads, cable movement, and electrical safety before fabrication.

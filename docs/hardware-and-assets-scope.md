@@ -7,15 +7,18 @@ Codex integration, examples, and public documentation.
 
 - Software source code in this repository is licensed under GPL-3.0-only unless a
   file says otherwise.
-- ESP32 firmware is maintained in the separate `esp32_lamp` repository and
+- ESP32 firmware is maintained in the separate `YareLampGo_esp32` repository and
   should declare its own license.
 - Asset licensing is declared in the repository-level `ASSET_LICENSES.md`.
 - `assets/lampgoGLB.glb` is a Web runtime visualization asset licensed under
   CC-BY-NC-SA-4.0 for non-commercial sharing and adaptation.
 - Community-printable STL/3MF/STEP/STP files, when published, should live under
   `assets/printable/` and use CERN-OHL-W-2.0 unless a local notice says
-  otherwise. The current public V1.0 appearance and structural files are in
-  `assets/printable/YareLampGo_V1.0/`.
+  otherwise. The current public V2.0 assembly is in
+  `assets/printable/YareLampGo_V2.0/`.
+- The approved V2.0 assembly DOCX and schematic/PCB reference PNGs live under
+  `docs/hardware/v2/` and use the hardware-asset terms listed in
+  `ASSET_LICENSES.md`.
 
 ## Public Hardware Scope
 
@@ -64,13 +67,19 @@ Current public entry points:
 
 - `docs/hardware/README.md`
 - `docs/hardware/wiring.md`
-- `docs/hardware/hardware-wiring.png`
-- `docs/hardware/component-flatlay.jpg`
+- `docs/hardware/v2/README.md`
+- `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx`
+- `docs/hardware/v2/schematics/`
 
 ## Printable Appearance And Structural Files
 
 Public printable appearance and structural files live under `assets/printable/`.
-The current V1.0 STEP/STP source package is
-`assets/printable/YareLampGo_V1.0/`, with preview images in the same printable
-asset area. These files are an approved community reproduction package, not a
-supplier production drawing set.
+The current V2.0 STEP AP214 assembly is
+`assets/printable/YareLampGo_V2.0/YareLampGo_V2.0_assembly.step`, with an
+assembly preview in the same directory. It is an approved community
+reproduction/reference package, not a production-approved supplier drawing set
+or a print-ready per-part STL/3MF package.
+
+The V2.0 electrical PNGs are connection/routing references. Editable EDA
+source, Gerbers, drills, placement data, a production BOM, and an electrical
+test report are not part of the current public package.

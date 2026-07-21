@@ -15,6 +15,7 @@ Translation is being added gradually. Chinese is the default documentation langu
 | Doc | Use it for |
 | --- | --- |
 | [Quick Start](getting-started/quick-start.md) | First install, Web UI launch, no-hardware mode, and real hardware startup. |
+| [Manual V2.0 Setup](getting-started/manual-hardware-setup.en.md) | Servo IDs, S3/C6 flashing, first power, and calibration without Codex. |
 | [Configuration](getting-started/configuration.md) | `~/.lampgo/config.toml`, environment variables, credentials, and common config fields. |
 
 ## Guides
@@ -23,7 +24,7 @@ Translation is being added gradually. Chinese is the default documentation langu
 | --- | --- |
 | [Motion and Expression](guides/motion-and-expression.md) | Built-in motions, CSV recording/playback, LED expressions, and composed skills. |
 | [Codex Integration](guides/codex-integration.md) | Zero-config local Codex handoff and LampGo MCP tools. |
-| [Public Hardware Docs](hardware/README.en.md) | Public component photos, wiring diagram, wiring table, and printable structure entry points. |
+| [V2.0 Hardware and Assembly](hardware/v2/README.en.md) | V2.0 electrical/PCB images, assembly guide, wiring, STEP, and first-power flow. |
 
 ## Architecture And Background
 
@@ -34,7 +35,7 @@ Translation is being added gradually. Chinese is the default documentation langu
 | [Roadmap](roadmap.en.md) | Replaceable head modules, algorithm extension points, and future community work. |
 | [Composed Skills](composed_skills.md) | User skill / composed skill data format and execution rules. |
 | [Hardware And Asset Scope](hardware-and-assets-scope.md) | License boundary for software, firmware, 3D visualization assets, community printable files, and supplier production materials. |
-| [Printable Structure Files](../assets/printable/README.en.md) | V1.0 STEP/STP appearance and structural files, preview images, and print plate images. |
+| [Structure Files](../assets/printable/README.en.md) | V2.0 STEP AP214 complete assembly, preview, and fabrication limits. |
 
 ## Examples And References
 

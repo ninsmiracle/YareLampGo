@@ -2,18 +2,21 @@
 
 简体中文 | [English](README.en.md)
 
-这里放置 YareLampGo 面向社区公开的硬件说明，用来帮助复刻者理解模组布局、接线方式和装配入口。供应商生产图、报价、私有料号、工艺文件和量产 CAD 不包含在本目录中。
+V2.0 是 YareLampGo 当前唯一维护的公开硬件和机械结构版本。V1.0 接线图、结构件与校准数据不再作为主线，也不能和 V2.0 混用。
 
-## 文件
+## 当前入口
 
 | 文件 | 说明 |
 | --- | --- |
-| [wiring.md](wiring.md) | 由硬件接线表格整理而来的公开接线表。 |
-| [hardware-wiring.png](hardware-wiring.png) | 当前公开硬件布局的接线图。 |
-| [component-flatlay.jpg](component-flatlay.jpg) | 公开组件预览图。 |
-| [../hardware-and-assets-scope.md](../hardware-and-assets-scope.md) | 硬件、可打印结构件和视觉资产的发布范围与许可边界。 |
-| [../../assets/printable/README.md](../../assets/printable/README.md) | 公开可打印外观和结构件文件。 |
+| [V2.0 硬件与组装](v2/README.md) | 发布内容、六张电路/PCB 图说明、装配顺序、首次上电和 V1 迁移。 |
+| [V2.0 接线表](wiring.md) | 12V/+5V 电源域、S3/C6、功放、LED 和五颗舵机的可搜索接线表。 |
+| [V2.0 组装说明](v2/YareLampGo_V2.0_assembly_manual.docx) | 带物料图片、紧固件位置、走线和总成图的 DOCX。 |
+| [V2.0 STEP 结构件](../../assets/printable/README.md) | 完整 STEP AP214 总成、预览和使用边界。 |
+| [源文件清单](v2/SOURCE_MANIFEST.md) | 原始文件名、SHA-256、文件检查结果和公开资料限制。 |
+| [硬件与资产范围](../hardware-and-assets-scope.md) | 许可和发布边界。 |
 
-## 发布边界
+## 重要边界
 
-本目录中的文件是公开文档，不包含供应商报价、私有料号、工厂工艺文件或生产 CAD。可打印外观和结构件文件放在 `assets/printable/`，具体授权以仓库根目录的 [ASSET_LICENSES.md](../../ASSET_LICENSES.md) 为准。
+电路 PNG 用于理解网络、接口、器件位置和 PCB 走线，不是 Gerber/钻孔/坐标/生产 BOM。完整 STEP 是装配参考总成，不是已经拆好的逐件 STL/3MF。任何制造、制板和首次上电都需要制作者自行完成工程复核。
+
+具体授权以仓库根目录的 [ASSET_LICENSES.md](../../ASSET_LICENSES.md) 为准。

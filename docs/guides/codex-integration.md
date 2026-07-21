@@ -8,6 +8,30 @@ uv run lampgo run --web
 
 启动过程会自动查找 PATH、ChatGPT App 和 Codex App 中的 CLI，检查登录状态，并幂等注册 `lampgo` stdio MCP。用户不需要配置 token、端口、环境变量或编辑 `~/.codex/config.toml`。
 
+## 用 Codex 完成首次装机
+
+仓库还提供一个面向首次安装/装机的 `lampgo-setup` skill。它和运行时 MCP 分工不同：skill 带用户完成依赖、V2.0 硬件检查、烧录、校准、配网和配置；运行时 MCP 则让已经启动的 LampGo 接受 Codex 工具调用。
+
+macOS / Linux：
+
+```bash
+./install-codex-skill.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-codex-skill.ps1
+```
+
+新建 Codex 任务后说：
+
+```text
+用 $lampgo-setup 帮我安装和配置 YareLampGo V2.0
+```
+
+skill 会选择纯软件、已组装成品或 DIY V2.0 路线，并在写舵机 ID、擦除烧录、首次 12V、校准和真实运动前要求明确的物理确认。skill 文件见 [`skills/lampgo-setup/SKILL.md`](../../skills/lampgo-setup/SKILL.md)。
+
 ## 通信链路
 
 ```text

@@ -18,6 +18,24 @@ git clone https://github.com/ninsmiracle/YareLampGo.git
 cd YareLampGo
 ```
 
+## Codex 交互式安装（推荐）
+
+Codex 用户可以先安装仓库自带的 `lampgo-setup` skill：
+
+```bash
+./install-codex-skill.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-codex-skill.ps1
+```
+
+新建 Codex 任务后说：`用 $lampgo-setup 帮我安装和配置 YareLampGo V2.0`。skill 会区分纯软件、已组装成品和 DIY V2.0 三条路径，并在硬件写入/上电/校准前逐步确认。手工安装可以继续按下文执行。
+
+如果需要从舵机编号和 S3/C6 烧录开始复刻整机，请直接阅读 [V2.0 手动安装、烧录与首次启动](manual-hardware-setup.md)。
+
 ## 一键安装全部依赖
 
 macOS / Linux：
@@ -148,6 +166,7 @@ uv run lampgo clear
 
 ## 下一步
 
+- 阅读 [V2.0 手动安装](manual-hardware-setup.md) 完成舵机编号、固件烧录、首次上电和校准。
 - 阅读 [配置说明](configuration.md) 理解配置来源和凭证管理。
 - 阅读 [动作与表情](../guides/motion-and-expression.md) 学习录制、回放和 LED 控制。
 - 阅读 [Codex 集成](../guides/codex-integration.md) 将台灯接入本机复杂任务工作流。

@@ -1,39 +1,94 @@
-# Wiring Guide
+# YareLampGo V2.0 接线指南
 
-This page is the public Markdown source for YareLampGo hardware wiring. It
-replaces the uploaded spreadsheet version so wiring details are readable in
-GitHub and easier to review in pull requests.
+本页是 V2.0 当前接线基线。先完成断电检查，再接 12V 舵机电源；不要用 V1.0 接线图推断 V2.0 主板。
 
-![YareLampGo wiring diagram](hardware-wiring.png)
+完整电路图说明见 [V2.0 硬件指南](v2/README.md)。原始图片在 [`v2/schematics/`](v2/schematics/)。
 
-![YareLampGo component flat lay](component-flatlay.jpg)
+## 电源域
 
-## Usage
+| 电源域 | 对象 | 要求 |
+| --- | --- | --- |
+| 12V | 五颗 STS3215 舵机和舵机总线供电 | 只接主板/电源模块标明的 12V 输入。上电前核对正负极。 |
+| +5V | XIAO ESP32-S3、ESP32-C6 LCD、MAX98357A、LED 灯板 | 由 V2.0 电源模块输出；安装逻辑板前先用万用表确认。 |
+| GND | 舵机电源、5V 逻辑、S3、C6、功放、LED | 必须共地。任何信号线接入前先确认地线连续。 |
 
-按本表从上到下接线；任何模块换型号、换固件或换供电方案后，请同步更新此表。
+> 主板同时包含 12V 舵机侧和 +5V 逻辑侧。未确认电压时不要插入 S3、C6、LED 或功放。外部 +5V 与 USB 同时供电可能回灌，除非已确认硬件具备隔离/防反灌设计，否则二选一。
 
-## Wiring Table
+## S3 信号映射
 
-| 模块/对象 | 端子/引脚 | 连接到 | 类型/电压 | 线材/接法 | 接线说明与验收要点 |
-| --- | --- | --- | --- | --- | --- |
-| 系统电源 | 12V DC圆口 适配器输出 | 总线舵机驱动板电源输入 | 主电源 | 按驱动板电源端子接入；先断电再接线 | 确认正负极和驱动板/舵机允许的输入电压后再上电；这是整机唯一主电源入口。 |
-| 系统电源 | 总线舵机驱动板 GND | 5V 降压模块 Vin- / XIAO GND / LED V- / MAX98357 GND | 共地 | 所有低压模块必须共地 | 舵机电源、5V 降压输出、开发板、LED、功放需要共地，否则信号可能不稳定或完全不工作。 |
-| 5V 降压模块 | Vin+ / Vin- | 从总线舵机供电链路取电<br>（从最后一个舵机取电） | 12V -> 5V 输入侧 | 红线接 Vin+、黑线接 Vin- | 取电位置是结构布线考虑，本质仍来自 12V 主电源；接入前确认正负。 |
-| 5V 降压模块 | Vout+ / Vout- | 给 XIAO、WS2812 LED 灯板、MAX98357 功放供电 | 5V 输出侧 | 需要两根一分三杜邦线或等效分线端子 | 注意正负。 |
-| XIAO 开发板 | 5V | 5V 降压模块 Vout+ | 5V 供电 | 红线 | 开发板由降压模块供电；如同时插 USB 调试，注意避免电源回灌风险。 |
-| XIAO 开发板 | GND | 5V 降压模块 Vout- | 共地 | 黑线 | 所有外设信号线接入前先确认共地。 |
-| MAX98357 功放 | VIN | 5V 降压模块 Vout+ | 5V 供电 | 红线 | 功放供电线尽量短，避免与舵机大电流线长距离并行。 |
-| MAX98357 功放 | GND | 5V 降压模块 Vout- | 共地 | 黑线 | 与 XIAO 共地。 |
-| MAX98357 功放 | LRC | XIAO D1 (GPIO2) | I2S LRCLK | 信号线 | 按现有程序/接线映射连接。 |
-| MAX98357 功放 | BCLK | XIAO D0 (GPIO1) | I2S BCLK | 信号线 | 按现有程序/接线映射连接。 |
-| MAX98357 功放 | DIN | XIAO D3 (GPIO4) | I2S DATA | 信号线 | 接到功放数据输入端。 |
-| MAX98357 功放 | GAIN | 悬空 | 配置脚 | 不接 | 默认增益。 |
-| MAX98357 功放 | SD | 悬空 | 使能/关断脚 | 不接 | 默认使能；若后续要静音控制，再单独分配 GPIO。 |
-| 喇叭 | 端子 | MAX98357 喇叭输出端 | 音频输出 | 直接对插 | 当前喇叭线直接对插，不区分正反也能出声。 |
-| WS2812 8x8 LED 灯板 | V+ / 5V | 5V 降压模块 Vout+ | 5V 供电 | 红线 | 确认实物是 8x8 / 64 颗 WS2812。 |
-| WS2812 8x8 LED 灯板 | V- / GND | 5V 降压模块 Vout- | 共地 | 黑线 | LED 灯板必须与 XIAO 共地。 |
-| WS2812 8x8 LED 灯板 | OUT | XIAO D2 (GPIO3) | NeoPixel 数据 | 信号线 | LED 阵列控制信号 |
-| 总线舵机 | 5 个 ST3215 舵机 | 总线舵机驱动板，舵机之间依次串联 | TTL 总线 + 舵机电源 | 使用舵机专用三脚线束 | 线留余量，避免运动时拉扯。 |
-| 总线舵机 | 末端取电位置 | 5V 降压模块 Vin | 从舵机供电链路分出 | 短线取电，固定防松 |  |
-| 电脑上位机 | 无线连接 | XIAO / 台灯控制链路 | 无线 | 无需额外数据线 | 开发板通过无线与电脑上位机连接；USB 主要用于烧录、日志或调试。 |
-| 布线固定 | 所有插头/杜邦线 | 对应模块端子 | 机械可靠性 | 扎带、胶点、热缩管或固定座 | 完成接线后轻拉每根线确认不松动；舵机附近的线束要避开转轴、齿轮和夹点。 |
+| XIAO ESP32-S3 引脚 | 网络名 | 连接对象 | 作用 |
+| --- | --- | --- | --- |
+| D0 / GPIO1 | `I2S_BCLK` | MAX98357A BCLK | I2S 位时钟 |
+| D1 / GPIO2 | `I2S_LRCLK` | MAX98357A LRCLK | I2S 左右声道时钟 |
+| D2 / GPIO3 | `DIN` | LED 板 DIN | LED 串行数据 |
+| D3 / GPIO4 | `I2S_DOUT_AMP` | MAX98357A DIN | I2S 音频数据输出 |
+| D6 / GPIO43 / TX | `S3TX_C6RX` | C6 RX | 屏幕串口：S3 发、C6 收 |
+| D7 / GPIO44 / RX | `S3RX_C6TX` | C6 TX | 屏幕串口：S3 收、C6 发 |
+| VBUS | `+5V` | 5V 电源域 | S3 供电 |
+| GND | `GND` | 公共地 | 逻辑参考地 |
+
+## C6 LCD 排针
+
+| 接口 | 引脚 | 网络名 | 连接 |
+| --- | ---: | --- | --- |
+| U1 | 1 | `S3RX_C6TX` | C6 TX → S3 GPIO44 RX |
+| U1 | 2 | `S3TX_C6RX` | S3 GPIO43 TX → C6 RX |
+| U2 | 9 | `VBUS` | +5V |
+| U2 | 8 | `GND` | 公共地 |
+
+其余 U1/U2 引脚在当前公开图中标记为不连接。固件中使用的 C6 UART GPIO 仍以固件仓库版本为准，不要只凭排针位置猜测。
+
+## 功放和喇叭
+
+V2.0 主板给出两种兼容方式：板载 MAX98357A 方案，以及 H4 五针功放模块接口。只安装一种实际功放路径，避免重复驱动。
+
+| 网络 | MAX98357A | H4 模块接口 |
+| --- | --- | --- |
+| +5V | VDD 7/8，`GAIN_SLOT` 2 | `+5V` |
+| GND | GND 3/11/15 和 EP | `GND` |
+| `I2S_BCLK` | BCLK 16 | `BCLK` |
+| `I2S_LRCLK` | LRCLK 14 | `LRCLK` |
+| `I2S_DOUT_AMP` | DIN 1 | `DOUT_AMP` |
+
+板载方案中 `SD_MODE#` 通过 1 MΩ 上拉到 +5V。`OUTP` / `OUTN` 接 CN7 两针喇叭端子；喇叭两端都属于桥接输出，不要把其中一端接地。
+
+## LED 接口 U3
+
+| U3 引脚 | 网络 |
+| ---: | --- |
+| 5 | GND |
+| 4 | GND |
+| 3 | `DIN` |
+| 2 | +5V |
+| 1 | +5V |
+
+两组 +5V/GND 用于分担供电连接，但实际线束针序必须与实物连接器方向一致。接反 +5V/GND 会损坏灯板。
+
+## 舵机总线
+
+五颗 STS3215 依次串联。组装前一次只连接一颗新舵机并写入 ID：
+
+| 位置 | 程序名称 | ID |
+| --- | --- | ---: |
+| 底座水平旋转 | `base_yaw` | 1 |
+| 底座俯仰 | `base_pitch` | 2 |
+| 肘部俯仰 | `elbow_pitch` | 3 |
+| 手腕滚转 | `wrist_roll` | 4 |
+| 手腕俯仰 | `wrist_pitch` | 5 |
+
+```bash
+uv run lampgo setup-motors
+```
+
+执行时总线上只能有一颗舵机；换线前必须断开 12V。
+
+## 首次上电检查
+
+1. 断开 S3、C6、LED 和功放，确认 12V 输入正负极。
+2. 只给电源板上电，测量 +5V 对 GND；电压不正确立即断电。
+3. 断电后安装逻辑板，检查所有连接器方向、冷焊/短路和线束夹点。
+4. 先用 USB 分别验证 S3、C6 固件，再接入整机 +5V。
+5. 扶稳机构，保持所有关节远离机械限位，再接 12V 舵机电源。
+6. 先运行 `uv run lampgo detect` 和 `uv run lampgo scan-motors --ids 1-5`，五颗舵机都在线后才校准。
+
+电路 PNG 是连接和审查参考，不是可直接下单的 Gerber、钻孔、坐标或 BOM 文件。

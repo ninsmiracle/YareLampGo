@@ -15,14 +15,22 @@ from lampgo import cli
 
 def test_build_help_text_contains_common_commands():
     text = cli._build_help_text()
-    assert "uv run lampgo run" in text
+    assert "uv run lampgo help" in text
     assert "uv run lampgo run --web" in text
-    assert "http://localhost:8420" in text
+    assert "uv run lampgo run --web --no-hw" in text
+    assert "http://127.0.0.1:8420" in text
     assert "uv run lampgo detect" in text
-    assert "uv run lampgo scan-motors --ids 1-20" in text
+    assert "uv run lampgo scan-motors --ids 1-5" in text
+    assert "uv run lampgo ping" in text
     assert "uv run lampgo clear" in text
     assert "uv run lampgo setup-motors" in text
     assert "uv run lampgo calibrate" in text
+    assert "uv run lampgo text" in text
+    assert "uv run lampgo invoke" in text
+    assert "uv run lampgo move" in text
+    assert "uv run lampgo record" in text
+    assert "uv run lampgo play" in text
+    assert "uv run lampgo <command> --help" in text
 
 
 def test_find_related_pids_filters_self_and_parent(monkeypatch):

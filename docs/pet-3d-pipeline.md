@@ -10,8 +10,8 @@ The public repository keeps the runtime visualization asset used by the Web pet
 and the separately approved community printable appearance/structure package.
 Production CAD, supplier drawings, STEP/SLDASM/SLDPRT files, and other
 manufacturing sources stay outside the public repository unless separately
-approved for release. The approved public V1.0 STEP/STP package lives under
-`assets/printable/YareLampGo_V1.0/`.
+approved for release. The approved public V2.0 STEP assembly lives under
+`assets/printable/YareLampGo_V2.0/`.
 
 Current public Web runtime source:
 

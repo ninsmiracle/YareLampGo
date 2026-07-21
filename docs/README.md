@@ -15,6 +15,7 @@
 | 文档 | 适合场景 |
 | --- | --- |
 | [快速上手](getting-started/quick-start.md) | 第一次安装、运行 Web UI、验证无硬件模式或连接真实台灯。 |
+| [V2.0 手动安装](getting-started/manual-hardware-setup.md) | 不使用 Codex 时，手动完成舵机编号、S3/C6 烧录、首次上电和校准。 |
 | [配置说明](getting-started/configuration.md) | 理解 `~/.lampgo/config.toml`、环境变量、凭证和常见配置项。 |
 
 <a id="guides"></a>
@@ -25,7 +26,7 @@
 | --- | --- |
 | [动作与表情](guides/motion-and-expression.md) | 调用内置动作、录制回放 CSV、控制 LED 表情、制作组合技能。 |
 | [Codex 集成](guides/codex-integration.md) | 零配置连接本机 Codex，让复杂任务与台灯工具互通。 |
-| [硬件公开资料](hardware/README.md) | 查看公开组件图、接线图、接线表和社区复刻结构件入口。 |
+| [V2.0 硬件与组装](hardware/v2/README.md) | 查看 V2.0 电路/PCB 图、组装说明、接线表、STEP 和首次上电流程。 |
 
 <a id="architecture-and-background"></a>
 
@@ -38,7 +39,7 @@
 | [未来方向](roadmap.md) | 了解可替换头部组件、算法扩展和后续社区共创方向。 |
 | [组合技能](composed_skills.md) | 查看用户技能/组合技能的数据结构和执行规则。 |
 | [硬件与资产开源范围](hardware-and-assets-scope.md) | 明确软件、固件、3D 可视化资产、社区打印件和供应商生产资料的许可证边界。 |
-| [结构件文件](../assets/printable/README.md) | 查看 V1.0 STEP/STP 外观结构件、预览图和打印摆盘图。 |
+| [结构件文件](../assets/printable/README.md) | 查看 V2.0 STEP AP214 完整总成、预览和制造边界。 |
 
 <a id="examples-and-references"></a>
 

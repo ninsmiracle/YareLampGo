@@ -1,0 +1,3 @@
+# Preserve imported CAD byte-for-byte and avoid impractical text diffs.
+*.step binary
+*.STEP binary

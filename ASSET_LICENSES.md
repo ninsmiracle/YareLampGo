@@ -10,6 +10,7 @@ package, command, configuration, and plugin identifier.
 | File | License | Notes |
 | --- | --- | --- |
 | `assets/lampgoGLB.glb` | Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (`CC-BY-NC-SA-4.0`) | Web UI runtime visualization asset. Non-commercial sharing and adaptation are allowed. Commercial use requires separate permission. |
+| `docs/images/readme/lampgo_v2_*.gif` | Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (`CC-BY-NC-SA-4.0`) | Current V2.0 physical-unit time and wave demonstration clips. |
 
 Attribution: Copyright (C) 2026 @ninsmiracle, @shelly-tang, @Yue-Xiaolong,
 @mnw852173-star, @tian135, @majiachao, and YareLampGo contributors.
@@ -40,8 +41,9 @@ default open-hardware license.
 | `assets/printable/**/*.step` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
 | `assets/printable/**/*.STP` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
 | `assets/printable/**/*.stp` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Public appearance and structural source files for community reproduction. |
-| `assets/printable/structure-*.jpeg` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Preview images for the public printable structure package. |
-| `assets/printable/print-plate-*.png` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Print plate / layout preview images for the public printable structure package. |
+| `assets/printable/YareLampGo_V2.0/*.png` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Preview images for the V2.0 public structure package. |
+| `docs/hardware/v2/schematics/*.png` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | V2.0 schematic, connector, and PCB-routing reference images; not fabrication outputs. |
+| `docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx` | CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`CERN-OHL-W-2.0`) | Illustrated V2.0 assembly and BOM-reference document. |
 
 License URL: <https://opensource.org/license/CERN-OHL-W-2.0>
 

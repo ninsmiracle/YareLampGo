@@ -1,0 +1,8 @@
+interface:
+  display_name: "LampGo V2 交互式安装"
+  short_description: "交互安装、组装、配置并验证 LampGo"
+  brand_color: "#F97316"
+  default_prompt: "请使用 $lampgo-setup 交互式安装和配置我的 YareLampGo V2.0；跟随我的输入语言，如果暂时无法判断则默认使用简体中文。"
+
+policy:
+  allow_implicit_invocation: true
