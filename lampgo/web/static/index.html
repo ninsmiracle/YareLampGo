@@ -380,6 +380,36 @@
                 </div>
               </div>
             </section>
+            <section class="ocean-quick-panel" aria-labelledby="ocean-quick-title">
+              <div class="ocean-quick-head">
+                <div>
+                  <div id="ocean-quick-title" class="ocean-quick-title">电子海洋</div>
+                  <div class="ocean-quick-desc">启动时以 5 号舵机当前位置为水平面，运动会实时扰动 S3 本地流体。</div>
+                </div>
+                <div id="ocean-status" class="ocean-status">待启动</div>
+              </div>
+              <div class="ocean-workspace">
+                <canvas id="ocean-preview" class="ocean-preview" width="510" height="90" aria-label="电子海洋 LED 点阵预览"></canvas>
+                <div class="ocean-controls">
+                  <div class="ocean-dynamics-presets" role="group" aria-label="流体动态预设">
+                    <button type="button" data-ocean-dynamics="soft">柔和</button>
+                    <button type="button" class="is-active" data-ocean-dynamics="standard">标准</button>
+                    <button type="button" data-ocean-dynamics="violent">剧烈</button>
+                  </div>
+                  <label>水色<input id="ocean-color" type="color" value="#00b8e0" /></label>
+                  <label>亮度 <output id="ocean-brightness-value">36</output><input id="ocean-brightness" type="range" min="1" max="96" value="36" /></label>
+                  <label>液位 <output id="ocean-fill-value">55%</output><input id="ocean-fill" type="range" min="20" max="80" value="55" /></label>
+                  <label>响应灵敏度 <output id="ocean-sensitivity-value">100%</output><input id="ocean-sensitivity" type="range" min="25" max="200" value="100" /></label>
+                  <label>倾斜幅度 <output id="ocean-tilt-value">100%</output><input id="ocean-tilt" type="range" min="50" max="160" value="100" /></label>
+                  <label>碰撞强度 <output id="ocean-impact-value">100%</output><input id="ocean-impact" type="range" min="0" max="200" value="100" /></label>
+                  <label>边缘高光 <output id="ocean-edge-value">75%</output><input id="ocean-edge" type="range" min="0" max="100" value="75" /></label>
+                  <div class="ocean-command-row">
+                    <button id="btn-ocean-start" class="primary-button" type="button">进入电子海洋</button>
+                    <button id="btn-ocean-stop" class="ghost-button" type="button">停止</button>
+                  </div>
+                </div>
+              </div>
+            </section>
             <div class="expression-tabs" role="tablist" aria-label="表情工作区">
               <button type="button" class="expression-tab is-active" data-expression-tab="eyes" role="tab">眼睛素材</button>
               <button type="button" class="expression-tab" data-expression-tab="led" role="tab">LED 效果</button>
@@ -1493,7 +1523,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=clock-prominent-20260721"></script>
+  <script src="/app.js?v=electronic-ocean-impact-20260721"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

@@ -78,6 +78,23 @@
   const clockStatus = document.getElementById("clock-status");
   const btnClockShow = document.getElementById("btn-clock-show");
   const btnClockStop = document.getElementById("btn-clock-stop");
+  const oceanPreview = document.getElementById("ocean-preview");
+  const oceanColor = document.getElementById("ocean-color");
+  const oceanBrightness = document.getElementById("ocean-brightness");
+  const oceanFill = document.getElementById("ocean-fill");
+  const oceanSensitivity = document.getElementById("ocean-sensitivity");
+  const oceanTilt = document.getElementById("ocean-tilt");
+  const oceanImpact = document.getElementById("ocean-impact");
+  const oceanEdge = document.getElementById("ocean-edge");
+  const oceanBrightnessValue = document.getElementById("ocean-brightness-value");
+  const oceanFillValue = document.getElementById("ocean-fill-value");
+  const oceanSensitivityValue = document.getElementById("ocean-sensitivity-value");
+  const oceanTiltValue = document.getElementById("ocean-tilt-value");
+  const oceanImpactValue = document.getElementById("ocean-impact-value");
+  const oceanEdgeValue = document.getElementById("ocean-edge-value");
+  const oceanStatus = document.getElementById("ocean-status");
+  const btnOceanStart = document.getElementById("btn-ocean-start");
+  const btnOceanStop = document.getElementById("btn-ocean-stop");
   const agentTaskList = document.getElementById("agent-task-list");
   const chipJoint = document.getElementById("chip-joint");
   const chipJointDot = document.getElementById("chip-joint-dot");
@@ -255,6 +272,14 @@
   let expressionPreviewImage = null;
   let recordEditExpressionMode = "preset";
   let clockPreviewTimer = null;
+  let oceanPreviewTimer = null;
+  let oceanPreviewStartedAt = performance.now();
+  let oceanDynamics = "standard";
+  const OCEAN_DYNAMICS_PRESETS = Object.freeze({
+    soft: { sensitivity_percent: 80, tilt_percent: 70, impact_percent: 45, edge_highlight_percent: 60 },
+    standard: { sensitivity_percent: 100, tilt_percent: 100, impact_percent: 100, edge_highlight_percent: 75 },
+    violent: { sensitivity_percent: 125, tilt_percent: 135, impact_percent: 165, edge_highlight_percent: 95 },
+  });
   const ledEffectSourceCache = new Map();
   const LED_EDITOR_WIDTH = 51;
   const LED_EDITOR_HEIGHT = 9;
@@ -4019,6 +4044,153 @@
     }
   }
 
+  function oceanSettingsFromControls() {
+    return {
+      dynamics: oceanDynamics,
+      color: (oceanColor && oceanColor.value) || "#00b8e0",
+      brightness: Number((oceanBrightness && oceanBrightness.value) || 36),
+      fill_percent: Number((oceanFill && oceanFill.value) || 55),
+      sensitivity_percent: Number((oceanSensitivity && oceanSensitivity.value) || 100),
+      tilt_percent: Number((oceanTilt && oceanTilt.value) || 100),
+      impact_percent: Number((oceanImpact && oceanImpact.value) || 100),
+      edge_highlight_percent: Number((oceanEdge && oceanEdge.value) || 75),
+    };
+  }
+
+  function setOceanDynamics(name, applyValues = true) {
+    const preset = OCEAN_DYNAMICS_PRESETS[name] || OCEAN_DYNAMICS_PRESETS.standard;
+    oceanDynamics = OCEAN_DYNAMICS_PRESETS[name] ? name : "standard";
+    document.querySelectorAll("[data-ocean-dynamics]").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.oceanDynamics === oceanDynamics);
+    });
+    if (applyValues) {
+      if (oceanSensitivity) oceanSensitivity.value = String(preset.sensitivity_percent);
+      if (oceanTilt) oceanTilt.value = String(preset.tilt_percent);
+      if (oceanImpact) oceanImpact.value = String(preset.impact_percent);
+      if (oceanEdge) oceanEdge.value = String(preset.edge_highlight_percent);
+    }
+    renderOceanPreview();
+  }
+
+  function hexToRgb(value) {
+    const match = /^#([0-9a-f]{6})$/i.exec(String(value || ""));
+    if (!match) return null;
+    const parsed = Number.parseInt(match[1], 16);
+    return { r: (parsed >> 16) & 255, g: (parsed >> 8) & 255, b: parsed & 255 };
+  }
+
+  function renderOceanPreview() {
+    if (!oceanPreview) return;
+    const ctx = oceanPreview.getContext("2d");
+    const settings = oceanSettingsFromControls();
+    const elapsed = (performance.now() - oceanPreviewStartedAt) / 1000;
+    const rgb = hexToRgb(settings.color) || { r: 0, g: 184, b: 224 };
+    const brightness = settings.brightness / 96;
+    const baseHeight = 1.2 + 6.3 * settings.fill_percent / 100;
+    const demoTiltBase = oceanDynamics === "violent" ? 3.2 : oceanDynamics === "soft" ? 0.7 : 1.8;
+    const demoTilt = Math.min(4.2, demoTiltBase * settings.tilt_percent / 100) * Math.sin(elapsed * 1.1);
+    ctx.fillStyle = "#0d1316";
+    ctx.fillRect(0, 0, oceanPreview.width, oceanPreview.height);
+    for (let col = 0; col < 51; col += 1) {
+      const columnPosition = col / 25 - 1;
+      const height = baseHeight
+        + demoTilt * columnPosition
+        + Math.sin(elapsed * 1.7 + col * 0.28) * 0.18
+        + Math.sin(elapsed * 0.9 - col * 0.13) * 0.11;
+      const surface = 9 - height;
+      const edgeRow = Math.round(surface);
+      for (let row = 0; row < 9; row += 1) {
+        const coverage = Math.max(0, Math.min(1, row + 1 - surface));
+        const x = col * 10 + 5;
+        const y = row * 10 + 5;
+        ctx.beginPath();
+        ctx.arc(x, y, 3.7, 0, Math.PI * 2);
+        if (coverage <= 0) {
+          ctx.fillStyle = "#30383d";
+        } else if (row === edgeRow) {
+          const mix = settings.edge_highlight_percent / 100;
+          const r = Math.round((rgb.r + (255 - rgb.r) * mix) * brightness);
+          const g = Math.round((rgb.g + (255 - rgb.g) * mix) * brightness);
+          const b = Math.round((rgb.b + (255 - rgb.b) * mix) * brightness);
+          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        } else {
+          const depth = Math.min(1, Math.max(0, (row + 0.5 - surface) / 4));
+          const level = coverage * (0.42 + depth * 0.48) * brightness;
+          ctx.fillStyle = `rgb(${Math.round(rgb.r * level)}, ${Math.round(rgb.g * level)}, ${Math.round(rgb.b * level)})`;
+        }
+        ctx.fill();
+      }
+    }
+    if (oceanBrightnessValue) oceanBrightnessValue.value = String(settings.brightness);
+    if (oceanFillValue) oceanFillValue.value = `${settings.fill_percent}%`;
+    if (oceanSensitivityValue) oceanSensitivityValue.value = `${settings.sensitivity_percent}%`;
+    if (oceanTiltValue) oceanTiltValue.value = `${settings.tilt_percent}%`;
+    if (oceanImpactValue) oceanImpactValue.value = `${settings.impact_percent}%`;
+    if (oceanEdgeValue) oceanEdgeValue.value = `${settings.edge_highlight_percent}%`;
+  }
+
+  function startOceanPreview() {
+    if (!oceanPreview || oceanPreviewTimer) return;
+    renderOceanPreview();
+    oceanPreviewTimer = window.setInterval(renderOceanPreview, 50);
+  }
+
+  function applyOceanState(state) {
+    if (!state || typeof state !== "object") return;
+    if (oceanColor && state.color) oceanColor.value = state.color;
+    if (oceanBrightness && state.brightness) oceanBrightness.value = String(state.brightness);
+    if (oceanFill && state.fill_percent) oceanFill.value = String(state.fill_percent);
+    if (oceanSensitivity && state.sensitivity_percent) oceanSensitivity.value = String(state.sensitivity_percent);
+    if (oceanTilt && state.tilt_percent) oceanTilt.value = String(state.tilt_percent);
+    if (oceanImpact && state.impact_percent !== undefined) oceanImpact.value = String(state.impact_percent);
+    if (oceanEdge && state.edge_highlight_percent !== undefined) oceanEdge.value = String(state.edge_highlight_percent);
+    setOceanDynamics(state.dynamics || "standard", false);
+    renderOceanPreview();
+    if (oceanStatus) {
+      oceanStatus.textContent = state.enabled
+        ? `运行中 · 舵机${state.joint_available ? "已连接" : "无反馈"} · ${state.telemetry_hz || 10} Hz 遥测 / ${state.device_render_fps || 20} FPS 渲染`
+        : "待启动";
+    }
+  }
+
+  async function refreshOcean() {
+    try {
+      const result = await fetchJson("/api/electronic-ocean");
+      applyOceanState(result);
+    } catch (error) {
+      if (oceanStatus) oceanStatus.textContent = `状态加载失败：${error.message || error}`;
+    }
+  }
+
+  async function startOcean() {
+    if (btnOceanStart) btnOceanStart.disabled = true;
+    try {
+      const result = await fetchJson("/api/electronic-ocean/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(oceanSettingsFromControls()),
+      });
+      applyOceanState(result);
+    } catch (error) {
+      if (oceanStatus) oceanStatus.textContent = `启动失败：${error.message || error}`;
+    } finally {
+      if (btnOceanStart) btnOceanStart.disabled = false;
+    }
+  }
+
+  async function stopOcean() {
+    if (btnOceanStop) btnOceanStop.disabled = true;
+    try {
+      const result = await fetchJson("/api/electronic-ocean/stop", { method: "POST" });
+      applyOceanState(result);
+      if (oceanStatus) oceanStatus.textContent = "电子海洋已停止。";
+    } catch (error) {
+      if (oceanStatus) oceanStatus.textContent = `停止失败：${error.message || error}`;
+    } finally {
+      if (btnOceanStop) btnOceanStop.disabled = false;
+    }
+  }
+
   async function refreshExpressionStudio() {
     try {
       const [eyes, effects, presets, capacity] = await Promise.all([
@@ -4055,6 +4227,7 @@
         ].join("  |  ");
       }
       void refreshClock();
+      void refreshOcean();
     } catch (error) {
       if (expressionCapacityEl) expressionCapacityEl.textContent = `表情库加载失败：${error.message || error}`;
     }
@@ -4535,6 +4708,14 @@
   if (btnClockStop) btnClockStop.addEventListener("click", () => { void stopClock(); });
   if (clockColor) clockColor.addEventListener("input", renderClockPreview);
   if (clockEffect) clockEffect.addEventListener("change", renderClockPreview);
+  if (btnOceanStart) btnOceanStart.addEventListener("click", () => { void startOcean(); });
+  if (btnOceanStop) btnOceanStop.addEventListener("click", () => { void stopOcean(); });
+  document.querySelectorAll("[data-ocean-dynamics]").forEach((button) => {
+    button.addEventListener("click", () => setOceanDynamics(button.dataset.oceanDynamics || "standard"));
+  });
+  [oceanColor, oceanBrightness, oceanFill, oceanSensitivity, oceanTilt, oceanImpact, oceanEdge].forEach((control) => {
+    if (control) control.addEventListener("input", renderOceanPreview);
+  });
   if (btnEyeUpload) btnEyeUpload.addEventListener("click", () => { void uploadExpressionEye(); });
   if (ledEffectForm) {
     ledEffectForm.addEventListener("submit", (event) => {
@@ -4565,6 +4746,7 @@
   initializeLedEditor();
   ensureLedPreviewCells();
   startClockPreview();
+  startOceanPreview();
   void refreshSkillsAndRecordings();
   void refreshExpressionStudio();
   if (btnUserSkillsReload) {

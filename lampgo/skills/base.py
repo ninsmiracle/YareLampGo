@@ -51,6 +51,7 @@ class SkillContext:
     events: EventBus
     state: JointState
     clock: Any | None = None
+    electronic_ocean: Any | None = None
 
     async def play_frames(
         self,
