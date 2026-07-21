@@ -45,6 +45,181 @@ def test_return_safe_disables_anticipation():
     asyncio.run(run())
 
 
+def test_return_safe_recovery_prevalidates_guarded_path_before_streaming():
+    from lampgo.skills.builtin.motion_skills import (
+        RECOVERY_HOME_FPS,
+        RECOVERY_HOME_VELOCITY,
+        ReturnSafeSkill,
+        get_safe_position,
+        set_calibration_home,
+    )
+
+    class FakeRecoveryMotion:
+        def __init__(self) -> None:
+            self.recovery_required = True
+            self.current_state = SimpleNamespace(positions=get_safe_position())
+            self.prepared: tuple[dict[str, float], float, int] | None = None
+            self.streamed = False
+            self.completed = False
+
+        def prepare_recovery(self, target, *, max_velocity, fps):
+            self.prepared = (dict(target), max_velocity, fps)
+            return [dict(target)]
+
+        def stream_recovery_frames(self, frames, fps):
+            import threading
+
+            assert self.prepared is not None
+            assert frames == [self.prepared[0]]
+            assert fps == RECOVERY_HOME_FPS
+            self.streamed = True
+            done = threading.Event()
+            done.set()
+            return done
+
+        def complete_recovery(self):
+            self.completed = True
+            self.recovery_required = False
+
+        def abort_recovery(self):
+            raise AssertionError("successful recovery must not abort")
+
+    async def run() -> None:
+        set_calibration_home(
+            {
+                "base_yaw": 0.0,
+                "base_pitch": 27.3,
+                "elbow_pitch": -0.9,
+                "wrist_roll": 22.5,
+                "wrist_pitch": -4.9,
+            }
+        )
+        motion = FakeRecoveryMotion()
+        motion.current_state = SimpleNamespace(positions=get_safe_position())
+
+        result = await ReturnSafeSkill().execute(SimpleNamespace(motion=motion), velocity=60.0)
+
+        assert result.status == "ok"
+        assert motion.prepared is not None
+        assert motion.prepared[1:] == (RECOVERY_HOME_VELOCITY, RECOVERY_HOME_FPS)
+        assert motion.streamed is True
+        assert motion.completed is True
+
+    asyncio.run(run())
+
+
+def test_return_safe_recovery_velocity_is_thirty_degrees_per_second():
+    from lampgo.skills.builtin.motion_skills import RECOVERY_HOME_VELOCITY
+
+    assert RECOVERY_HOME_VELOCITY == 30.0
+
+
+def test_return_safe_logged_three_degree_elbow_error_unblocks_next_motion():
+    from lampgo.skills.builtin.motion_skills import ReturnSafeSkill, get_safe_position, set_calibration_home
+
+    class NearSafeRecoveryMotion:
+        def __init__(self) -> None:
+            self.recovery_required = True
+            self.is_running = True
+            positions = get_safe_position()
+            positions["elbow_pitch"] += 3.05
+            self.current_state = SimpleNamespace(positions=positions)
+            self.completed = False
+
+        def prepare_recovery(self, target, *, max_velocity, fps):
+            del max_velocity, fps
+            return [dict(target)]
+
+        def stream_recovery_frames(self, frames, fps):
+            import threading
+
+            del frames, fps
+            done = threading.Event()
+            done.set()
+            return done
+
+        def complete_recovery(self):
+            self.completed = True
+            self.recovery_required = False
+
+        def abort_recovery(self):
+            raise AssertionError("a safe three-degree residual must not release torque")
+
+    class FakeIdleSway(Skill):
+        skill_id = "idle_sway"
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            return SkillResult(status="ok", data={"started": True})
+
+    async def run() -> None:
+        set_calibration_home(
+            {
+                "base_yaw": 1.3,
+                "base_pitch": 27.3,
+                "elbow_pitch": -0.9,
+                "wrist_roll": 22.5,
+                "wrist_pitch": -4.9,
+            }
+        )
+        motion = NearSafeRecoveryMotion()
+        registry = SkillRegistry()
+        registry.register(ReturnSafeSkill())
+        registry.register(FakeIdleSway())
+        executor = SkillExecutor(registry, EventBus())
+        executor.set_motion_block_reason("Recovery required", allow_return_safe_recovery=True)
+        ctx = SimpleNamespace(motion=motion, led=SimpleNamespace(is_connected=False), clock=None)
+
+        recovered = await executor.invoke("return_safe", ctx)
+        next_motion = await executor.invoke("idle_sway", ctx)
+
+        assert recovered.status == "ok"
+        assert motion.completed is True
+        assert next_motion.status == "ok"
+        assert next_motion.result == {"started": True}
+
+    asyncio.run(run())
+
+
+def test_return_safe_recovery_error_keeps_torque_enabled():
+    from lampgo.skills.builtin.motion_skills import ReturnSafeSkill, get_safe_position
+
+    class FailedRecoveryMotion:
+        def __init__(self) -> None:
+            self.recovery_required = True
+            self.recovery_error = "Recovery feedback watchdog stopped motion: base_pitch stalled"
+            self.current_state = SimpleNamespace(positions=get_safe_position())
+            self.aborted = False
+
+        def prepare_recovery(self, target, *, max_velocity, fps):
+            del max_velocity, fps
+            return [dict(target)]
+
+        def stream_recovery_frames(self, frames, fps):
+            import threading
+
+            del frames, fps
+            done = threading.Event()
+            done.set()
+            return done
+
+        def abort_recovery(self):
+            self.aborted = True
+
+        def stop_immediate(self):
+            pass
+
+    async def run() -> None:
+        motion = FailedRecoveryMotion()
+        result = await ReturnSafeSkill().execute(SimpleNamespace(motion=motion), velocity=60.0)
+
+        assert result.status == "error"
+        assert "feedback watchdog" in result.message
+        assert motion.aborted is False
+
+    asyncio.run(run())
+
+
 def test_executor_preempts_running_skill():
     class SlowSkill(Skill):
         skill_id = "slow_test"
@@ -120,6 +295,46 @@ def test_executor_rejects_virtual_motion_after_hardware_startup_failure() -> Non
         assert result.status == "rejected"
         assert result.error_code == "motor_hardware_unavailable"
         assert result.error_detail == "Unsafe startup pose; torque remains disabled"
+
+    asyncio.run(run())
+
+
+def test_executor_allows_only_return_safe_while_recovery_is_required() -> None:
+    class FakeReturnSafe(Skill):
+        skill_id = "return_safe"
+
+        async def execute(self, ctx, **params):
+            del params
+            ctx.motion.recovery_required = False
+            return SkillResult(status="ok", data={"recovered": True})
+
+    class FakeMoveTo(Skill):
+        skill_id = "move_to"
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            raise AssertionError("ordinary motion must stay blocked during recovery")
+
+    async def run() -> None:
+        registry = SkillRegistry()
+        registry.register(FakeReturnSafe())
+        registry.register(FakeMoveTo())
+        executor = SkillExecutor(registry, EventBus())
+        executor.set_motion_block_reason(
+            "Recovery required",
+            allow_return_safe_recovery=True,
+        )
+        ctx = SimpleNamespace(
+            motion=SimpleNamespace(is_running=False, recovery_required=True),
+            led=SimpleNamespace(is_connected=False),
+        )
+
+        blocked = await executor.invoke("move_to", ctx)
+        recovered = await executor.invoke("return_safe", ctx)
+
+        assert blocked.status == "rejected"
+        assert recovered.status == "ok"
+        assert recovered.result == {"recovered": True}
 
     asyncio.run(run())
 

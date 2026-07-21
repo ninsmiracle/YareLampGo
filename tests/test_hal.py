@@ -129,6 +129,8 @@ def test_hal_configure_seeds_goal_position_before_enabling_torque() -> None:
     assert ("Present_Position", "base_pitch", False) in bus.reads
     assert ("Goal_Position", "base_pitch", 1739, False) in bus.writes
     assert ("Torque_Limit", "base_pitch", 800, False) in bus.writes
+    assert ("Goal_Time", "base_pitch", 0, False) in bus.writes
+    assert ("Goal_Velocity", "base_pitch", 0, False) in bus.writes
 
     disable_idx = bus.writes.index(("Torque_Enable", "base_pitch", 0, True))
     seed_idx = bus.writes.index(("Goal_Position", "base_pitch", 1739, False))
@@ -145,9 +147,7 @@ def test_hal_configure_refuses_present_position_outside_calibration_range() -> N
             self.motors = {"base_pitch": SimpleNamespace(model="dummy")}
             self.model_resolution_table = {"dummy": 4096}
             self.protocol_version = 0
-            self.calibration = {
-                "base_pitch": SimpleNamespace(range_min=1739, range_max=3094, homing_offset=-562)
-            }
+            self.calibration = {"base_pitch": SimpleNamespace(range_min=1739, range_max=3094, homing_offset=-562)}
             self.writes: list[tuple[str, str, int, bool]] = []
             self.values: dict[tuple[str, str], int] = {}
 
@@ -382,9 +382,7 @@ def test_hal_refuses_legacy_calibration_without_single_turn_metadata() -> None:
     from lampgo.core.config import DeviceConfig
     from lampgo.core.hal import HardwareAbstraction
 
-    calibration = {
-        "base_pitch": SimpleNamespace(range_min=1296, range_max=2279, homing_offset=1849)
-    }
+    calibration = {"base_pitch": SimpleNamespace(range_min=1296, range_max=2279, homing_offset=1849)}
     hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
     bus = _SafetyFakeBus(calibration=calibration)
     hal._bus = bus
@@ -396,13 +394,11 @@ def test_hal_refuses_legacy_calibration_without_single_turn_metadata() -> None:
     assert ("Torque_Enable", "base_pitch", 1, True) not in bus.writes
 
 
-def test_hal_refuses_startup_at_calibrated_edge_from_incident_log() -> None:
+def test_hal_keeps_torque_off_and_requires_recovery_at_calibrated_edge() -> None:
     from lampgo.core.config import DeviceConfig
-    from lampgo.core.hal import HardwareAbstraction
+    from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 
-    calibration = {
-        "base_pitch": SimpleNamespace(range_min=1296, range_max=2279, homing_offset=1849)
-    }
+    calibration = {"base_pitch": SimpleNamespace(range_min=1296, range_max=2279, homing_offset=1849)}
     hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
     bus = _SafetyFakeBus(present=2276, calibration=calibration)
     hal._bus = bus
@@ -411,9 +407,232 @@ def test_hal_refuses_startup_at_calibrated_edge_from_incident_log() -> None:
         "base_pitch": {"range_min": 1296, "range_max": 2279},
     }
 
-    with pytest.raises(RuntimeError, match="only 3 counts from calibrated limit"):
-        hal._configure()
+    state = hal._configure()
 
+    assert state is MotorStartupState.RECOVERY_REQUIRED
+    assert "only 3 counts from calibrated limit" in (hal.recovery_reason or "")
+    assert ("Goal_Position", "base_pitch", 2276, False) not in bus.writes
+    assert ("Torque_Enable", "base_pitch", 1, True) not in bus.writes
+
+
+def test_hal_classifies_logged_natural_rest_pose_as_guarded_recovery() -> None:
+    from lampgo.core.config import DeviceConfig
+    from lampgo.core.hal import HardwareAbstraction
+
+    calibration = {
+        "base_pitch": SimpleNamespace(range_min=1124, range_max=2345),
+        "elbow_pitch": SimpleNamespace(range_min=1444, range_max=2673),
+    }
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
+    hal._bus = SimpleNamespace(
+        motors={
+            "base_pitch": SimpleNamespace(model="sts3215"),
+            "elbow_pitch": SimpleNamespace(model="sts3215"),
+        },
+        model_resolution_table={"sts3215": 4096},
+        calibration=calibration,
+    )
+
+    recovery_required = hal._validate_startup_positions(
+        {"base_pitch": 2812, "elbow_pitch": 2858},
+        allow_recovery=True,
+    )
+
+    assert recovery_required is True
+    assert "base_pitch: position 2812" in (hal.recovery_reason or "")
+    assert "elbow_pitch: position 2858" in (hal.recovery_reason or "")
+
+
+def test_hal_configure_keeps_logged_outside_range_pose_connected_for_recovery() -> None:
+    from lampgo.core.config import DeviceConfig
+    from lampgo.core.hal import HardwareAbstraction, MotorStartupState
+
+    calibration = {
+        "base_pitch": SimpleNamespace(
+            range_min=1124,
+            range_max=2345,
+            homing_offset=-1528,
+            drive_mode=0,
+        )
+    }
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
+    bus = _SafetyFakeBus(present=2812, calibration=calibration)
+    hal._bus = bus
+    hal._load_calibration_data = lambda: {
+        "_meta": {"schema_version": 2, "sts3215_single_turn_verified": True},
+        "base_pitch": {"range_min": 1124, "range_max": 2345},
+    }
+
+    state = hal._configure()
+
+    assert state is MotorStartupState.RECOVERY_REQUIRED
+    assert "position 2812 is outside calibrated range 1124..2345" in (hal.recovery_reason or "")
+    assert ("Goal_Position", "base_pitch", 2812, False) not in bus.writes
+    assert ("Torque_Enable", "base_pitch", 1, True) not in bus.writes
+
+
+def test_hal_recovery_validates_entire_slow_path_before_enabling_torque() -> None:
+    from lampgo.core.config import DeviceConfig
+    from lampgo.core.hal import HardwareAbstraction, MotorStartupState
+
+    calibration = {
+        "base_pitch": SimpleNamespace(
+            range_min=1296,
+            range_max=2279,
+            homing_offset=1849,
+            drive_mode=0,
+        )
+    }
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
+    bus = _SafetyFakeBus(present=2276, calibration=calibration)
+    hal._bus = bus
+    hal._connected = True
+    hal._startup_state = MotorStartupState.RECOVERY_REQUIRED
+
+    start = hal.read_recovery_start()["base_pitch"]
+    frames = [{"base_pitch": start + (0.0 - start) * (index / 240)} for index in range(1, 241)]
+
+    hal.prepare_recovery(frames)
+
+    assert hal.startup_state is MotorStartupState.RECOVERING
+    seed_idx = bus.writes.index(("Goal_Position", "base_pitch", 2276, False))
+    torque_idx = bus.writes.index(("Torque_Enable", "base_pitch", 1, True))
+    assert seed_idx < torque_idx
+
+
+def test_hal_recovery_from_logged_pose_expands_then_restores_hardware_limit() -> None:
+    from lampgo.core.config import DeviceConfig
+    from lampgo.core.hal import HardwareAbstraction, MotorStartupState
+
+    calibration = {
+        "base_pitch": SimpleNamespace(
+            range_min=1124,
+            range_max=2345,
+            homing_offset=-1528,
+            drive_mode=0,
+        )
+    }
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
+    bus = _SafetyFakeBus(present=2812, calibration=calibration)
+    hal._bus = bus
+    hal._connected = True
+    hal._startup_state = MotorStartupState.RECOVERY_REQUIRED
+
+    start = hal.read_recovery_start()["base_pitch"]
+    target = 27.3
+    frames = [{"base_pitch": start + (target - start) * (index / 800)} for index in range(1, 801)]
+
+    hal.prepare_recovery(frames)
+
+    expand_idx = bus.writes.index(("Max_Position_Limit", "base_pitch", 2812, False))
+    profile_idx = bus.writes.index(("Goal_Velocity", "base_pitch", 8, False))
+    seed_idx = bus.writes.index(("Goal_Position", "base_pitch", 2812, False))
+    torque_idx = bus.writes.index(("Torque_Enable", "base_pitch", 1, True))
+    assert expand_idx < profile_idx < seed_idx < torque_idx
+    assert bus.values[("Acceleration", "base_pitch")] == 5
+    assert bus.values[("Goal_Time", "base_pitch")] == 0
+    assert bus.values[("Goal_Velocity", "base_pitch")] == 8
+    assert hal.startup_state is MotorStartupState.RECOVERING
+
+    bus.present = 2045
+    hal.complete_recovery()
+
+    assert hal.startup_state is MotorStartupState.READY
+    assert not any(
+        register == "Torque_Enable" and value == 0
+        for register, _motor, value, _retry in bus.writes[torque_idx + 1 :]
+    )
+    assert bus.values[("Acceleration", "base_pitch")] == 50
+    assert bus.values[("Goal_Velocity", "base_pitch")] == 0
+    assert bus.values[("Max_Position_Limit", "base_pitch")] == 2345
+    assert not hal._recovery_expanded_limit_motors
+    assert not hal._recovery_profile_motors
+
+
+def test_hal_recovery_path_preserves_logged_wrist_pitch_start_count() -> None:
+    import math
+
+    from lampgo.core.config import DeviceConfig
+    from lampgo.core.hal import HardwareAbstraction
+
+    raw_ranges = {
+        "base_yaw": (1226, 2839),
+        "base_pitch": (1124, 2345),
+        "elbow_pitch": (1444, 2673),
+        "wrist_roll": (1029, 2553),
+        "wrist_pitch": (1090, 3115),
+    }
+    calibration = {
+        motor: SimpleNamespace(
+            range_min=range_min,
+            range_max=range_max,
+            drive_mode=0,
+        )
+        for motor, (range_min, range_max) in raw_ranges.items()
+    }
+    present_raw = {
+        "base_yaw": 2047,
+        "base_pitch": 2769,
+        "elbow_pitch": 2860,
+        "wrist_roll": 2047,
+        "wrist_pitch": 2046,
+    }
+    target = {
+        "base_yaw": 1.3,
+        "base_pitch": 27.3,
+        "elbow_pitch": -0.9,
+        "wrist_roll": 22.5,
+        "wrist_pitch": -4.9,
+    }
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
+    hal._bus = SimpleNamespace(
+        motors={motor: SimpleNamespace(model="sts3215") for motor in calibration},
+        model_resolution_table={"sts3215": 4096},
+        calibration=calibration,
+    )
+
+    start = {motor: hal._raw_to_normalized(motor, float(raw), calibration[motor]) for motor, raw in present_raw.items()}
+    assert hal._normalized_to_raw("wrist_pitch", start["wrist_pitch"], calibration["wrist_pitch"]) == 2046
+
+    max_distance = max(abs(target[motor] - start[motor]) for motor in target)
+    frame_count = max(1, math.ceil(max_distance / 30.0 * 50))
+    frames = [
+        {motor: start[motor] + (target[motor] - start[motor]) * ((index + 1) / frame_count) for motor in target}
+        for index in range(frame_count)
+    ]
+
+    hal._validate_recovery_plan(present_raw, frames)
+
+    first_wrist_raw = hal._normalized_to_raw(
+        "wrist_pitch",
+        frames[0]["wrist_pitch"],
+        calibration["wrist_pitch"],
+    )
+    assert first_wrist_raw == 2046
+
+
+def test_hal_recovery_rejects_untrusted_path_without_enabling_torque() -> None:
+    from lampgo.core.config import DeviceConfig
+    from lampgo.core.hal import HardwareAbstraction, MotorStartupState
+
+    calibration = {
+        "base_pitch": SimpleNamespace(
+            range_min=1296,
+            range_max=2279,
+            homing_offset=1849,
+            drive_mode=0,
+        )
+    }
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
+    bus = _SafetyFakeBus(present=2276, calibration=calibration)
+    hal._bus = bus
+    hal._connected = True
+    hal._startup_state = MotorStartupState.RECOVERY_REQUIRED
+
+    with pytest.raises(RuntimeError, match="jumps"):
+        hal.prepare_recovery([{"base_pitch": 0.0}])
+
+    assert hal.startup_state is MotorStartupState.RECOVERY_REQUIRED
     assert ("Goal_Position", "base_pitch", 2276, False) not in bus.writes
     assert ("Torque_Enable", "base_pitch", 1, True) not in bus.writes
 
@@ -454,15 +673,11 @@ def test_hal_rejects_overflowed_and_edge_neutral_calibration() -> None:
         )
 
 
-def test_hal_final_neutral_confirmation_retries_without_discarding_calibration(
-    monkeypatch, capsys
-) -> None:
+def test_hal_final_neutral_confirmation_retries_without_discarding_calibration(monkeypatch, capsys) -> None:
     from lampgo.core.config import DeviceConfig
     from lampgo.core.hal import HardwareAbstraction
 
-    calibration = {
-        "base_pitch": SimpleNamespace(range_min=1429, range_max=2158, homing_offset=0)
-    }
+    calibration = {"base_pitch": SimpleNamespace(range_min=1429, range_max=2158, homing_offset=0)}
     hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
     bus = _SafetyFakeBus(calibration=calibration)
     positions = iter([2149, 2051])
@@ -485,15 +700,11 @@ def test_hal_final_neutral_confirmation_retries_without_discarding_calibration(
     assert "only 9 counts from calibrated limit" in capsys.readouterr().out
 
 
-def test_hal_final_pose_inside_limits_saves_even_when_not_exactly_neutral(
-    monkeypatch, capsys
-) -> None:
+def test_hal_final_pose_inside_limits_saves_even_when_not_exactly_neutral(monkeypatch, capsys) -> None:
     from lampgo.core.config import DeviceConfig
     from lampgo.core.hal import HardwareAbstraction
 
-    calibration = {
-        "elbow_pitch": SimpleNamespace(range_min=1422, range_max=2776, homing_offset=0)
-    }
+    calibration = {"elbow_pitch": SimpleNamespace(range_min=1422, range_max=2776, homing_offset=0)}
     hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null"))
     bus = _SafetyFakeBus()
     bus.motors = {"elbow_pitch": SimpleNamespace(model="sts3215")}
@@ -518,9 +729,7 @@ def test_hal_saved_calibration_marks_single_turn_verification(tmp_path) -> None:
     from lampgo.core.config import DeviceConfig
     from lampgo.core.hal import HardwareAbstraction
 
-    hal = HardwareAbstraction(
-        DeviceConfig(motor_port="/dev/null", lamp_id="TEST", calibration_dir=tmp_path)
-    )
+    hal = HardwareAbstraction(DeviceConfig(motor_port="/dev/null", lamp_id="TEST", calibration_dir=tmp_path))
     calibration = {
         "base_pitch": SimpleNamespace(
             id=2,

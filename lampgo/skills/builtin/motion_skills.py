@@ -21,6 +21,7 @@ SAFE_POSITION: dict[str, float] = {
     "wrist_pitch": 0.0,
 }
 
+
 def set_calibration_home(home: dict[str, float]) -> None:
     """Inject calibration-derived home for return_safe/startup homing."""
     for joint in SAFE_POSITION:
@@ -84,6 +85,9 @@ class MoveToSkill(Skill):
 
 
 STARTUP_HOME_VELOCITY = 30.0
+RECOVERY_HOME_VELOCITY = 30.0
+RECOVERY_HOME_FPS = 50
+RECOVERY_FINAL_TOLERANCE_DEGREES = 5.0
 
 
 class ReturnSafeSkill(Skill):
@@ -100,9 +104,85 @@ class ReturnSafeSkill(Skill):
         ),
     }
 
+    def __init__(self) -> None:
+        self._motion = None
+        self._recovery_active = False
+
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        self._motion = ctx.motion
         velocity = float(params.get("velocity", 60.0))
         safe = get_safe_position()
+
+        if bool(getattr(ctx.motion, "recovery_required", False)):
+            self._recovery_active = True
+            logger.info(
+                "return_safe.recovery_preflight",
+                requested_velocity=velocity,
+                recovery_velocity=RECOVERY_HOME_VELOCITY,
+                target=safe,
+            )
+            try:
+                frames = await asyncio.to_thread(
+                    ctx.motion.prepare_recovery,
+                    safe,
+                    max_velocity=RECOVERY_HOME_VELOCITY,
+                    fps=RECOVERY_HOME_FPS,
+                )
+                done_event = ctx.motion.stream_recovery_frames(frames, fps=RECOVERY_HOME_FPS)
+                # Do not infer failure from the precomputed frame duration.
+                # Under gravity a healthy loaded joint can trail the command
+                # timeline while still moving steadily toward the safe target.
+                # MotionRuntime signals completion only after real feedback is
+                # at target, or after its safety watchdog has already stopped a
+                # genuine fault.
+                while not done_event.is_set():
+                    await asyncio.sleep(0.05)
+
+                recovery_error = getattr(ctx.motion, "recovery_error", None)
+                if recovery_error:
+                    raise RuntimeError(str(recovery_error))
+
+                actual = ctx.motion.current_state.positions
+                errors = {
+                    joint: round(actual.get(joint, float("inf")) - target, 2)
+                    for joint, target in safe.items()
+                    if abs(actual.get(joint, float("inf")) - target) > RECOVERY_FINAL_TOLERANCE_DEGREES
+                }
+                if errors:
+                    raise RuntimeError(
+                        f"Recovery did not reach the verified return_safe target; joint errors: {errors}"
+                    )
+
+                await asyncio.to_thread(ctx.motion.complete_recovery)
+                self._recovery_active = False
+            except Exception as exc:  # noqa: BLE001
+                # Recovery failures are reported without automatically
+                # releasing torque. The motor bus already enforces its torque
+                # limit, and ordinary software observations (lag, clipping or
+                # a completion mismatch) must not make a raised arm fall.
+                logger.warning(
+                    "return_safe.recovery_failed_holding_torque",
+                    error=str(exc),
+                    torque_held=True,
+                )
+                self._recovery_active = False
+                return SkillResult(status="error", message=str(exc))
+
+            self._recovery_active = False
+            logger.info(
+                "return_safe.recovery_done",
+                velocity=RECOVERY_HOME_VELOCITY,
+                frame_count=len(frames),
+            )
+            return SkillResult(
+                status="ok",
+                data={
+                    "recovered": True,
+                    "velocity": RECOVERY_HOME_VELOCITY,
+                    "frame_count": len(frames),
+                },
+            )
+
         target = MotionTarget(joints=dict(safe), max_velocity=velocity, anticipation=False)
         logger.info("return_safe.queueing", velocity=velocity, target=safe)
         done_event = ctx.motion.move_to(target)
@@ -112,6 +192,17 @@ class ReturnSafeSkill(Skill):
             return SkillResult(status="error", message="Homing did not complete within timeout")
         logger.info("return_safe.done")
         return SkillResult(status="ok")
+
+    async def cancel(self) -> None:
+        if self._motion is None:
+            return
+        if self._recovery_active:
+            # Cancellation/pre-emption is not an emergency stop. Keep the
+            # active servo goals and torque so the structure cannot fall.
+            self._motion.stop_immediate()
+            self._recovery_active = False
+            return
+        self._motion.stop_immediate()
 
 
 class EStopSkill(Skill):

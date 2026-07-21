@@ -36,7 +36,7 @@ from lampgo.core.events import (
     ToolCallPlanned,
     TtsAudio,
 )
-from lampgo.core.hal import HardwareAbstraction
+from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
@@ -521,6 +521,11 @@ class LampgoServer:
         async with self._record_lock:
             if self.config.no_hw or not self.hal.is_connected:
                 return {"ok": False, "error": "hardware not connected"}
+            if self.hal.recovery_required:
+                return {
+                    "ok": False,
+                    "error": "motor recovery required; run return_safe before recording",
+                }
             if self._record_recorder is not None:
                 return {"ok": False, "error": "recording session already active"}
 
@@ -1461,9 +1466,11 @@ class LampgoServer:
         positions = self.motion.current_state.positions
         health = "ok" if not self.safety.is_estopped() else "degraded"
         virtual = bool(getattr(self.motion, "is_virtual", False))
+        motor_startup_state = self.hal.startup_state.value
+        recovery_error = self.hal.recovery_reason if self.hal.recovery_required else None
         if not self.hal.is_connected and not virtual:
             health = "disconnected"
-        if self._hal_startup_error:
+        if self._hal_startup_error or recovery_error:
             health = "degraded"
         cat_teaser_camera = self._cat_teaser_camera_status()
         camera_ready = self._cat_teaser_camera_ready(cat_teaser_camera)
@@ -1480,7 +1487,8 @@ class LampgoServer:
                 "estop_reason": self.safety.last_estop_reason,
                 "recording": self._record_status(),
                 "hal_connected": bool(self.hal.is_connected),
-                "hardware_error": self._hal_startup_error,
+                "motor_startup_state": motor_startup_state,
+                "hardware_error": self._hal_startup_error or recovery_error,
                 "led_ready": bool(self.led.is_connected),
                 "camera_ready": camera_ready,
                 "cat_teaser_camera": cat_teaser_camera,
@@ -1948,12 +1956,19 @@ class LampgoServer:
                 self._use_virtual_motion()
             else:
                 self._hal_startup_error = None
-                self.executor.set_motion_block_reason(None)
+                if self.hal.recovery_required:
+                    self.executor.set_motion_block_reason(
+                        self.hal.recovery_reason or "Motor recovery is required.",
+                        allow_return_safe_recovery=True,
+                    )
+                else:
+                    self.executor.set_motion_block_reason(None)
                 try:
                     self.led.connect()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("server.led_connect_failed", error=str(exc))
-                self.motion.start()
+                if not self.hal.recovery_required:
+                    self.motion.start()
                 home = self.hal.get_calibration_home()
                 if home is not None:
                     from lampgo.skills.builtin.motion_skills import set_calibration_home
@@ -2049,10 +2064,16 @@ class LampgoServer:
 
             self.hal = new_hal
             self._hal_startup_error = None
-            self.executor.set_motion_block_reason(None)
             self.motion = MotionRuntime(self.hal, self.safety, self.config.motion)
             self.config.no_hw = False
-            self.motion.start()
+            if self.hal.recovery_required:
+                self.executor.set_motion_block_reason(
+                    self.hal.recovery_reason or "Motor recovery is required.",
+                    allow_return_safe_recovery=True,
+                )
+            else:
+                self.executor.set_motion_block_reason(None)
+                self.motion.start()
             home = self.hal.get_calibration_home()
             if home is not None:
                 from lampgo.skills.builtin.motion_skills import set_calibration_home
@@ -2062,8 +2083,13 @@ class LampgoServer:
             return {
                 "ok": True,
                 "connected": True,
-                "mode": "hardware",
+                "mode": (
+                    "hardware_recovery"
+                    if self.hal.startup_state is MotorStartupState.RECOVERY_REQUIRED
+                    else "hardware"
+                ),
                 "port": port,
+                "motor_startup_state": self.hal.startup_state.value,
             }
 
     async def _home_on_start(self) -> None:

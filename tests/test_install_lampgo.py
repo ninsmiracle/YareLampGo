@@ -8,12 +8,18 @@ from tools.install_lampgo import (
     HostInfo,
     Installer,
     InstallError,
+    _console_safe,
     assert_public_dependency_sources,
     build_uv_sync_command,
     detect_host,
     redact,
     validate_host,
 )
+
+
+def test_console_output_survives_legacy_windows_encoding() -> None:
+    rendered = _console_safe("LampGo 全量依赖安装器", "cp1252")
+    assert rendered == r"LampGo \u5168\u91cf\u4f9d\u8d56\u5b89\u88c5\u5668"
 
 
 def test_detects_supported_platform_families() -> None:
