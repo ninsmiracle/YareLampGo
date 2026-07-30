@@ -8,9 +8,14 @@ uv run lampgo run --web
 
 启动过程会自动查找 PATH、ChatGPT App 和 Codex App 中的 CLI，检查登录状态，并幂等注册 `lampgo` stdio MCP。用户不需要配置 token、端口、环境变量或编辑 `~/.codex/config.toml`。
 
-## 用 Codex 完成首次装机
+## 两个 Codex skill 的分工
 
-仓库还提供一个面向首次安装/装机的 `lampgo-setup` skill。它和运行时 MCP 分工不同：skill 带用户完成依赖、V2.0 硬件检查、烧录、校准、配网和配置；运行时 MCP 则让已经启动的 LampGo 接受 Codex 工具调用。
+仓库提供两个职责不同的 Codex skill：
+
+- `lampgo-setup` 带用户完成依赖、V2.0 硬件检查、烧录、校准、配网和配置。
+- `lampgo-control` 是已运行设备的“身体说明书”：先做只读预检，再通过运行时 MCP 观察、行动和验证。
+
+两者都由同一个安装器安装：
 
 macOS / Linux：
 
@@ -31,6 +36,15 @@ powershell -ExecutionPolicy Bypass -File .\install-codex-skill.ps1
 ```
 
 skill 会选择纯软件、已组装成品或 DIY V2.0 路线，并在写舵机 ID、擦除烧录、首次 12V、校准和真实运动前要求明确的物理确认。skill 文件见 [`skills/lampgo-setup/SKILL.md`](../../skills/lampgo-setup/SKILL.md)。
+
+设备已经启动时说：
+
+```text
+用 $lampgo-control 控制 LampGo 完成一个真实任务
+```
+
+`lampgo-control` 不写动作答案。它只规定 MCP 能力、真机/模拟状态区分、首次运动确认、一步一调用、动作后复查、急停和回安全位。拍摄自主性或对比不同模型时，才按需读取
+[`creator-experiment.md`](../../skills/lampgo-control/references/creator-experiment.md)，用同一任务、同一工具、同一时间/调用预算和多次运行建立可信对照。
 
 ## 通信链路
 
@@ -80,9 +94,12 @@ LampGo 的同步回复热路径只读取：
 - `lampgo_status`
 - `lampgo_list_skills`
 - `lampgo_invoke`
+- `lampgo_estop`
 - `lampgo_camera_snap`
 - `lampgo_ask_user`
 - `lampgo_agent_tasks`
+
+`lampgo_estop` 调用真正的持久安全急停端点并立即停止运动，不负责自动复位。`lampgo_camera_snap` 成功时返回一个 MCP image content block；文本元数据不再包含大段 Base64，因此 Codex 可以直接检查当前帧。
 
 ## 故障提示
 

@@ -138,6 +138,8 @@ SKILL_KEYWORDS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "sway": ("idle_sway", None),
     "害羞": ("set_expression", {"expression": "blush"}),
     "开心": ("set_expression", {"expression": "smiley"}),
+    "狂喜": ("set_expression", {"expression": "ecstatic"}),
+    "嗨起来": ("set_expression", {"expression": "ecstatic"}),
     "难过": ("set_expression", {"expression": "sad"}),
     "伤心": ("set_expression", {"expression": "sad"}),
     "生气": ("set_expression", {"expression": "angry"}),

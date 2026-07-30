@@ -8,6 +8,8 @@ authenticated HTTP API and therefore through its normal safety boundaries.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
 import sys
@@ -49,6 +51,15 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["skill_id"],
             "additionalProperties": False,
         },
+    },
+    {
+        "name": "lampgo_estop",
+        "description": (
+            "Trigger LampGo's persistent safety emergency stop and stop motion immediately. "
+            "This does not reset the emergency-stop state."
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "lampgo_camera_snap",
@@ -144,6 +155,8 @@ async def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             {"skill_id": skill_id, "params": params, "wait": wait},
             timeout_s=_SKILL_INVOKE_TIMEOUT_S if wait else _DEFAULT_DAEMON_TIMEOUT_S,
         )
+    if name == "lampgo_estop":
+        return await _daemon_request("POST", "/api/estop", timeout_s=10.0)
     if name == "lampgo_camera_snap":
         return await _daemon_request("GET", "/api/camera/snap")
     if name == "lampgo_ask_user":
@@ -174,6 +187,44 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+def _tool_content(name: str, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    is_error = payload.get("ok") is False
+    if name != "lampgo_camera_snap" or is_error:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return [{"type": "text", "text": text}], is_error
+
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    data_url = str(result.get("data_url") or "")
+    header, separator, encoded = data_url.partition(",")
+    mime_type = header.removeprefix("data:").removesuffix(";base64")
+    try:
+        if separator != "," or not header.startswith("data:image/") or not header.endswith(";base64"):
+            raise ValueError("invalid camera data URL")
+        base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        error_payload = {
+            "ok": False,
+            "error": "LampGo camera returned invalid image data",
+            "result": {"device": result.get("device")},
+        }
+        text = json.dumps(error_payload, ensure_ascii=False, separators=(",", ":"))
+        return [{"type": "text", "text": text}], True
+
+    metadata = {
+        "ok": True,
+        "result": {
+            key: value
+            for key, value in result.items()
+            if key != "data_url"
+        },
+    }
+    text = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+    return [
+        {"type": "text", "text": text},
+        {"type": "image", "data": encoded, "mimeType": mime_type},
+    ], False
+
+
 async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
     request_id = message.get("id")
     method = str(message.get("method") or "")
@@ -199,10 +250,10 @@ async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
         name = str(params.get("name") or "")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         payload = await _call_tool(name, arguments)
-        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        content, is_error = _tool_content(name, payload)
         return _result(
             request_id,
-            {"content": [{"type": "text", "text": text}], "isError": payload.get("ok") is False},
+            {"content": content, "isError": is_error},
         )
     if method == "resources/list":
         return _result(request_id, {"resources": []})

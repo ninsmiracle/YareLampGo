@@ -179,7 +179,17 @@ def set_eye_default_led(eye_clip_id: str, led_effect_id: str | None) -> dict[str
 def _builtin_role(name: str) -> str:
     if name in {"left", "right", "up", "down", "check", "cross", "exclaim", "question"}:
         return "direction" if name in ALLOWED_DIRECTIONS else "symbol"
-    if name in {"smiley", "sad", "surprised", "blush", "angry", "thinking", "sleep", "helpless", "cool"}:
+    if name in {
+        "smiley",
+        "sad",
+        "surprised",
+        "blush",
+        "angry",
+        "thinking",
+        "sleep",
+        "helpless",
+        "cool",
+    }:
         return "mouth"
     return "accent"
 
@@ -515,8 +525,8 @@ def save_expression_preset(raw: dict[str, Any]) -> dict[str, Any]:
     if playback not in ALLOWED_PLAYBACK:
         raise ExpressionLibraryError("playback must be once or loop")
     duration_ms = int(raw.get("duration_ms") or (eye or {}).get("duration_ms") or 3000)
-    if not 2500 <= duration_ms <= 3500:
-        raise ExpressionLibraryError("duration_ms must be 2500-3500")
+    if not 1000 <= duration_ms <= 3500:
+        raise ExpressionLibraryError("duration_ms must be 1000-3500")
     label = str(raw.get("name") or raw.get("label") or preset_id).strip()[:64] or preset_id
     item = {
         "preset_id": preset_id,
@@ -598,8 +608,8 @@ def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
     duration_ms = int(
         raw.get("duration_ms") or (preset or {}).get("duration_ms") or (eye or {}).get("duration_ms") or 3000
     )
-    if not 2500 <= duration_ms <= 3500:
-        raise ExpressionLibraryError("duration_ms must be 2500-3500")
+    if not 1000 <= duration_ms <= 3500:
+        raise ExpressionLibraryError("duration_ms must be 1000-3500")
     return {
         "preset_id": (preset or {}).get("preset_id"),
         "eye_clip_id": eye_id,
@@ -701,8 +711,8 @@ def expression_schemas() -> dict[str, Any]:
             "properties": {
                 "eye_clip_id": {"type": "string", "pattern": _SAFE_ID_RE.pattern},
                 "default_led_effect_id": {"type": ["string", "null"]},
-                "fps": {"type": "integer", "minimum": 8, "maximum": 12},
-                "duration_ms": {"type": "integer", "minimum": 2500, "maximum": 3500},
+                "fps": {"type": "integer", "minimum": 8, "maximum": 30},
+                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 3500},
             },
         },
         "led_effect": {
@@ -741,7 +751,7 @@ def expression_schemas() -> dict[str, Any]:
                 "eye_clip_id": {"type": ["string", "null"]},
                 "led_effect_id": {"type": ["string", "null"]},
                 "playback": {"enum": sorted(ALLOWED_PLAYBACK), "default": "loop"},
-                "duration_ms": {"type": "integer", "minimum": 2500, "maximum": 3500},
+                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 3500},
             },
         },
     }

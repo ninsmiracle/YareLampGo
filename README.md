@@ -26,9 +26,12 @@ YareLampGo 把电机、屏幕、RGB LED、摄像头、麦克风和大模型装�
 - **非技术用户也能玩。** 浏览器里就能聊天、控制动作、画表情、录制动作和改设置。
 - **软件、固件、接线资料和 V2 结构总成已开源。** 支持二创和魔改；结构可自行拆分后 3D 打印。
 
-## 有 Codex？直接让它带你装
+## 有 Codex？让它带你装，也能让它接管任务
 
-仓库自带 `$lampgo-setup` skill。它不是再丢给你一篇安装文档，而是会根据你手上的东西，一步步检查并执行安装。
+仓库自带两个 Codex skill：
+
+- `$lampgo-setup`：根据你手上的硬件，一步步检查并执行安装。
+- `$lampgo-control`：作为 LampGo 的“身体说明书”，让 Codex 只通过安全 MCP 观察、行动和验证真实结果。
 
 macOS / Linux：
 
@@ -53,6 +56,14 @@ powershell -ExecutionPolicy Bypass -File .\install-codex-skill.ps1
 ```
 
 Skill 会自动判断你是“先体验软件”“已有成品机”还是“从零 DIY”。能安全执行的步骤它会直接做；写舵机 ID、烧录固件、首次接通 12V、校准和第一次真实运动前，它会停下来让你确认。中文用户默认全程中文。
+
+设备已经运行时，也可以新建任务说：
+
+```text
+用 $lampgo-control 控制 LampGo 完成一个真实任务
+```
+
+控制 skill 只说明身体能力、安全边界和验证规则，不预设动作顺序。拍摄自主控制或模型横评时，它还提供同任务、同预算、无人干预的实验协议。
 
 详细说明见 [Codex 集成](docs/guides/codex-integration.md)。
 
@@ -126,6 +137,7 @@ uv run lampgo run --web
 
 - 可以直接说“把 Codex 叫来”，把当前任务交给本机 Codex。
 - Codex 可以读取台灯状态、调用安全动作、抓取摄像头画面或向你提问。
+- `$lampgo-control` 会先验证真机、校准、急停和忙闲状态；调用成功但硬件跳过时不会冒充真实动作。
 - LampGo 可以参考 Codex 的记忆摘要，也能在确认后导入 Agent 的资料和核心记忆。
 - 其他 Agent 可以通过 CLI、HTTP / WebSocket API 或技能层继续接入。
 

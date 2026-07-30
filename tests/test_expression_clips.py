@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +72,37 @@ def test_expression_clip_rejects_short_duration(monkeypatch, tmp_path):
             grid_rows=1,
             grid_cols=5,
         )
+
+
+def test_create_expression_clip_supports_precise_two_second_30fps_performance(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+
+    manifest = create_expression_clip(
+        clip_id="ecstatic-eyes",
+        expression="ecstatic",
+        source_bytes=_png_sprite_sheet(rows=6, cols=10),
+        filename="ecstatic.png",
+        content_type="image/png",
+        fps=30,
+        grid_rows=6,
+        grid_cols=10,
+        default_led_effect_id="ecstatic-mouth",
+    )
+
+    payload = (tmp_path / "expression_clips" / "ecstatic-eyes" / "lcd.bin").read_bytes()
+    _, _, frame_count, fps = struct.unpack_from("<HHHH", payload, 6)
+    offset = 14
+    durations: list[int] = []
+    for _ in range(frame_count):
+        _, _, _, _, frame_duration_ms, run_count = struct.unpack_from("<HHHHHH", payload, offset)
+        durations.append(frame_duration_ms)
+        offset += 12 + run_count * 4
+
+    assert manifest["duration_ms"] == 2000
+    assert manifest["frame_count"] == 60
+    assert fps == 30
+    assert set(durations) == {33, 34}
+    assert sum(durations) == 2000
 
 
 def test_expression_clip_api_upload_and_sync(monkeypatch, tmp_path):

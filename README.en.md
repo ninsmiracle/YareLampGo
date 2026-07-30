@@ -26,9 +26,12 @@ YareLampGo puts motors, screens, RGB LEDs, a camera, microphones, and LLM toolin
 - **Work for non-technical users.** Chat, move, draw expressions, record motions, and change settings in the browser.
 - **Open software, firmware, wiring references, and a V2 structural assembly.** Remix the project or split the STEP assembly into parts for 3D printing.
 
-## Have Codex? Let It Guide Setup
+## Have Codex? Let It Guide Setup and Operate the Lamp
 
-The repository includes a `$lampgo-setup` skill. It does not merely show another installation article: it inspects what you have and works through the setup interactively.
+The repository includes two Codex skills:
+
+- `$lampgo-setup` inspects what you have and works through setup interactively.
+- `$lampgo-control` is a body manual that lets Codex observe, act, and verify physical results only through the safe LampGo MCP.
 
 macOS / Linux:
 
@@ -53,6 +56,14 @@ Use $lampgo-setup to install and configure my YareLampGo V2.0.
 ```
 
 The skill selects software-only, assembled-unit, or DIY setup. It performs safe work directly, then pauses before servo-ID writes, firmware flashing, first 12V power, calibration, and the first real motion. It follows the user's language and defaults to Simplified Chinese when there is no language context.
+
+When the device is already running, start a new task and say:
+
+```text
+Use $lampgo-control to operate LampGo for a real task.
+```
+
+The control skill defines body capabilities, safety boundaries, and verification rules without prescribing an action sequence. Creator and model-comparison requests also load a same-task, same-budget, no-intervention experiment protocol.
 
 See [Codex Integration](docs/guides/codex-integration.md) for details.
 
@@ -126,6 +137,7 @@ uv run lampgo run --web
 
 - Say “call Codex” to hand the current task to the local Codex process.
 - Codex can inspect status, invoke safe actions, capture a camera frame, or ask the user a question.
+- `$lampgo-control` verifies physical readiness, calibration, emergency-stop state, and busy state first; a skipped hardware call is never reported as physical success.
 - LampGo can reference the Codex memory summary and, with confirmation, import Agent profile and core-memory files.
 - Other Agents can integrate through the CLI, HTTP / WebSocket APIs, or skill layer.
 

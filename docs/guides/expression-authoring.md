@@ -21,8 +21,10 @@ default and keep looping for the full action; callers must explicitly request
    topology and are ignored by the compiler.
 3. User effects use LED program version 2 (`pixel_clip`): exactly 30 ticks at
    10fps, up to 16 RGB colors including the off color, and no executable code.
-4. Use 30 eye frames at 10fps and target 3.0 seconds. The accepted range is
-   8-12fps and 2.5-3.5 seconds.
+4. For energetic expressions, keep the 30fps render cadence while holding
+   readable key poses. A useful default is 60 eye frames over 2.0 seconds.
+   Slower expressions remain supported. The accepted range is 8-30fps and
+   1.0-3.5 seconds.
 5. A transient composition may be previewed or played without being saved.
    An LLM must receive explicit user confirmation before saving a preset.
 6. Do not emit arbitrary code, jumps, unbounded loops, or device allocations.

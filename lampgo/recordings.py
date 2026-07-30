@@ -53,6 +53,7 @@ LED_EXPRESSION_KEYS = (
     "focused",
     "wink",
     "myu7gt",
+    "ecstatic",
 )
 RECORDING_EXPRESSION_HINTS: dict[str, str] = {
     "Stretch": "star",

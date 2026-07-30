@@ -1,0 +1,8 @@
+interface:
+  display_name: "LampGo 身体说明书"
+  short_description: "让 Codex 安全观察并自主控制 LampGo"
+  brand_color: "#F97316"
+  default_prompt: "请使用 $lampgo-control 控制我的 YareLampGo 完成一个真实任务。先做只读预检，只通过已注册的 LampGo MCP 行动；不要预设动作顺序；用可观察结果验证并给出简短调用日志。"
+
+policy:
+  allow_implicit_invocation: true

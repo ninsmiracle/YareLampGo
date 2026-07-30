@@ -17,7 +17,7 @@ async def test_mcp_initialize_and_tools_list() -> None:
 
     assert initialized["result"]["serverInfo"]["name"] == "lampgo"
     names = {tool["name"] for tool in listed["result"]["tools"]}
-    assert {"lampgo_status", "lampgo_invoke", "lampgo_ask_user"} <= names
+    assert {"lampgo_status", "lampgo_invoke", "lampgo_estop", "lampgo_ask_user"} <= names
     status = next(tool for tool in listed["result"]["tools"] if tool["name"] == "lampgo_status")
     assert status["annotations"]["readOnlyHint"] is True
 
@@ -45,6 +45,79 @@ async def test_mcp_tool_call_proxies_with_structured_result(monkeypatch) -> None
     assert payload["result"]["path"] == "/api/invoke"
     assert payload["result"]["payload"]["skill_id"] == "nod"
     assert request_kwargs["timeout_s"] == mcp_stdio._SKILL_INVOKE_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+async def test_mcp_estop_uses_persistent_safety_endpoint(monkeypatch) -> None:
+    requests = []
+
+    async def fake_request(method, path, payload=None, **kwargs):
+        requests.append((method, path, payload, kwargs))
+        return {"ok": True, "result": {"status": "estopped"}}
+
+    monkeypatch.setattr(mcp_stdio, "_daemon_request", fake_request)
+    response = await mcp_stdio._handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "lampgo_estop", "arguments": {}},
+        }
+    )
+
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["result"]["status"] == "estopped"
+    assert requests == [("POST", "/api/estop", None, {"timeout_s": 10.0})]
+
+
+@pytest.mark.asyncio
+async def test_camera_snap_returns_mcp_image_without_base64_in_text(monkeypatch) -> None:
+    async def fake_request(_method, _path, _payload=None, **_kwargs):
+        return {
+            "ok": True,
+            "result": {
+                "device": "esp32://lampgo",
+                "data_url": "data:image/jpeg;base64,aGVsbG8=",
+            },
+        }
+
+    monkeypatch.setattr(mcp_stdio, "_daemon_request", fake_request)
+    response = await mcp_stdio._handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "lampgo_camera_snap", "arguments": {}},
+        }
+    )
+
+    content = response["result"]["content"]
+    metadata = json.loads(content[0]["text"])
+    assert metadata == {"ok": True, "result": {"device": "esp32://lampgo"}}
+    assert "aGVsbG8=" not in content[0]["text"]
+    assert content[1] == {"type": "image", "data": "aGVsbG8=", "mimeType": "image/jpeg"}
+    assert response["result"]["isError"] is False
+
+
+@pytest.mark.asyncio
+async def test_camera_snap_rejects_invalid_image_payload(monkeypatch) -> None:
+    async def fake_request(_method, _path, _payload=None, **_kwargs):
+        return {"ok": True, "result": {"device": "local://0", "data_url": "data:image/jpeg;base64,%%%"}}
+
+    monkeypatch.setattr(mcp_stdio, "_daemon_request", fake_request)
+    response = await mcp_stdio._handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "lampgo_camera_snap", "arguments": {}},
+        }
+    )
+
+    assert response["result"]["isError"] is True
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["ok"] is False
+    assert payload["error"] == "LampGo camera returned invalid image data"
 
 
 @pytest.mark.asyncio

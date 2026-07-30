@@ -17,12 +17,12 @@ import numpy as np
 
 from lampgo import personastore
 
-TARGET_DURATION_S = 3.0
-MIN_DURATION_S = 2.5
+TARGET_DURATION_S = 1.0
+MIN_DURATION_S = 1.0
 MAX_DURATION_S = 3.5
 MIN_FPS = 8
-MAX_FPS = 12
-DEFAULT_FPS = 10
+MAX_FPS = 30
+DEFAULT_FPS = 30
 MAX_CLIPS = 10
 MAX_LCD_BYTES = 256 * 1024
 
@@ -405,8 +405,16 @@ def _encode_lcd_package(frames: list[np.ndarray], *, fps: int, duration_ms: int)
     out += LCD_MAGIC
     out += struct.pack("<HHHH", LCD_WIDTH, LCD_HEIGHT, len(frames), fps)
     previous: np.ndarray | None = None
-    frame_duration_ms = max(1, int(round(duration_ms / len(frames))))
-    for frame in frames:
+    frame_count = len(frames)
+    for frame_index, frame in enumerate(frames):
+        # Bresenham-style distribution keeps the encoded durations summing to
+        # duration_ms. At 30fps this emits a stable 33/34ms cadence instead of
+        # thirty 33ms frames that finish 10ms early.
+        frame_duration_ms = max(
+            1,
+            ((frame_index + 1) * duration_ms) // frame_count
+            - (frame_index * duration_ms) // frame_count,
+        )
         rgb565 = _rgb_to_rgb565(_resize_rgb(frame, LCD_WIDTH, LCD_HEIGHT))
         if previous is None:
             x0, y0, x1, y1 = 0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1
