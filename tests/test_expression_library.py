@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,8 @@ from lampgo.expression_library import (
 from lampgo.led_effects import LEF_MAGIC
 from lampgo.server import LampgoServer
 from lampgo.web.gateway import WebGateway
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sprite_sheet(*, rows: int = 3, cols: int = 10) -> bytes:
@@ -64,24 +67,25 @@ def _custom_effect(effect_id: str) -> dict:
     )
 
 
-def _pixel_effect(effect_id: str) -> dict:
+def _pixel_effect(effect_id: str, *, default_playback: str | None = None) -> dict:
     rows = ["." * 51 for _ in range(9)]
     rows[4] = "." * 10 + "1" * 31 + "." * 10
-    return save_led_effect(
-        {
-            "effect_id": effect_id,
-            "label": "彩色嘴巴",
-            "role": "mouth",
-            "program": {
-                "version": 2,
-                "type": "pixel_clip",
-                "fps": 10,
-                "palette": {".": "#000000", "1": "#ff0088"},
-                "roles": {"primary": "1"},
-                "frames": [{"rows": rows, "ticks": 30}],
-            },
+    authored = {
+        "effect_id": effect_id,
+        "label": "彩色嘴巴",
+        "role": "mouth",
+        "program": {
+            "version": 2,
+            "type": "pixel_clip",
+            "fps": 10,
+            "palette": {".": "#000000", "1": "#ff0088"},
+            "roles": {"primary": "1"},
+            "frames": [{"rows": rows, "ticks": 30}],
         }
-    )
+    }
+    if default_playback:
+        authored["default_playback"] = default_playback
+    return save_led_effect(authored)
 
 
 def _gateway(monkeypatch, tmp_path: Path) -> WebGateway:
@@ -99,6 +103,56 @@ def test_eye_default_led_and_explicit_none(monkeypatch, tmp_path):
     eye_only = resolve_expression({"eye_clip_id": "focused_eyes", "led_effect_id": None})
     assert eye_only["led_effect_id"] is None
     assert eye_only["eye_storage_clip_id"] == "focused_eyes"
+
+
+def test_expression_resolution_accepts_a_six_second_eye_only_scene(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    _create_eye("long_eyes")
+
+    resolved = resolve_expression({"eye_clip_id": "long_eyes", "duration_ms": 5667, "playback": "once"})
+
+    assert resolved["duration_ms"] == 5667
+    assert resolved["led_effect_id"] is None
+    with pytest.raises(ExpressionLibraryError, match="1000-6000"):
+        resolve_expression({"eye_clip_id": "long_eyes", "duration_ms": 6001})
+
+
+def test_documented_preset_duration_matches_runtime_contract() -> None:
+    schema = json.loads(
+        (ROOT / "docs/schemas/expression-preset.schema.json").read_text(encoding="utf-8")
+    )
+
+    assert schema["properties"]["duration_ms"] == {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 6000,
+    }
+
+
+def test_expression_play_forwards_a_six_second_eye_only_scene(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+    _create_eye("long_eyes")
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_proxy_post(path: str, payload: dict):
+        sent.append((path, payload))
+        return 200, {"ok": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+    with TestClient(gateway.app) as client:
+        played = client.post(
+            "/api/expressions/play",
+            json={"eye_clip_id": "long_eyes", "led_effect_id": None, "playback": "once", "duration_ms": 5667},
+        )
+
+    assert played.status_code == 200
+    assert len(sent) == 1
+    path, payload = sent[0]
+    assert path == "/device/expressions/play"
+    assert payload["eye_clip_id"] == "long_eyes"
+    assert payload["led_effect_id"] is None
+    assert payload["playback"] == "once"
+    assert payload["duration_ms"] == 5667
 
 
 def test_many_to_many_presets_reuse_assets(monkeypatch, tmp_path):
@@ -314,6 +368,15 @@ def test_pixel_led_auto_syncs_then_plays_by_id_with_loop_default(monkeypatch, tm
         item["effect_id"] == "color_mouth"
         for item in catalog.json()["result"]["led_effects"]
     )
+
+
+def test_pixel_led_can_default_to_once(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    _pixel_effect("one_shot", default_playback="once")
+
+    resolved = resolve_expression({"led_effect_id": "one_shot"})
+
+    assert resolved["playback"] == "once"
 
 
 def test_preset_name_can_generate_stable_machine_id(monkeypatch, tmp_path):

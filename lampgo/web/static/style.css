@@ -2827,6 +2827,16 @@ button.device-chip.is-active {
   gap: 4px;
   margin-top: 8px;
 }
+.expression-effect-card--custom {
+  flex-wrap: wrap;
+}
+.expression-effect-card--custom .expression-card-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  flex: 1 0 100%;
+  width: 100%;
+  margin-top: 2px;
+}
 .expression-card-actions button {
   min-height: 26px;
   padding: 3px 7px;
@@ -2835,6 +2845,31 @@ button.device-chip.is-active {
   background: #fff;
   color: #59656d;
   font-size: 11px;
+}
+
+.expression-effect-group-title {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  color: #47535c;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.expression-effect-group-title small {
+  color: #8a949b;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.expression-effect-group-title.expression-group-divider {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid #dce3e7;
 }
 
 .expression-toolbar input[type="text"],

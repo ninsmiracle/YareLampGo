@@ -17,7 +17,12 @@ from typing import Any
 
 from lampgo import personastore
 from lampgo.core.led import led_expression_catalog
-from lampgo.expression_clips import list_expression_clips, load_expression_clip
+from lampgo.expression_clips import (
+    MAX_DEVICE_CLIP_ID_LENGTH,
+    MAX_DURATION_S,
+    list_expression_clips,
+    load_expression_clip,
+)
 from lampgo.led_effects import (
     LED_EFFECT_BUDGET_BYTES,
     MAX_CUSTOM_LED_EFFECTS,
@@ -36,6 +41,7 @@ C6_STAGING_BYTES = 256 * 1024
 MAX_PRESETS = 64
 MAX_PRESET_BYTES = 1024
 PRESET_BUDGET_BYTES = 64 * 1024
+MAX_EXPRESSION_DURATION_MS = int(MAX_DURATION_S * 1000)
 
 ALLOWED_ROLES = {"mouth", "symbol", "direction", "accent"}
 ALLOWED_TEMPLATES = {"mouth", "arrow", "heart", "pulse", "codex"}
@@ -43,6 +49,7 @@ ALLOWED_PLAYBACK = {"once", "loop"}
 ALLOWED_DIRECTIONS = {"left", "right", "up", "down"}
 ALLOWED_MOUTH_VARIANTS = {"smile", "open", "flat", "dizzy"}
 _SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_EYE_CLIP_ID_RE = re.compile(rf"^[a-z0-9][a-z0-9_-]{{0,{MAX_DEVICE_CLIP_ID_LENGTH - 1}}}$")
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -525,8 +532,8 @@ def save_expression_preset(raw: dict[str, Any]) -> dict[str, Any]:
     if playback not in ALLOWED_PLAYBACK:
         raise ExpressionLibraryError("playback must be once or loop")
     duration_ms = int(raw.get("duration_ms") or (eye or {}).get("duration_ms") or 3000)
-    if not 1000 <= duration_ms <= 3500:
-        raise ExpressionLibraryError("duration_ms must be 1000-3500")
+    if not 1000 <= duration_ms <= MAX_EXPRESSION_DURATION_MS:
+        raise ExpressionLibraryError(f"duration_ms must be 1000-{MAX_EXPRESSION_DURATION_MS}")
     label = str(raw.get("name") or raw.get("label") or preset_id).strip()[:64] or preset_id
     item = {
         "preset_id": preset_id,
@@ -602,14 +609,19 @@ def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
 
     merged_params = dict((preset or {}).get("led_params") or {})
     merged_params.update(raw.get("led_params") or {})
-    playback = str(raw.get("playback") or (preset or {}).get("playback") or "loop").strip().lower()
+    playback = str(
+        raw.get("playback")
+        or (preset or {}).get("playback")
+        or (effect or {}).get("default_playback")
+        or "loop"
+    ).strip().lower()
     if playback not in ALLOWED_PLAYBACK:
         raise ExpressionLibraryError("playback must be once or loop")
     duration_ms = int(
         raw.get("duration_ms") or (preset or {}).get("duration_ms") or (eye or {}).get("duration_ms") or 3000
     )
-    if not 1000 <= duration_ms <= 3500:
-        raise ExpressionLibraryError("duration_ms must be 1000-3500")
+    if not 1000 <= duration_ms <= MAX_EXPRESSION_DURATION_MS:
+        raise ExpressionLibraryError(f"duration_ms must be 1000-{MAX_EXPRESSION_DURATION_MS}")
     return {
         "preset_id": (preset or {}).get("preset_id"),
         "eye_clip_id": eye_id,
@@ -709,10 +721,10 @@ def expression_schemas() -> dict[str, Any]:
             "type": "object",
             "required": ["eye_clip_id", "fps", "duration_ms", "frame_count", "lcd"],
             "properties": {
-                "eye_clip_id": {"type": "string", "pattern": _SAFE_ID_RE.pattern},
+                "eye_clip_id": {"type": "string", "pattern": _EYE_CLIP_ID_RE.pattern},
                 "default_led_effect_id": {"type": ["string", "null"]},
                 "fps": {"type": "integer", "minimum": 8, "maximum": 30},
-                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 3500},
+                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": MAX_EXPRESSION_DURATION_MS},
             },
         },
         "led_effect": {
@@ -721,6 +733,7 @@ def expression_schemas() -> dict[str, Any]:
             "properties": {
                 "effect_id": {"type": "string", "pattern": _SAFE_ID_RE.pattern},
                 "role": {"enum": sorted(ALLOWED_ROLES)},
+                "default_playback": {"enum": sorted(ALLOWED_PLAYBACK)},
                 "program": {
                     "type": "object",
                     "oneOf": [
@@ -751,7 +764,7 @@ def expression_schemas() -> dict[str, Any]:
                 "eye_clip_id": {"type": ["string", "null"]},
                 "led_effect_id": {"type": ["string", "null"]},
                 "playback": {"enum": sorted(ALLOWED_PLAYBACK), "default": "loop"},
-                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 3500},
+                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": MAX_EXPRESSION_DURATION_MS},
             },
         },
     }

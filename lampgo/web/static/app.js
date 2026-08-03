@@ -41,6 +41,7 @@
   const ledEffectId = document.getElementById("led-effect-id");
   const ledEffectLabel = document.getElementById("led-effect-label");
   const ledEffectRole = document.getElementById("led-effect-role");
+  const ledEffectDefaultPlayback = document.getElementById("led-effect-default-playback");
   const ledEditorCanvas = document.getElementById("led-editor-canvas");
   const ledFrameTimeline = document.getElementById("led-frame-timeline");
   const ledEditorPalette = document.getElementById("led-editor-palette");
@@ -385,6 +386,16 @@
       names.push(name);
     });
     return names;
+  }
+
+  function ledEffectExpressionEntries(effects) {
+    if (!Array.isArray(effects)) return [];
+    return effects.map((effect) => ({
+      name: effect.effect_id,
+      label: effect.label,
+      mode: effect.mode,
+      animated: effect.animated,
+    }));
   }
 
   function populateExpressionSelect(selectEl, preferred) {
@@ -2544,9 +2555,22 @@
       return;
     }
 
-    if (msg.ok && msg.result && (msg.result.expression_catalog || msg.result.expressions)) {
+    if (
+      msg.ok &&
+      msg.result &&
+      (
+        Array.isArray(msg.result.led_effects) ||
+        msg.result.expression_catalog ||
+        msg.result.expressions
+      )
+    ) {
+      const hasFullLedEffectCatalog = Array.isArray(msg.result.led_effects);
       hydrateExpressionStudio(msg.result);
-      renderExpressions(msg.result.expression_catalog || msg.result.expressions);
+      renderExpressions(
+        hasFullLedEffectCatalog
+          ? ledEffectExpressionEntries(msg.result.led_effects)
+          : (msg.result.expression_catalog || msg.result.expressions),
+      );
       return;
     }
 
@@ -3787,6 +3811,7 @@
       effect_id: String((ledEffectId && ledEffectId.value) || "").trim(),
       label: String((ledEffectLabel && ledEffectLabel.value) || "").trim(),
       role: (ledEffectRole && ledEffectRole.value) || "mouth",
+      default_playback: (ledEffectDefaultPlayback && ledEffectDefaultPlayback.value) || "loop",
       program: {
         version: 2,
         type: "pixel_clip",
@@ -3833,6 +3858,7 @@
     if (ledEffectId) ledEffectId.value = source.effect_id || "";
     if (ledEffectLabel) ledEffectLabel.value = source.label || "";
     if (ledEffectRole) ledEffectRole.value = source.role || "mouth";
+    if (ledEffectDefaultPlayback) ledEffectDefaultPlayback.value = source.default_playback === "once" ? "once" : "loop";
     LED_EDITOR_SYMBOLS.forEach((symbol, index) => {
       if (program.palette && program.palette[symbol]) ledEditorColors[index] = program.palette[symbol];
     });
@@ -4203,12 +4229,7 @@
       expressionLedEffects = effects.led_effects || [];
       expressionPresets = presets.presets || [];
       renderExpressionStudio();
-      renderExpressions(expressionLedEffects.map((effect) => ({
-        name: effect.effect_id,
-        label: effect.label,
-        mode: effect.mode,
-        animated: effect.animated,
-      })));
+      renderExpressions(ledEffectExpressionEntries(expressionLedEffects));
       renderRecordings();
       const library = capacity.library;
       const device = capacity.device;
@@ -4262,7 +4283,25 @@
     });
   }
 
+  function eyeDurationMs(eyeId) {
+    const eye = expressionEyes.find((item) => item.eye_clip_id === eyeId);
+    const durationMs = Number(eye && eye.duration_ms);
+    return Number.isFinite(durationMs) && durationMs >= 1000 && durationMs <= 6000 ? durationMs : 3000;
+  }
+
+  function ledPreviewDurationMs(effect, fallbackDurationMs) {
+    const program = (effect && effect.program) || {};
+    if (program.type !== "pixel_clip") return fallbackDurationMs;
+    const fps = Math.max(1, Number(program.fps || 10));
+    const ticks = (program.frames || []).reduce(
+      (total, frame) => total + Math.max(1, Number(frame && frame.ticks || 1)),
+      0,
+    );
+    return ticks ? Math.round(ticks * 1000 / fps) : fallbackDurationMs;
+  }
+
   function currentExpressionBody() {
+    const eyeClipId = (composerEye && composerEye.value) || null;
     const ledParams = {
       brightness: Number((composerBrightness && composerBrightness.value) || 64),
       intensity: Number((composerIntensity && composerIntensity.value) || 100) / 100,
@@ -4272,11 +4311,11 @@
       ledParams.color = (composerColor && composerColor.value) || "#ffffff";
     }
     return {
-      eye_clip_id: (composerEye && composerEye.value) || null,
+      eye_clip_id: eyeClipId,
       led_effect_id: (composerLed && composerLed.value) || null,
       led_params: ledParams,
       playback: expressionPlayback,
-      duration_ms: 3000,
+      duration_ms: eyeDurationMs(eyeClipId),
     };
   }
 
@@ -4440,13 +4479,19 @@
       await Promise.all([loadEyePreviewImage(eye), loadLedPreviewSource(effect)]);
       if (expressionPreviewTimer) cancelAnimationFrame(expressionPreviewTimer);
       const started = Date.now();
+      const durationMs = Math.max(1000, Number(composition.duration_ms || (eye && eye.duration_ms) || 3000));
+      const ledDurationMs = ledPreviewDurationMs(effect, durationMs);
+      const looping = composition.playback === "loop";
       const tick = () => {
         const elapsed = Date.now() - started;
-        const phase = (elapsed % 3000) / 3000;
-        renderEyePreview(eye, phase);
-        renderLedPreview(effect, phase);
-        if (expressionPreviewStatus) expressionPreviewStatus.textContent = `${Math.min(3, elapsed / 1000).toFixed(1)} / 3.0 秒`;
-        if (expressionPlayback === "loop" || elapsed < 3000) {
+        const eyeElapsed = looping ? elapsed % durationMs : Math.min(elapsed, durationMs - 1);
+        const ledElapsed = looping ? elapsed % ledDurationMs : Math.min(elapsed, ledDurationMs - 1);
+        renderEyePreview(eye, eyeElapsed / durationMs);
+        renderLedPreview(effect, ledElapsed / ledDurationMs);
+        if (expressionPreviewStatus) {
+          expressionPreviewStatus.textContent = `${(Math.min(durationMs, elapsed) / 1000).toFixed(1)} / ${(durationMs / 1000).toFixed(1)} 秒`;
+        }
+        if (looping || elapsed < durationMs) {
           expressionPreviewTimer = requestAnimationFrame(tick);
         } else if (expressionPreviewStatus) {
           expressionPreviewStatus.textContent = "预览完成";
@@ -4474,10 +4519,11 @@
   }
 
   async function playLedEffect(name) {
+    const effect = expressionLedEffects.find((item) => item.effect_id === name);
     await playExpression({
       eye_clip_id: null,
       led_effect_id: name,
-      playback: "loop",
+      playback: (effect && effect.default_playback) || "loop",
       duration_ms: 3000,
     });
   }
@@ -4616,11 +4662,37 @@
           const labelCn = expressionLabel(name);
           return (
             name.toLowerCase().includes(q) ||
-            labelCn.includes(q)
+            labelCn.toLowerCase().includes(q)
           );
         })
       : latestExpressions;
+
+    const groups = { added: [], factory: [] };
     filtered.forEach((name) => {
+      const effect = expressionLedEffects.find((item) => item.effect_id === name);
+      const group = effect && effect.source !== "builtin" ? "added" : "factory";
+      groups[group].push(name);
+    });
+    const visibleGroups = [
+      { id: "added", label: "后续新增", names: groups.added },
+      { id: "factory", label: "出厂默认", names: groups.factory },
+    ].filter((group) => group.names.length);
+
+    const appendGroupHeading = (group, separated) => {
+      const heading = document.createElement("div");
+      heading.className = `expression-effect-group-title${separated ? " expression-group-divider" : ""}`;
+      heading.dataset.effectGroup = group.id;
+      heading.setAttribute("role", "heading");
+      heading.setAttribute("aria-level", "3");
+      const title = document.createElement("span");
+      title.textContent = group.label;
+      const count = document.createElement("small");
+      count.textContent = `${group.names.length} 个`;
+      heading.append(title, count);
+      expressionGrid.appendChild(heading);
+    };
+
+    const appendExpressionCard = (name, groupId) => {
       const meta = expressionMeta(name);
       const effect = expressionLedEffects.find((item) => item.effect_id === name);
       const labelCn = expressionLabel(name);
@@ -4639,7 +4711,11 @@
         tooltip: `单独播放 LED 效果：${labelCn}（${name}），眼睛保持当前画面`,
         onClick: () => { void playLedEffect(name); },
       });
+      card.dataset.expressionId = name;
+      card.dataset.expressionSource = (effect && effect.source) || "builtin";
+      card.dataset.effectGroup = groupId;
       if (effect && effect.kind === "pixel_clip" && effect.source === "custom") {
+        card.classList.add("expression-effect-card--custom");
         const actions = document.createElement("div");
         actions.className = "expression-card-actions";
         [
@@ -4660,6 +4736,11 @@
         card.appendChild(actions);
       }
       expressionGrid.appendChild(card);
+    };
+
+    visibleGroups.forEach((group, index) => {
+      appendGroupHeading(group, index > 0);
+      group.names.forEach((name) => appendExpressionCard(name, group.id));
     });
     if (!filtered.length) renderEmptyCell(expressionGrid, q ? `无匹配「${q}」的灯光表情` : "暂无灯光表情");
     updateCount(expressionCountEl, filtered.length, latestExpressions.length);
