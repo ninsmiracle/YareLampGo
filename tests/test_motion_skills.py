@@ -190,6 +190,7 @@ def test_return_safe_recovery_error_keeps_torque_enabled():
             self.recovery_error = "Recovery feedback watchdog stopped motion: base_pitch stalled"
             self.current_state = SimpleNamespace(positions=get_safe_position())
             self.aborted = False
+            self.recorded_failure = None
 
         def prepare_recovery(self, target, *, max_velocity, fps):
             del max_velocity, fps
@@ -209,6 +210,9 @@ def test_return_safe_recovery_error_keeps_torque_enabled():
         def stop_immediate(self):
             pass
 
+        def record_recovery_failure(self, reason):
+            self.recorded_failure = reason
+
     async def run() -> None:
         motion = FailedRecoveryMotion()
         result = await ReturnSafeSkill().execute(SimpleNamespace(motion=motion), velocity=60.0)
@@ -216,6 +220,7 @@ def test_return_safe_recovery_error_keeps_torque_enabled():
         assert result.status == "error"
         assert "feedback watchdog" in result.message
         assert motion.aborted is False
+        assert motion.recorded_failure == result.message
 
     asyncio.run(run())
 
@@ -268,6 +273,82 @@ def test_executor_preempts_running_skill():
         assert second.status == "ok"
         assert second.result == {"ran": True}
         assert executor.is_busy is False
+
+    asyncio.run(run())
+
+
+def test_return_safe_cannot_be_preempted_by_idle_or_duplicate_recovery():
+    class BlockingReturnSafe(Skill):
+        skill_id = "return_safe"
+        priority = 90
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.cancelled = False
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            self.started.set()
+            await self.release.wait()
+            return SkillResult(status="ok", data={"recovered": True})
+
+        async def cancel(self) -> None:
+            self.cancelled = True
+
+    class FakeIdleSway(Skill):
+        skill_id = "idle_sway"
+
+        async def execute(self, ctx, **params):
+            del ctx, params
+            raise AssertionError("idle sway must not run during return_safe")
+
+    async def run() -> None:
+        return_safe = BlockingReturnSafe()
+        registry = SkillRegistry()
+        registry.register(return_safe)
+        registry.register(FakeIdleSway())
+        executor = SkillExecutor(registry, EventBus())
+        ctx = SimpleNamespace(
+            motion=SimpleNamespace(is_running=True, recovery_required=False),
+            led=SimpleNamespace(is_connected=True),
+            clock=None,
+            electronic_ocean=None,
+        )
+
+        active = asyncio.create_task(executor.invoke("return_safe", ctx))
+        await return_safe.started.wait()
+
+        idle = await executor.invoke("idle_sway", ctx)
+        duplicate = await executor.invoke("return_safe", ctx)
+
+        assert idle.status == "rejected"
+        assert idle.error_code == "priority_skill_running"
+        assert duplicate.status == "rejected"
+        assert duplicate.error_code == "priority_skill_running"
+        assert return_safe.cancelled is False
+
+        return_safe.release.set()
+        result = await active
+        assert result.status == "ok"
+
+    asyncio.run(run())
+
+
+def test_return_safe_rejects_an_already_in_progress_recovery():
+    async def run() -> None:
+        motion = SimpleNamespace(
+            recovery_in_progress=True,
+            recovery_required=False,
+            recovery_error="return_safe 安全恢复被新的动作中断",
+        )
+
+        result = await ReturnSafeSkill().execute(SimpleNamespace(motion=motion))
+
+        assert result.status == "error"
+        assert result.message == "return_safe 安全恢复被新的动作中断"
+
+    from lampgo.skills.builtin.motion_skills import ReturnSafeSkill
 
     asyncio.run(run())
 

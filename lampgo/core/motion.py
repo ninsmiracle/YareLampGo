@@ -45,7 +45,7 @@ from enum import Enum, auto
 import structlog
 
 from lampgo.core.config import MotionConfig
-from lampgo.core.hal import HardwareAbstraction
+from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.spring import SecondOrderDynamics, cap_spring_f
 from lampgo.core.style import get_motion_style, resolve_style_name
@@ -363,8 +363,21 @@ class MotionRuntime:
         return self._hal.recovery_required
 
     @property
+    def recovery_in_progress(self) -> bool:
+        """Whether HAL is inside a recovery session that has not completed."""
+        return self._hal.startup_state is MotorStartupState.RECOVERING
+
+    @property
     def recovery_error(self) -> str | None:
         return self._recovery_failure_reason
+
+    def record_recovery_failure(self, reason: str) -> None:
+        """Persist a recovery failure for status/UI diagnostics while torque is held."""
+        self._recovery_failure_reason = str(reason or "Motor recovery did not complete.")
+
+    def clear_recovery_failure(self) -> None:
+        """Clear a stale diagnostic after a positively completed safe move."""
+        self._recovery_failure_reason = None
 
     # ------------------------------------------------------------------
     # Control thread

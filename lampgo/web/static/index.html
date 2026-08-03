@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YareLampGo 控制台</title>
   <link rel="icon" href="/%E5%8F%B0%E7%81%AF%E8%99%BE%E5%A4%B4%E5%83%8F.jpeg">
-  <link rel="stylesheet" href="/style.css?v=clock-prominent-20260721">
+  <link rel="stylesheet" href="/style.css?v=lighting-mode-safety-20260803">
   <link rel="stylesheet" href="/setup.css?v=secret-inputs-20260602">
 </head>
 <body>
@@ -139,6 +139,12 @@
         </div>
 
         <div class="topbar-right">
+          <button id="btn-lighting-mode" class="ghost-button lighting-mode-button" type="button" aria-pressed="false" title="移动到录制的照明姿态并保持白色灯光">
+            <span class="lighting-mode-icon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+            </span>
+            <span id="lighting-mode-label">照明模式</span>
+          </button>
           <label class="music-style-control" title="选择音乐律动风格">
             <span class="music-style-label">风格</span>
             <select id="music-style-select" class="music-style-select" aria-label="音乐律动风格">
@@ -1523,7 +1529,7 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=electronic-ocean-impact-20260721"></script>
+  <script src="/app.js?v=lighting-mode-safety-20260803"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

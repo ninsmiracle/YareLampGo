@@ -1,6 +1,7 @@
 """SkillExecutor — runs skills with cancel/timeout, enforces scheduling rules.
 
-M1 scheduling: simple last-writer-wins with estop/return_safe as highest priority.
+Normal skills use last-writer-wins scheduling.  Positive-priority safety skills
+cannot be pre-empted by a skill with equal or lower priority.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ _LED_SKILLS = {
 
 
 class SkillExecutor:
-    """Runs one skill at a time. New invocations cancel the current skill."""
+    """Run one skill at a time while preserving safety-skill priority."""
 
     def __init__(self, registry: SkillRegistry, events: EventBus) -> None:
         self._registry = registry
@@ -115,10 +116,33 @@ class SkillExecutor:
                 ctx.electronic_ocean.deactivate()
 
         async with self._lock:
-            # Cancel current skill if running. This gives rapid UI clicks
-            # last-writer-wins semantics without leaving old skill coroutines
-            # around to run their own cleanup motions later.
+            # Normal skills keep rapid-click last-writer-wins semantics.  A
+            # positive-priority safety skill, however, must finish unless the
+            # replacement has strictly higher priority (estop may interrupt
+            # return_safe; idle_sway, duplicate return_safe, and ordinary LLM
+            # tools may not).
             if self._current_task is not None and not self._current_task.done():
+                current_skill = self._current_skill
+                current_priority = int(getattr(current_skill, "priority", 0) or 0)
+                incoming_priority = int(getattr(skill, "priority", 0) or 0)
+                if current_priority > 0 and incoming_priority <= current_priority:
+                    current_skill_id = current_skill.skill_id if current_skill is not None else "unknown"
+                    logger.warning(
+                        "executor.preemption_rejected",
+                        current_skill_id=current_skill_id,
+                        current_priority=current_priority,
+                        incoming_skill_id=skill_id,
+                        incoming_priority=incoming_priority,
+                    )
+                    return InvokeResult(
+                        invocation_id=invocation_id,
+                        status="rejected",
+                        error_code="priority_skill_running",
+                        error_detail=(
+                            f"{current_skill_id} 安全动作正在执行，"
+                            f"{skill_id} 不能中断它"
+                        ),
+                    )
                 await self._cancel_current_locked()
 
             self._current_skill = skill

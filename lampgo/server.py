@@ -41,10 +41,12 @@ from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.safety import SafetyKernel
+from lampgo.core.types import InvokeResult
 from lampgo.core.virtual_motion import VirtualMotionRuntime
 from lampgo.device import Esp32DeviceManager
 from lampgo.electronic_ocean import ElectronicOceanController
 from lampgo.ipc import IPCServer
+from lampgo.lighting_mode import LightingModeController
 from lampgo.perception.cat_teaser import CatTeaserFrameSource, is_supported_local_camera_port
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.recordings import (
@@ -60,6 +62,10 @@ from lampgo.skills.builtin.expression_skills import (
     ShowClockSkill,
     StartElectronicOceanSkill,
     StopElectronicOceanSkill,
+)
+from lampgo.skills.builtin.lighting_mode_skills import (
+    EnterLightingModeSkill,
+    ExitLightingModeSkill,
 )
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
 from lampgo.skills.builtin.music_skills import DanceToMusicSkill
@@ -123,11 +129,24 @@ class LampgoServer:
         self.fsm = StateMachine()
         self.registry = SkillRegistry()
         self.executor = SkillExecutor(self.registry, self.events)
+        self.lighting_mode = LightingModeController(
+            recordings_dir=Path(config.recordings_dir),
+            motion=self.motion,
+            led=self.led,
+            safety=self.safety,
+            hal=self.hal,
+            clock=self.clock,
+            electronic_ocean=self.electronic_ocean,
+            brightness=lambda: self.config.device_esp32.led_brightness,
+            no_hw=lambda: bool(self.config.no_hw),
+        )
+        self._lighting_entry_lock = asyncio.Lock()
+        self._lighting_exit_lock = asyncio.Lock()
         self.agent = AgentManager(
             self.events,
             api_base=f"http://127.0.0.1:{config.web.port}",
         )
-        self._agent_indicator = AgentLedIndicator(self.events, self.led.set_mode)
+        self._agent_indicator = AgentLedIndicator(self.events, self._set_agent_indicator_led)
         self.router = IntentRouter()
         self._stt: VolcengineASR = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
@@ -170,6 +189,7 @@ class LampgoServer:
             self.motion.stop()
         self.motion = VirtualMotionRuntime(self.config.motion)
         self.motion.start()
+        self.lighting_mode.bind_runtime(self.motion, self.hal)
 
     def _resume_motion_after_recording(self) -> None:
         if self.config.no_hw or not self.hal.is_connected:
@@ -183,6 +203,8 @@ class LampgoServer:
         self.registry.register(ReturnSafeSkill())
         self.registry.register(EStopSkill())
         self.registry.register(PlayRecordingSkill(recordings_dir))
+        self.registry.register(EnterLightingModeSkill(self.lighting_mode))
+        self.registry.register(ExitLightingModeSkill(self.lighting_mode))
         self.registry.register(SetExpressionSkill())
         self.registry.register(ShowClockSkill())
         self.registry.register(StartElectronicOceanSkill())
@@ -270,6 +292,140 @@ class LampgoServer:
             electronic_ocean=self.electronic_ocean,
         )
 
+    def _set_agent_indicator_led(self, mode: str) -> bool:
+        if self.lighting_mode.blocks_automatic_led:
+            logger.info("lighting_mode.agent_led_suppressed", requested_mode=mode)
+            return True
+        return self.led.set_mode(mode)
+
+    async def _exit_lighting_mode_with_return_safe(self, *, reason: str) -> InvokeResult:
+        """Exit mode and invoke the registered return_safe skill exactly once."""
+        async with self._lighting_exit_lock:
+            was_engaged = self.lighting_mode.is_engaged
+            if not was_engaged:
+                return InvokeResult(
+                    invocation_id=uuid.uuid4().hex[:12],
+                    status="ok",
+                    result={
+                        "lighting_mode": self.lighting_mode.snapshot(),
+                        "already_inactive": True,
+                        "return_safe_invoked": False,
+                    },
+                )
+
+            # An in-progress enter may own the executor. Cancel it before
+            # beginning the standalone return_safe invocation.
+            await self.executor.cancel_current()
+            started = await self.lighting_mode.begin_exit(reason=reason, force=was_engaged)
+            if not started:
+                return InvokeResult(
+                    invocation_id=uuid.uuid4().hex[:12],
+                    status="ok",
+                    result={
+                        "lighting_mode": self.lighting_mode.snapshot(),
+                        "already_inactive": True,
+                        "return_safe_invoked": False,
+                    },
+                )
+
+            return_safe = await self.executor.invoke(
+                "return_safe",
+                self.make_context(),
+                velocity=60.0,
+            )
+            await self.lighting_mode.finish_exit(
+                return_safe_status=return_safe.status,
+                error=(return_safe.error_detail or "") if return_safe.status != "ok" else "",
+            )
+            return InvokeResult(
+                invocation_id=return_safe.invocation_id,
+                status=return_safe.status,
+                error_code=return_safe.error_code,
+                error_detail=return_safe.error_detail,
+                result={
+                    "lighting_mode": self.lighting_mode.snapshot(),
+                    "return_safe_invoked": True,
+                    "return_safe_invocation_id": return_safe.invocation_id,
+                    "return_safe": return_safe.result,
+                },
+            )
+
+    def _motor_recovery_detail(self) -> str:
+        recovery_error = str(getattr(self.motion, "recovery_error", "") or "").strip()
+        if recovery_error:
+            return recovery_error
+        recovery_reason = str(getattr(self.hal, "recovery_reason", "") or "").strip()
+        if recovery_reason:
+            return recovery_reason
+        return "上一次 return_safe 安全恢复未完成，机械臂当前仍在恢复保护状态"
+
+    async def _prepare_lighting_mode_entry(self) -> InvokeResult | None:
+        """Make an explicit lighting request cross the normal recovery gate safely."""
+        startup_state = getattr(self.hal, "startup_state", MotorStartupState.DISCONNECTED)
+        if startup_state is MotorStartupState.READY:
+            return None
+        if startup_state is MotorStartupState.RECOVERY_REQUIRED:
+            recovery = await self.executor.invoke(
+                "return_safe",
+                self.make_context(),
+                velocity=30.0,
+            )
+            if recovery.status == "ok":
+                return None
+            return InvokeResult(
+                invocation_id=recovery.invocation_id,
+                status=recovery.status,
+                error_code=recovery.error_code or "lighting_recovery_failed",
+                error_detail=recovery.error_detail or "进入照明模式前的 return_safe 失败",
+                result={
+                    "lighting_mode": self.lighting_mode.snapshot(),
+                    "recovery_before_lighting": recovery.result,
+                },
+            )
+        if startup_state is MotorStartupState.RECOVERING:
+            return InvokeResult(
+                invocation_id=uuid.uuid4().hex[:12],
+                status="rejected",
+                error_code="motor_recovery_incomplete",
+                error_detail=self._motor_recovery_detail(),
+                result={"lighting_mode": self.lighting_mode.snapshot()},
+            )
+        return InvokeResult(
+            invocation_id=uuid.uuid4().hex[:12],
+            status="rejected",
+            error_code="motor_not_ready",
+            error_detail=f"机械臂启动状态异常：{startup_state.value}",
+            result={"lighting_mode": self.lighting_mode.snapshot()},
+        )
+
+    async def _invoke_lampgo_skill(
+        self,
+        skill_id: str,
+        ctx: SkillContext,
+        *,
+        reason: str,
+        **params: Any,
+    ) -> InvokeResult:
+        if skill_id == "exit_lighting_mode":
+            return await self._exit_lighting_mode_with_return_safe(reason=reason)
+        if skill_id == "enter_lighting_mode":
+            # Keep recovery + pose entry atomic.  LLM retries or a double UI
+            # click must wait for the first request instead of cancelling its
+            # return_safe / lighting move halfway through.
+            async with self._lighting_entry_lock:
+                recovery = await self._prepare_lighting_mode_entry()
+                if recovery is not None:
+                    return recovery
+                return await self.executor.invoke(skill_id, ctx, **params)
+        if skill_id == "estop":
+            await self.lighting_mode.force_exit(reason="estop", turn_off_led=True)
+            return await self.executor.invoke(skill_id, ctx, **params)
+        if skill_id != "enter_lighting_mode" and self.lighting_mode.is_engaged:
+            exited = await self._exit_lighting_mode_with_return_safe(reason=reason)
+            if exited.status != "ok" or skill_id == "return_safe":
+                return exited
+        return await self.executor.invoke(skill_id, ctx, **params)
+
     async def _on_skill_started(self, event: SkillStarted) -> None:
         if event.skill_id == "idle_sway" and self._auto_idle_sway_invoking:
             return
@@ -316,6 +472,9 @@ class LampgoServer:
                 self._next_idle_sway_at = 0.0
                 continue
             if not self.motion.is_running or self.safety.is_estopped() or self._record_recorder is not None:
+                self._mark_foreground_activity()
+                continue
+            if self.lighting_mode.blocks_autonomous_motion:
                 self._mark_foreground_activity()
                 continue
             if self.executor.current_skill_id:
@@ -394,6 +553,8 @@ class LampgoServer:
         if cmd == "estop":
             self.safety.estop("IPC estop command")
             self.motion.stop_immediate()
+            await self.executor.cancel_current()
+            await self.lighting_mode.force_exit(reason="estop", turn_off_led=True)
             return {"ok": True, "result": {"status": "estopped"}}
 
         if cmd == "start_conversation":
@@ -516,7 +677,12 @@ class LampgoServer:
         ctx = self.make_context()
 
         if wait:
-            result = await self.executor.invoke(skill_id, ctx, **params)
+            result = await self._invoke_lampgo_skill(
+                skill_id,
+                ctx,
+                reason=f"invoke:{skill_id}",
+                **params,
+            )
             return {
                 "ok": result.status in ("ok", "cancelled"),
                 "result": {
@@ -528,7 +694,12 @@ class LampgoServer:
             }
 
         async def _bg():
-            await self.executor.invoke(skill_id, ctx, **params)
+            await self._invoke_lampgo_skill(
+                skill_id,
+                ctx,
+                reason=f"invoke:{skill_id}",
+                **params,
+            )
 
         asyncio.ensure_future(_bg())
         return {"ok": True, "result": {"status": "accepted", "skill_id": skill_id}}
@@ -539,6 +710,13 @@ class LampgoServer:
         The session samples HAL joint positions at a fixed FPS and buffers frames
         in memory until the caller stops + saves (or discards).
         """
+        if self.lighting_mode.is_engaged:
+            exited = await self._exit_lighting_mode_with_return_safe(reason="recording_start")
+            if exited.status != "ok":
+                return {
+                    "ok": False,
+                    "error": exited.error_detail or "退出照明模式并回到安全位失败",
+                }
         async with self._record_lock:
             if self.config.no_hw or not self.hal.is_connected:
                 return {"ok": False, "error": "hardware not connected"}
@@ -767,15 +945,27 @@ class LampgoServer:
             active_task.cancel()
             cancelled_llm = 1
         cancelled_tts = self.cancel_pending_tts()
-        await self.executor.cancel_current()
+        lighting_return_safe = 0
+        if self.lighting_mode.is_engaged:
+            lighting_exit = await self._exit_lighting_mode_with_return_safe(reason="cancel")
+            lighting_return_safe = int(
+                bool((lighting_exit.result or {}).get("return_safe_invoked"))
+            )
+        else:
+            await self.executor.cancel_current()
         logger.info(
             "server.stop_all_interactions",
             request_id=request_id,
             active_request_id=active_request_id,
             cancelled_llm=cancelled_llm,
             cancelled_tts=cancelled_tts,
+            lighting_return_safe=lighting_return_safe,
         )
-        return {"llm": cancelled_llm, "tts": cancelled_tts}
+        return {
+            "llm": cancelled_llm,
+            "tts": cancelled_tts,
+            "lighting_return_safe": lighting_return_safe,
+        }
 
     async def _handle_text(self, data: dict) -> dict:
         """Route free text through the IntentRouter, then invoke or reply."""
@@ -834,7 +1024,12 @@ class LampgoServer:
         alias = self._resolve_recording_alias(text)
         if alias:
             ctx = self.make_context()
-            result = await self.executor.invoke("play_recording", ctx, name=alias)
+            result = await self._invoke_lampgo_skill(
+                "play_recording",
+                ctx,
+                reason="voice_or_text_recording",
+                name=alias,
+            )
             return {
                 "ok": result.status in ("ok", "cancelled"),
                 "result": {
@@ -1012,7 +1207,12 @@ class LampgoServer:
         if intent.intent_type == IntentType.SKILL and intent.skill_id:
             ctx = self.make_context()
             params = intent.params or {}
-            result = await self.executor.invoke(intent.skill_id, ctx, **params)
+            result = await self._invoke_lampgo_skill(
+                intent.skill_id,
+                ctx,
+                reason=f"voice_or_text:{intent.skill_id}",
+                **params,
+            )
             return {
                 "ok": result.status in ("ok", "cancelled"),
                 "result": {
@@ -1178,7 +1378,12 @@ class LampgoServer:
             tool_name=tool_name,
             params=params,
         )
-        result = await self.executor.invoke(tool_name, self.make_context(), **params)
+        result = await self._invoke_lampgo_skill(
+            tool_name,
+            self.make_context(),
+            reason=f"agent_tool:{tool_name}",
+            **params,
+        )
         tool_payload = {
             "ok": result.status in ("ok", "cancelled"),
             "status": result.status,
@@ -1488,10 +1693,17 @@ class LampgoServer:
         health = "ok" if not self.safety.is_estopped() else "degraded"
         virtual = bool(getattr(self.motion, "is_virtual", False))
         motor_startup_state = self.hal.startup_state.value
-        recovery_error = self.hal.recovery_reason if self.hal.recovery_required else None
+        recovery_error = None
+        if self.hal.startup_state is MotorStartupState.RECOVERY_REQUIRED:
+            recovery_error = self.hal.recovery_reason or "Motor recovery is required."
+        elif self.hal.startup_state is MotorStartupState.RECOVERING:
+            recovery_error = self._motor_recovery_detail()
         if not self.hal.is_connected and not virtual:
             health = "disconnected"
-        if self._hal_startup_error or recovery_error:
+        if (
+            not virtual
+            and self.hal.startup_state is not MotorStartupState.READY
+        ) or self._hal_startup_error or recovery_error:
             health = "degraded"
         cat_teaser_camera = self._cat_teaser_camera_status()
         camera_ready = self._cat_teaser_camera_ready(cat_teaser_camera)
@@ -1511,6 +1723,7 @@ class LampgoServer:
                 "motor_startup_state": motor_startup_state,
                 "hardware_error": self._hal_startup_error or recovery_error,
                 "led_ready": bool(self.led.is_connected),
+                "lighting_mode": self.lighting_mode.snapshot(),
                 "camera_ready": camera_ready,
                 "cat_teaser_camera": cat_teaser_camera,
                 "conversation_state": self._wake_loop.conversation_state.value if self._wake_loop else None,
@@ -2086,6 +2299,7 @@ class LampgoServer:
             self.hal = new_hal
             self._hal_startup_error = None
             self.motion = MotionRuntime(self.hal, self.safety, self.config.motion)
+            self.lighting_mode.bind_runtime(self.motion, self.hal)
             self.config.no_hw = False
             if self.hal.recovery_required:
                 self.executor.set_motion_block_reason(
@@ -2214,6 +2428,7 @@ class LampgoServer:
         self._web_serve_task = None
         self._uvicorn_server = None
         await self._stop_idle_sway_scheduler()
+        await self.lighting_mode.force_exit(reason="shutdown", turn_off_led=True)
         async with self._record_lock:
             if self._record_recorder is not None and self._record_recorder.is_recording:
                 self._record_recorder.stop()

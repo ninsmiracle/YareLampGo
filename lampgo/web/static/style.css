@@ -840,6 +840,29 @@ button {
   color: #6b5f4a;
 }
 
+.lighting-mode-button {
+  gap: 7px;
+  padding: 0 12px;
+  color: #5f594c;
+  transition: color 160ms ease, background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.lighting-mode-icon {
+  display: inline-flex;
+}
+
+.lighting-mode-button.is-active {
+  color: #7a5115;
+  background: #fff7d8;
+  border-color: rgba(217, 157, 49, 0.5);
+  box-shadow: 0 0 0 3px rgba(246, 194, 83, 0.17), 0 0 18px rgba(255, 203, 83, 0.2);
+}
+
+.lighting-mode-button.is-pending {
+  cursor: progress;
+  opacity: 0.72;
+}
+
 .music-mode-icon {
   display: inline-flex;
 }
@@ -4063,9 +4086,14 @@ button.device-chip.is-active {
     padding: 8px 12px;
   }
 
+  .lighting-mode-button,
   .music-mode-button {
     width: 34px;
     padding: 0;
+  }
+
+  #lighting-mode-label {
+    display: none;
   }
 
   .music-style-control {

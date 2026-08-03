@@ -121,6 +121,8 @@
   const btnMic = document.getElementById("btn-mic");
   const btnVoiceCancel = document.getElementById("btn-voice-cancel");
   const btnStop = document.getElementById("btn-stop");
+  const btnLightingMode = document.getElementById("btn-lighting-mode");
+  const lightingModeLabel = document.getElementById("lighting-mode-label");
   const btnMusicMode = document.getElementById("btn-music-mode");
   const musicStyleSelect = document.getElementById("music-style-select");
   const musicModeLabel = document.getElementById("music-mode-label");
@@ -244,6 +246,8 @@
     cat_teaser: { title: "逗猫棒互动", description: "识别逗猫棒彩色标记，根据猫咪互动状态实时摆动。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
     return_safe: { title: "回到安全位", description: "平滑回到固定的待机安全姿态。" },
+    enter_lighting_mode: { title: "启动照明模式", description: "移动到录制的照明姿态并保持白色灯光。" },
+    exit_lighting_mode: { title: "退出照明模式", description: "退出照明并单独回到安全位一次。" },
     presence_react: { title: "人来反应", description: "检测到人时转向并展示问候表情。" },
     face_follow: { title: "人脸跟随", description: "持续调整偏航与俯仰，跟踪人脸。" },
     teleop_mouse: { title: "鼠标遥操作", description: "用手臂当作鼠标控制光标。" },
@@ -803,6 +807,7 @@
   let recordTimerTask = null;
   let recordingFps = 30;
   let recordingFrames = 0;
+  let lightingModeRequestId = null;
   let musicModeRequestId = null;
 
   let sessions = [];
@@ -2424,7 +2429,9 @@
   function send(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   }
 
   function handleMessage(msg) {
@@ -3083,6 +3090,7 @@
     if (catTeaserDialog && catTeaserDialog.open) renderCatTeaserHardwareNotice();
 
     if (isJointPopoverOpen()) renderJointPopoverContent();
+    setLightingModeState(data.lighting_mode || {});
     if (data.running_skill === "dance_to_music") {
       setMusicModeActive(true);
     } else if (!data.is_busy && musicModeRequestId) {
@@ -5141,6 +5149,54 @@
     send({ type: "invoke", skill_id: skillId, params: params || {}, wait: true, request_id: requestId });
   }
 
+  function setLightingModeState(mode = {}) {
+    const state = String(mode.state || "normal");
+    const active = state === "active";
+    const transitioning = state === "entering" || state === "exiting" || Boolean(lightingModeRequestId);
+    if (!btnLightingMode) return;
+    btnLightingMode.classList.toggle("is-active", active);
+    btnLightingMode.classList.toggle("is-pending", transitioning);
+    btnLightingMode.setAttribute("aria-pressed", active ? "true" : "false");
+    btnLightingMode.disabled = transitioning;
+    btnLightingMode.title = active
+      ? "退出照明模式；退出后会单独回到安全位一次"
+      : state === "entering"
+        ? "正在移动到照明姿态"
+        : state === "exiting"
+          ? "正在退出并回到安全位"
+          : "移动到录制的照明姿态并保持白色灯光";
+    if (lightingModeLabel) {
+      lightingModeLabel.textContent = state === "entering"
+        ? "正在进入…"
+        : state === "exiting"
+          ? "正在退出…"
+          : active
+            ? "退出照明"
+            : "照明模式";
+    }
+  }
+
+  function toggleLightingMode() {
+    if (!btnLightingMode || lightingModeRequestId) return;
+    const mode = (latestStatusData && latestStatusData.lighting_mode) || {};
+    const exiting = mode.active || mode.engaged || btnLightingMode.classList.contains("is-active");
+    const skillId = exiting ? "exit_lighting_mode" : "enter_lighting_mode";
+    const requestId = nextId();
+    const bubble = addAssistantBubble(requestId);
+    lightingModeRequestId = requestId;
+    setLightingModeState({ state: exiting ? "exiting" : "entering" });
+    addStep(
+      getPreludeArea(ensureActivityLog(bubble)),
+      exiting ? "退出照明模式并回到安全位" : "进入台灯常规模式",
+      "active",
+    );
+    if (!send({ type: "invoke", skill_id: skillId, params: {}, wait: true, request_id: requestId })) {
+      lightingModeRequestId = null;
+      setLightingModeState(mode);
+      finishPending({ ok: false, error: "后端连接未就绪", request_id: requestId });
+    }
+  }
+
   function setMusicModeActive(active, requestId = null) {
     const isActive = !!active;
     if (isActive && requestId) musicModeRequestId = requestId;
@@ -5660,6 +5716,17 @@
     }
     if (msg.request_id === musicModeRequestId) {
       setMusicModeActive(false);
+    }
+    if (msg.request_id === lightingModeRequestId) {
+      lightingModeRequestId = null;
+      const data = (msg.result && msg.result.data) || {};
+      const mode = data.lighting_mode || (data.name === "lighting" ? data : null);
+      if (mode) setLightingModeState(mode);
+      else setLightingModeState((latestStatusData && latestStatusData.lighting_mode) || {});
+      if (msg.ok && msg.result && msg.result.status === "ok") {
+        addSystemMessage(data.return_safe_invoked ? "已退出照明模式并回到安全位" : "已进入照明模式");
+      }
+      send({ type: "status", request_id: `lighting_status_${Date.now()}` });
     }
 
     const isPreempted = !!(result.preempted);
@@ -6308,6 +6375,10 @@
 
   if (btnMusicMode) {
     btnMusicMode.addEventListener("click", toggleMusicMode);
+  }
+
+  if (btnLightingMode) {
+    btnLightingMode.addEventListener("click", toggleLightingMode);
   }
 
   btnEstop.addEventListener("click", () => {

@@ -675,6 +675,21 @@ class WebGateway:
                 result["error"] = nested_error
         return JSONResponse(result)
 
+    async def _preempt_lighting_mode(self, reason: str) -> JSONResponse | None:
+        if not self.server.lighting_mode.is_engaged:
+            return None
+        result = await self.server._exit_lighting_mode_with_return_safe(reason=reason)
+        if result.status == "ok":
+            return None
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": result.error_detail or "退出照明模式并回到安全位失败",
+                "result": result.result,
+            },
+            status_code=503,
+        )
+
     async def api_status(self, request: Request) -> JSONResponse:
         result = self.server._handle_status()
         return JSONResponse(result)
@@ -1175,6 +1190,9 @@ class WebGateway:
         return status, response
 
     async def api_expression_play(self, request: Request) -> JSONResponse:
+        blocked = await self._preempt_lighting_mode("expression_play")
+        if blocked is not None:
+            return blocked
         try:
             body = await request.json()
             composition = resolve_expression(body)
@@ -1200,6 +1218,9 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": self.server.clock.snapshot()})
 
     async def api_clock_show(self, request: Request) -> JSONResponse:
+        blocked = await self._preempt_lighting_mode("clock_show")
+        if blocked is not None:
+            return blocked
         try:
             body = await request.json()
         except Exception:
@@ -1225,6 +1246,9 @@ class WebGateway:
         return JSONResponse({"ok": True, "result": self.server.electronic_ocean.snapshot()})
 
     async def api_electronic_ocean_start(self, request: Request) -> JSONResponse:
+        blocked = await self._preempt_lighting_mode("electronic_ocean_start")
+        if blocked is not None:
+            return blocked
         try:
             body = await request.json()
         except Exception:
@@ -2814,6 +2838,10 @@ class WebGateway:
                 except Exception:
                     body = {"ok": False, "error": "non_json_response"}
             return JSONResponse(self._with_expression_catalog(body), status_code=status)
+
+        blocked = await self._preempt_lighting_mode("device_led")
+        if blocked is not None:
+            return blocked
 
         try:
             patch = await request.json()

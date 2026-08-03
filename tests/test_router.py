@@ -52,3 +52,10 @@ def test_dj_music_keyword_normalizes_case():
     assert intent.intent_type is IntentType.SKILL
     assert intent.skill_id == "dance_to_music"
     assert intent.params == {"style": "dj"}
+
+
+def test_lighting_mode_phrase_is_left_for_the_llm_to_decide():
+    intent = IntentRouter().route("启动照明模式")
+
+    assert intent.intent_type is IntentType.COMPLEX
+    assert intent.skill_id is None

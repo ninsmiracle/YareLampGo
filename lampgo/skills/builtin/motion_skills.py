@@ -113,6 +113,17 @@ class ReturnSafeSkill(Skill):
         velocity = float(params.get("velocity", 60.0))
         safe = get_safe_position()
 
+        # ``recovery_required`` is false once HAL has transitioned from
+        # RECOVERY_REQUIRED to RECOVERING.  Treating that state as an ordinary
+        # move used to produce a false-positive ``ok`` for a duplicate
+        # return_safe while the original recovery was still active.
+        if bool(getattr(ctx.motion, "recovery_in_progress", False)):
+            detail = str(getattr(ctx.motion, "recovery_error", "") or "").strip()
+            return SkillResult(
+                status="error",
+                message=detail or "return_safe 安全恢复仍在执行，不能重复启动",
+            )
+
         if bool(getattr(ctx.motion, "recovery_required", False)):
             self._recovery_active = True
             logger.info(
@@ -160,6 +171,8 @@ class ReturnSafeSkill(Skill):
                 # releasing torque. The motor bus already enforces its torque
                 # limit, and ordinary software observations (lag, clipping or
                 # a completion mismatch) must not make a raised arm fall.
+                if hasattr(ctx.motion, "record_recovery_failure"):
+                    ctx.motion.record_recovery_failure(str(exc))
                 logger.warning(
                     "return_safe.recovery_failed_holding_torque",
                     error=str(exc),
@@ -190,6 +203,8 @@ class ReturnSafeSkill(Skill):
         if not await _await_done(done_event, timeout=60.0):
             logger.warning("return_safe.timeout")
             return SkillResult(status="error", message="Homing did not complete within timeout")
+        if hasattr(ctx.motion, "clear_recovery_failure"):
+            ctx.motion.clear_recovery_failure()
         logger.info("return_safe.done")
         return SkillResult(status="ok")
 
@@ -200,6 +215,8 @@ class ReturnSafeSkill(Skill):
             # Cancellation/pre-emption is not an emergency stop. Keep the
             # active servo goals and torque so the structure cannot fall.
             self._motion.stop_immediate()
+            if hasattr(self._motion, "record_recovery_failure"):
+                self._motion.record_recovery_failure("return_safe 安全恢复被新的动作中断")
             self._recovery_active = False
             return
         self._motion.stop_immediate()
