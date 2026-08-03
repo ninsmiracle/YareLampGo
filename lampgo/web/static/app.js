@@ -152,6 +152,7 @@
   const btnRecordStartCancel = document.getElementById("btn-record-start-cancel");
   const btnRecordStartConfirm = document.getElementById("btn-record-start-confirm");
   const recordStartDesc = document.getElementById("record-start-desc");
+  const recordStartError = document.getElementById("record-start-error");
   const recordTimer = document.getElementById("record-timer");
   const recordMetrics = document.getElementById("record-metrics");
   const catTeaserDialog = document.getElementById("cat-teaser-dialog");
@@ -799,6 +800,7 @@
   let isMotionRecording = false;
   let hasPendingMotionRecording = false;
   let pendingOverwriteSave = false;
+  let recordingStartRequestId = null;
   let recordingStartTs = 0;
   let recordTimerTask = null;
   let recordingFps = 30;
@@ -1761,8 +1763,12 @@
   }
 
   function resetRecordStartDialogUI() {
-    if (btnRecordStartConfirm) btnRecordStartConfirm.textContent = "开始录制";
+    if (btnRecordStartConfirm) {
+      btnRecordStartConfirm.textContent = "开始录制";
+      btnRecordStartConfirm.disabled = false;
+    }
     if (btnRecordStartCancel) btnRecordStartCancel.classList.remove("hidden");
+    if (recordStartError) recordStartError.textContent = "";
     if (recordStartDesc) {
       recordStartDesc.textContent = "点击“开始录制”后将自动关闭电机力矩，你可以手动掰动关节进行录制。";
     }
@@ -2424,7 +2430,9 @@
   function send(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   }
 
   function handleMessage(msg) {
@@ -2559,14 +2567,35 @@
       upsertCodexTask(msg.result.agent_task);
     }
 
+    if (recordingStartRequestId && msg.request_id === recordingStartRequestId && !msg.ok) {
+      recordingStartRequestId = null;
+      if (btnRecordStartConfirm) {
+        btnRecordStartConfirm.disabled = false;
+        btnRecordStartConfirm.textContent = "开始录制";
+      }
+      const rawError = String(msg.error || "录制启动失败");
+      const errorText = rawError.includes("motor recovery required")
+        ? "机械臂尚未完成安全复位，当前不能录制。请先完成安全复位后再试。"
+        : `录制启动失败：${rawError}`;
+      if (recordStartError) recordStartError.textContent = errorText;
+      if (recordStartDialog && !recordStartDialog.open) recordStartDialog.showModal();
+      addSystemMessage(errorText);
+      return;
+    }
+
     if (msg.result && msg.result.status === "recording") {
+      recordingStartRequestId = null;
       isMotionRecording = true;
       hasPendingMotionRecording = false;
       recordingFps = Number(msg.result.fps || 30);
       recordingFrames = 0;
       recordingStartTs = Date.now() / 1000;
       updateRecordButtonState();
-      if (btnRecordStartConfirm) btnRecordStartConfirm.textContent = "结束录制";
+      if (btnRecordStartConfirm) {
+        btnRecordStartConfirm.disabled = false;
+        btnRecordStartConfirm.textContent = "结束录制";
+      }
+      if (recordStartError) recordStartError.textContent = "";
       if (btnRecordStartCancel) btnRecordStartCancel.classList.add("hidden");
       if (recordStartDesc) recordStartDesc.textContent = "录制进行中。按“结束录制”完成采集。";
       if (recordMetrics) recordMetrics.textContent = `采样：${recordingFps} FPS · 0 帧`;
@@ -5282,7 +5311,22 @@
   }
 
   function startMotionRecording() {
-    send({ type: "recording_start", fps: 30, request_id: nextId() });
+    if (recordingStartRequestId) return;
+    const requestId = nextId();
+    recordingStartRequestId = requestId;
+    if (recordStartError) recordStartError.textContent = "";
+    if (btnRecordStartConfirm) {
+      btnRecordStartConfirm.disabled = true;
+      btnRecordStartConfirm.textContent = "正在启动…";
+    }
+    if (!send({ type: "recording_start", fps: 30, request_id: requestId })) {
+      recordingStartRequestId = null;
+      if (btnRecordStartConfirm) {
+        btnRecordStartConfirm.disabled = false;
+        btnRecordStartConfirm.textContent = "开始录制";
+      }
+      if (recordStartError) recordStartError.textContent = "后端连接未就绪，无法开始录制。请等待页面恢复连接后重试。";
+    }
   }
 
   function openRecordStartDialog() {
@@ -5291,7 +5335,14 @@
       return;
     }
     resetRecordStartDialogUI();
-    recordStartDialog.showModal();
+    if (recordStartDialog.open) return;
+    try {
+      recordStartDialog.showModal();
+    } catch (err) {
+      const detail = err && err.message ? err.message : String(err);
+      console.error("record dialog failed to open", err);
+      addSystemMessage(`无法打开录制窗口：${detail}`);
+    }
   }
 
   function closeRecordStartDialog() {

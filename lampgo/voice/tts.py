@@ -256,6 +256,12 @@ class VolcengineTTS:
                 max_size=10 * 1024 * 1024,
                 open_timeout=10,
                 close_timeout=5,
+                # ``websockets>=15`` auto-discovers ALL_PROXY.  LampGo is
+                # frequently run next to Clash with a socks5h proxy, but the
+                # base install intentionally doesn't depend on python-socks.
+                # TTS works directly and must not disappear just because that
+                # unrelated desktop proxy is present.
+                proxy=None,
             )
             await _send_start_connection(websocket)
             await _wait_for_event(websocket, EventType.CONNECTION_STARTED)
