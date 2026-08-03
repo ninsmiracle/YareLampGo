@@ -58,6 +58,7 @@
   const composerColor = document.getElementById("composer-color");
   const composerColorOverride = document.getElementById("composer-color-override");
   const composerBrightness = document.getElementById("composer-brightness");
+  const composerBrightnessValue = document.getElementById("composer-brightness-value");
   const composerIntensity = document.getElementById("composer-intensity");
   const composerPresetId = document.getElementById("composer-preset-id");
   const composerPresetLabel = document.getElementById("composer-preset-label");
@@ -110,6 +111,8 @@
   const esp32LedBrightnessControl = document.getElementById("esp32-led-brightness-control");
   const esp32LedBrightnessSlider = document.getElementById("esp32-led-brightness-slider");
   const esp32LedBrightnessValue = document.getElementById("esp32-led-brightness-value");
+  const esp32LedBrightnessStatus = document.getElementById("esp32-led-brightness-status");
+  const esp32LedBrightnessQuickButtons = Array.from(document.querySelectorAll("[data-led-brightness-quick]"));
   const btnRefreshAgent = document.getElementById("btn-refresh-agent");
   const btnAgentHealth = document.getElementById("btn-agent-health-details");
   const agentHealthCard = document.getElementById("agent-health-card");
@@ -543,7 +546,11 @@
   let esp32VolumeInitialSyncDone = false;
   let esp32LedBrightnessTimer = null;
   let esp32LedBrightnessPending = false;
-  let esp32LedBrightnessInitialSyncDone = false;
+  let esp32LedBrightnessDesired = null;
+  let esp32LedBrightnessSyncing = false;
+  let esp32LedBrightnessConfigLoaded = false;
+  let esp32LedBrightnessUserEdited = false;
+  let esp32LedBrightnessDeviceOnline = false;
   let voiceCallMode = "stable";
   let voiceEchoGateHangoverMs = 1000;
   let voiceEchoTextFilterEnabled = true;
@@ -629,18 +636,39 @@
     const level = clampEsp32LedBrightness(value);
     if (esp32LedBrightnessSlider) esp32LedBrightnessSlider.value = String(level);
     if (esp32LedBrightnessValue) esp32LedBrightnessValue.textContent = String(level);
+    esp32LedBrightnessQuickButtons.forEach((button) => {
+      const active = Number(button.dataset.ledBrightnessQuick) === level;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
     if (persist) {
       try { localStorage.setItem(ESP32_LED_BRIGHTNESS_KEY, String(level)); } catch (_) { /* ignore */ }
     }
     return level;
   }
 
+  function setEsp32LedBrightnessStatus(state, message) {
+    if (esp32LedBrightnessControl) {
+      esp32LedBrightnessControl.classList.toggle("is-syncing", state === "syncing");
+      esp32LedBrightnessControl.classList.toggle("is-error", state === "error");
+      esp32LedBrightnessControl.dataset.syncState = state;
+      if (message) esp32LedBrightnessControl.title = message;
+    }
+    if (esp32LedBrightnessStatus) {
+      esp32LedBrightnessStatus.textContent = state === "syncing"
+        ? "应用中"
+        : state === "error"
+          ? "待应用"
+          : state === "success"
+            ? "已应用"
+            : "";
+      esp32LedBrightnessStatus.title = message || "";
+    }
+  }
+
   async function syncEsp32LedBrightness(value) {
     const level = clampEsp32LedBrightness(value);
-    if (esp32LedBrightnessControl) {
-      esp32LedBrightnessControl.classList.add("is-syncing");
-      esp32LedBrightnessControl.classList.remove("is-error");
-    }
+    setEsp32LedBrightnessStatus("syncing", `正在应用灯板亮度 ${level}`);
     try {
       const resp = await fetch("/api/config/device_esp32", {
         method: "POST",
@@ -652,26 +680,63 @@
         throw new Error(body.error || `HTTP ${resp.status}`);
       }
       if (body.result && body.result.led_brightness_sync && !body.result.led_brightness_sync.ok) {
-        throw new Error("设备暂时离线，亮度已保存，恢复连接后会自动应用");
+        throw new Error("亮度已保存，但设备暂时离线；设备上线后会再次应用");
       }
+      esp32LedBrightnessDeviceOnline = true;
+      setEsp32LedBrightnessStatus("success", `灯板亮度 ${level} 已应用`);
       return true;
     } catch (err) {
       console.warn("[esp32] LED brightness sync failed:", err);
-      if (esp32LedBrightnessControl) esp32LedBrightnessControl.classList.add("is-error");
+      setEsp32LedBrightnessStatus("error", err.message || "亮度已保存，但尚未应用到设备");
+      esp32LedBrightnessDeviceOnline = false;
       return false;
-    } finally {
-      if (esp32LedBrightnessControl) esp32LedBrightnessControl.classList.remove("is-syncing");
-      esp32LedBrightnessPending = false;
     }
   }
 
-  function scheduleEsp32LedBrightnessSync(value) {
+  async function flushEsp32LedBrightnessSync() {
+    if (esp32LedBrightnessSyncing) return;
+    esp32LedBrightnessSyncing = true;
+    try {
+      while (esp32LedBrightnessDesired != null) {
+        const level = esp32LedBrightnessDesired;
+        esp32LedBrightnessDesired = null;
+        await syncEsp32LedBrightness(level);
+      }
+    } finally {
+      esp32LedBrightnessSyncing = false;
+      esp32LedBrightnessPending = esp32LedBrightnessDesired != null;
+    }
+  }
+
+  function scheduleEsp32LedBrightnessSync(value, { userEdited = true, immediate = false } = {}) {
     const level = setEsp32LedBrightnessUi(value, { persist: true });
+    if (userEdited) esp32LedBrightnessUserEdited = true;
+    esp32LedBrightnessDesired = level;
     esp32LedBrightnessPending = true;
     if (esp32LedBrightnessTimer) clearTimeout(esp32LedBrightnessTimer);
     esp32LedBrightnessTimer = setTimeout(() => {
-      syncEsp32LedBrightness(level);
-    }, 150);
+      esp32LedBrightnessTimer = null;
+      void flushEsp32LedBrightnessSync();
+    }, immediate ? 0 : 150);
+  }
+
+  async function loadEsp32LedBrightnessFromServer() {
+    if (esp32LedBrightnessConfigLoaded) return true;
+    try {
+      const resp = await fetch("/api/config");
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok || body.ok === false) throw new Error(body.error || `HTTP ${resp.status}`);
+      const sections = (body.result && body.result.sections) || {};
+      const cell = sections.device_esp32 && sections.device_esp32["device_esp32.led_brightness"];
+      if (cell && cell.value != null && !esp32LedBrightnessUserEdited && !esp32LedBrightnessPending) {
+        setEsp32LedBrightnessUi(cell.value, { persist: true });
+      }
+      esp32LedBrightnessConfigLoaded = true;
+      return true;
+    } catch (err) {
+      console.warn("[esp32] LED brightness config load failed:", err);
+      return false;
+    }
   }
 
   function initEsp32LedBrightnessControl() {
@@ -685,14 +750,34 @@
     esp32LedBrightnessSlider.addEventListener("input", () => {
       scheduleEsp32LedBrightnessSync(esp32LedBrightnessSlider.value);
     });
+    esp32LedBrightnessQuickButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        scheduleEsp32LedBrightnessSync(button.dataset.ledBrightnessQuick);
+      });
+    });
+    void loadEsp32LedBrightnessFromServer();
   }
 
   function maybeSyncInitialEsp32LedBrightness() {
-    if (esp32LedBrightnessInitialSyncDone || !esp32LedBrightnessSlider) return;
+    if (!esp32LedBrightnessSlider) return;
     const esp = cameraCache && cameraCache.esp32 ? cameraCache.esp32 : null;
-    if (!esp || esp.enabled === false || esp.online === false) return;
-    syncEsp32LedBrightness(esp32LedBrightnessSlider.value).then((ok) => {
-      esp32LedBrightnessInitialSyncDone = ok;
+    const online = Boolean(esp && esp.enabled !== false && esp.online !== false);
+    if (!online) {
+      esp32LedBrightnessDeviceOnline = false;
+      return;
+    }
+    if (esp32LedBrightnessDeviceOnline) return;
+    esp32LedBrightnessDeviceOnline = true;
+    loadEsp32LedBrightnessFromServer().then((loaded) => {
+      if (!loaded) {
+        esp32LedBrightnessDeviceOnline = false;
+        return;
+      }
+      if (esp32LedBrightnessPending) return;
+      scheduleEsp32LedBrightnessSync(esp32LedBrightnessSlider.value, {
+        userEdited: false,
+        immediate: true,
+      });
     });
   }
 
@@ -4250,9 +4335,16 @@
     const params = preset.led_params || {};
     if (composerColorOverride) composerColorOverride.checked = Boolean(params.color);
     if (params.color && composerColor) composerColor.value = params.color;
-    if (params.brightness && composerBrightness) composerBrightness.value = String(params.brightness);
+    setComposerBrightnessUi(params.brightness == null ? 64 : params.brightness);
     if (params.intensity && composerIntensity) composerIntensity.value = String(Math.round(params.intensity * 100));
     if (params.direction) setExpressionDirection(params.direction);
+  }
+
+  function setComposerBrightnessUi(value) {
+    const level = clampEsp32LedBrightness(value);
+    if (composerBrightness) composerBrightness.value = String(level);
+    if (composerBrightnessValue) composerBrightnessValue.textContent = String(level);
+    return level;
   }
 
   function setExpressionDirection(direction) {
@@ -4365,6 +4457,9 @@
     if (!expressionLedPreview) return;
     const color = (composerColor && composerColor.value) || "#ffffff";
     const intensity = Number((composerIntensity && composerIntensity.value) || 100) / 100;
+    const requestedBrightness = clampEsp32LedBrightness((composerBrightness && composerBrightness.value) || 64);
+    const brightnessCeiling = clampEsp32LedBrightness((esp32LedBrightnessSlider && esp32LedBrightnessSlider.value) || 32);
+    const brightness = Math.min(requestedBrightness, brightnessCeiling) / 96;
     const pixelClipReady = effect && effect.kind === "pixel_clip" && ledEffectSourceCache.has(effect.effect_id);
     Array.from(expressionLedPreview.children).forEach((cell, index) => {
       const row = Math.floor(index / 51);
@@ -4696,6 +4791,12 @@
       });
     });
   });
+  setComposerBrightnessUi((composerBrightness && composerBrightness.value) || 64);
+  if (composerBrightness) {
+    composerBrightness.addEventListener("input", () => {
+      setComposerBrightnessUi(composerBrightness.value);
+    });
+  }
   if (btnExpressionPreview) btnExpressionPreview.addEventListener("click", () => { void previewExpression(); });
   if (btnExpressionSync) btnExpressionSync.addEventListener("click", () => { void syncExpressionResources(); });
   if (btnExpressionSetDefault) {

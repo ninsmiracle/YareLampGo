@@ -11,6 +11,7 @@ fall back to the paired lampgo-cam ESP32 firmware's /device/led Wi-Fi endpoint.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -128,15 +129,43 @@ def led_expression_catalog() -> list[dict[str, Any]]:
 class LEDController:
     """Manages LED expressions through serial or the ESP32 Wi-Fi endpoint."""
 
-    def __init__(self, config: LEDConfig, esp32_manager: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: LEDConfig,
+        esp32_manager: Any | None = None,
+        *,
+        brightness_ceiling: Callable[[], int] | None = None,
+    ) -> None:
         self._config = config
         self._esp32_manager = esp32_manager
+        self._brightness_ceiling = brightness_ceiling or (lambda: 96)
         self._serial = None
         self._connected = False
         self._remote_last_ok = False
 
     def bind_esp32_manager(self, esp32_manager: Any | None) -> None:
         self._esp32_manager = esp32_manager
+
+    def _brightness_ceiling_value(self) -> int:
+        try:
+            return max(1, min(255, int(self._brightness_ceiling())))
+        except (TypeError, ValueError):
+            return 96
+
+    def _clamp_brightness(self, brightness: Any) -> int:
+        return max(1, min(self._brightness_ceiling_value(), int(brightness)))
+
+    def _cap_payload_brightness(self, payload: dict[str, Any]) -> dict[str, Any]:
+        capped = dict(payload)
+        if "brightness" in capped:
+            capped["brightness"] = self._clamp_brightness(capped["brightness"])
+        if isinstance(capped.get("led_params"), dict):
+            led_params = dict(capped["led_params"])
+            led_params["brightness"] = self._clamp_brightness(
+                led_params.get("brightness", self._brightness_ceiling_value())
+            )
+            capped["led_params"] = led_params
+        return capped
 
     def connect(self) -> None:
         if not self._config.port:
@@ -202,7 +231,7 @@ class LEDController:
 
     def set_brightness(self, brightness: int) -> bool:
         """Set LED brightness (1-255)."""
-        brightness = max(1, min(255, brightness))
+        brightness = self._clamp_brightness(brightness)
         if self._serial is None:
             return self._send_remote({"brightness": brightness})
         return self._send(f"b{brightness}\n")
@@ -222,11 +251,17 @@ class LEDController:
             logger.warning("led.expression_resolve_failed", expression_id=expression_id, error=str(exc))
             return False, None
 
+        composition = dict(composition)
+        led_params = dict(composition.get("led_params") or {})
+        led_params["brightness"] = self._clamp_brightness(
+            led_params.get("brightness", self._brightness_ceiling_value())
+        )
+        composition["led_params"] = led_params
         effect = composition.get("led_effect") or {}
         payload: dict[str, Any] = {
             "eye_clip_id": composition.get("eye_storage_clip_id"),
             "led_effect_id": composition.get("led_effect_id"),
-            "led_params": composition.get("led_params") or {},
+            "led_params": led_params,
             "playback": composition.get("playback") or "loop",
             "duration_ms": int(composition.get("duration_ms") or 3000),
         }
@@ -262,7 +297,7 @@ class LEDController:
                 "hour": max(0, min(23, int(hour))),
                 "minute": max(0, min(59, int(minute))),
                 "color": str(color),
-                "brightness": max(1, min(96, int(brightness))),
+                "brightness": self._clamp_brightness(brightness),
                 "effect": str(effect),
             },
             reason="clock",
@@ -298,6 +333,7 @@ class LEDController:
         return self._send_remote_path("/device/led", payload, reason="led")
 
     def _send_remote_path(self, path: str, payload: dict[str, Any], *, reason: str) -> bool:
+        payload = self._cap_payload_brightness(payload)
         manager = self._esp32_manager
         if manager is None:
             logger.debug("led.remote_send_skipped (no esp32 manager)", payload=payload)
