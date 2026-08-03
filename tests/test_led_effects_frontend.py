@@ -30,7 +30,7 @@ def test_led_effects_are_grouped_with_added_effects_first() -> None:
 def test_led_effect_group_divider_is_a_single_thin_line() -> None:
     assert ".expression-effect-group-title.expression-group-divider" in STYLE_CSS
     assert "border-top: 1px solid #dce3e7;" in STYLE_CSS
-    assert "expression-library-polish-20260803" in INDEX_HTML
+    assert "feature-batch-20260803" in INDEX_HTML
 
 
 def test_led_editor_preserves_one_shot_default_playback() -> None:
