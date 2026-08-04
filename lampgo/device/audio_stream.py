@@ -151,7 +151,13 @@ class Esp32AudioCapture:
 
         safe_url = redact_ws_owner_token(url)
         logger.info("esp32_audio.connecting", url=safe_url)
-        async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
+        async with websockets.connect(
+            url,
+            open_timeout=5,
+            close_timeout=2,
+            ping_interval=None,
+            proxy=None,
+        ) as ws:
             logger.info("esp32_audio.connected", url=safe_url)
             self._connected = True
             self._last_frame_at = time.monotonic()
@@ -276,7 +282,13 @@ class Esp32AudioSession:
 
         deadline = asyncio.get_event_loop().time() + self.MAX_DURATION_S
         try:
-            async with websockets.connect(url, open_timeout=5, close_timeout=2, ping_interval=None) as ws:
+            async with websockets.connect(
+                url,
+                open_timeout=5,
+                close_timeout=2,
+                ping_interval=None,
+                proxy=None,
+            ) as ws:
                 self._esp32.mark_active_healthy()
                 frames = 0
                 while not self._stop_event.is_set():

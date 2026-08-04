@@ -3070,6 +3070,7 @@ class WebGateway:
                     close_timeout=2.0,
                     ping_interval=None,
                     max_size=None,
+                    proxy=None,
                 )
             except Exception as exc:
                 next_connect_at = now + 0.5
@@ -4289,6 +4290,7 @@ class WebGateway:
                         close_timeout=2,
                         ping_interval=None,
                         max_size=None,
+                        proxy=None,
                     ) as esp32_ws:
                         self.server.esp32.mark_active_healthy()
                         safe_url = redact_ws_owner_token(url)

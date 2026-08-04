@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import sys
+from types import SimpleNamespace
 
 from lampgo.core.config import VoiceConfig
 from lampgo.voice.agent_sdk import AgentSDKManager
@@ -21,6 +24,27 @@ from lampgo.voice.tts import (
 
 def test_volcengine_tts_defaults_to_v3_bidirectional_endpoint() -> None:
     assert VOLCENGINE_TTS_ENDPOINT == "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
+
+
+def test_volcengine_tts_bypasses_unrelated_desktop_proxy(monkeypatch) -> None:
+    connect_kwargs = None
+
+    async def fake_connect(*_args, **kwargs):
+        nonlocal connect_kwargs
+        connect_kwargs = kwargs
+        raise RuntimeError("stop after inspecting connect options")
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=fake_connect))
+
+    async def run() -> None:
+        tts = VolcengineTTS(app_id="app", access_token="token")
+        async for _chunk in tts.stream_pcm("测试"):
+            raise AssertionError("the fake connection must not yield audio")
+
+    asyncio.run(run())
+
+    assert connect_kwargs is not None
+    assert connect_kwargs["proxy"] is None
 
 
 def test_volcengine_tts_default_voice_is_uranus_bigtts() -> None:

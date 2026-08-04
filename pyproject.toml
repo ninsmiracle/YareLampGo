@@ -22,7 +22,7 @@ dependencies = [
     "httpx>=0.28.1",
     "starlette>=0.45",
     "uvicorn>=0.34",
-    "websockets>=14.0",
+    "websockets>=15.0",
     "zeroconf>=0.131",
     # Voice is a core LampGo capability.  Keep it in the default dependency
     # set so a plain `uv sync` cannot silently remove the LiveKit runtime.
