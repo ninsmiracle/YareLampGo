@@ -1776,6 +1776,16 @@
     if (recordMetrics) recordMetrics.textContent = "采样：-- FPS · 0 帧";
   }
 
+  function recoverRecordingStartRequest(message) {
+    recordingStartRequestId = null;
+    if (btnRecordStartConfirm) {
+      btnRecordStartConfirm.disabled = false;
+      btnRecordStartConfirm.textContent = "开始录制";
+    }
+    if (btnRecordStartCancel) btnRecordStartCancel.classList.remove("hidden");
+    if (recordStartError) recordStartError.textContent = message;
+  }
+
   function startRecordTimer() {
     stopRecordTimer();
     if (!recordTimer) return;
@@ -1943,6 +1953,9 @@
 
     ws.onclose = () => {
       setConnected(false);
+      if (recordingStartRequestId) {
+        recoverRecordingStartRequest("连接已断开，录制启动状态未知。请等待页面恢复连接后重试。");
+      }
       if (webPageOwnerActive) setTimeout(connect, 2000);
     };
 
@@ -2568,22 +2581,23 @@
     }
 
     if (recordingStartRequestId && msg.request_id === recordingStartRequestId && !msg.ok) {
-      recordingStartRequestId = null;
-      if (btnRecordStartConfirm) {
-        btnRecordStartConfirm.disabled = false;
-        btnRecordStartConfirm.textContent = "开始录制";
-      }
       const rawError = String(msg.error || "录制启动失败");
       const errorText = rawError.includes("motor recovery required")
         ? "机械臂尚未完成安全复位，当前不能录制。请先完成安全复位后再试。"
         : `录制启动失败：${rawError}`;
-      if (recordStartError) recordStartError.textContent = errorText;
+      recoverRecordingStartRequest(errorText);
       if (recordStartDialog && !recordStartDialog.open) recordStartDialog.showModal();
       addSystemMessage(errorText);
       return;
     }
 
-    if (msg.result && msg.result.status === "recording") {
+    if (
+      recordingStartRequestId &&
+      msg.request_id === recordingStartRequestId &&
+      msg.ok &&
+      msg.result &&
+      msg.result.status === "recording"
+    ) {
       recordingStartRequestId = null;
       isMotionRecording = true;
       hasPendingMotionRecording = false;
@@ -5319,13 +5333,9 @@
       btnRecordStartConfirm.disabled = true;
       btnRecordStartConfirm.textContent = "正在启动…";
     }
+    if (btnRecordStartCancel) btnRecordStartCancel.classList.add("hidden");
     if (!send({ type: "recording_start", fps: 30, request_id: requestId })) {
-      recordingStartRequestId = null;
-      if (btnRecordStartConfirm) {
-        btnRecordStartConfirm.disabled = false;
-        btnRecordStartConfirm.textContent = "开始录制";
-      }
-      if (recordStartError) recordStartError.textContent = "后端连接未就绪，无法开始录制。请等待页面恢复连接后重试。";
+      recoverRecordingStartRequest("后端连接未就绪，无法开始录制。请等待页面恢复连接后重试。");
     }
   }
 
@@ -7770,6 +7780,10 @@
 
   if (btnRecordStartCancel) {
     btnRecordStartCancel.addEventListener("click", () => {
+      if (recordingStartRequestId) {
+        if (recordStartError) recordStartError.textContent = "正在启动录制，请等待后端确认后再操作。";
+        return;
+      }
       stopRecordTimer();
       closeRecordStartDialog();
       resetRecordStartDialogUI();
