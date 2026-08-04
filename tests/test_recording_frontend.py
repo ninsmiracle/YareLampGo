@@ -20,5 +20,9 @@ def test_recording_start_never_fails_silently() -> None:
     assert 'btnRecordStartConfirm.textContent = "正在启动…";' in APP_JS
     assert "if (!send({ type: \"recording_start\"" in APP_JS
     assert "后端连接未就绪，无法开始录制" in APP_JS
+    assert "recoverRecordingStartRequest" in APP_JS
+    assert "连接已断开，录制启动状态未知" in APP_JS
     assert 'rawError.includes("motor recovery required")' in APP_JS
     assert "机械臂尚未完成安全复位，当前不能录制" in APP_JS
+    assert "msg.request_id === recordingStartRequestId" in APP_JS
+    assert "正在启动录制，请等待后端确认后再操作" in APP_JS
