@@ -22,7 +22,11 @@ class SetExpressionSkill(Skill):
             ),
         ),
         "brightness": ParameterSpec(
-            name="brightness", type="int", required=False, default=200, description="Brightness 1-255"
+            name="brightness",
+            type="int",
+            required=False,
+            default=64,
+            description="Brightness request from 1 to 96; the global LED ceiling still applies.",
         ),
         "playback": ParameterSpec(
             name="playback", type="str", required=False, default="once", description="once or loop"

@@ -131,11 +131,18 @@
             <input id="esp32-volume-slider" class="volume-slider" type="range" min="0" max="100" value="70" step="1" />
             <span id="esp32-volume-value" class="volume-value">70%</span>
           </label>
-          <label id="esp32-led-brightness-control" class="volume-control" title="调节 S3 LED 灯板亮度（安全上限 96）">
-            <span class="volume-label">灯板</span>
-            <input id="esp32-led-brightness-slider" class="volume-slider" type="range" min="1" max="96" value="32" step="1" />
-            <span id="esp32-led-brightness-value" class="volume-value">32</span>
-          </label>
+          <div id="esp32-led-brightness-control" class="volume-control led-brightness-control" role="group" aria-label="S3 LED 灯板亮度" title="立即调节当前及后续 S3 LED 效果的亮度上限">
+            <label class="volume-label" for="esp32-led-brightness-slider">灯板亮度</label>
+            <input id="esp32-led-brightness-slider" class="volume-slider" type="range" min="1" max="96" value="32" step="1" aria-label="灯板亮度精确值" />
+            <output id="esp32-led-brightness-value" class="volume-value" for="esp32-led-brightness-slider" aria-live="polite">32</output>
+            <div class="led-brightness-quick" role="group" aria-label="快速亮度档位">
+              <button type="button" data-led-brightness-quick="8" aria-pressed="false" title="低亮：8">8</button>
+              <button type="button" data-led-brightness-quick="16" aria-pressed="false" title="柔和：16">16</button>
+              <button type="button" data-led-brightness-quick="24" aria-pressed="false" title="日常：24">24</button>
+              <button type="button" data-led-brightness-quick="32" aria-pressed="true" title="明亮：32">32</button>
+            </div>
+            <span id="esp32-led-brightness-status" class="led-brightness-status" aria-live="polite"></span>
+          </div>
         </div>
 
         <div class="topbar-right">
@@ -491,7 +498,8 @@
                   <label>眼睛<select id="composer-eye"><option value="">无眼睛</option></select></label>
                   <label>LED<select id="composer-led"><option value="">无 LED</option></select></label>
                   <label class="expression-color-control"><input id="composer-color-override" type="checkbox" />覆盖主色<input id="composer-color" type="color" value="#ffffff" /></label>
-                  <label>亮度<input id="composer-brightness" type="range" min="1" max="96" value="64" /></label>
+                  <label>表情亮度<span class="expression-range-control"><input id="composer-brightness" type="range" min="1" max="96" value="64" aria-label="当前组合表情亮度" /><output id="composer-brightness-value" for="composer-brightness">64</output></span></label>
+                  <small class="expression-brightness-hint">实际亮度不会超过顶部“灯板亮度”上限。</small>
                   <label>强度<input id="composer-intensity" type="range" min="10" max="100" value="100" /></label>
                   <div class="expression-direction" role="group" aria-label="方向">
                     <button type="button" data-direction="left" title="向左">←</button>
@@ -1374,6 +1382,7 @@
     <form id="record-start-form" class="record-dialog-card">
       <div class="record-dialog-title">开始录制动作</div>
       <div id="record-start-desc" class="record-dialog-desc">点击“开始录制”后将自动关闭电机力矩，你可以手动掰动关节进行录制。</div>
+      <div id="record-start-error" class="record-dialog-error" role="alert" aria-live="assertive"></div>
       <div id="record-timer" class="record-dialog-timer">已录制 0.0s</div>
       <div id="record-metrics" class="record-dialog-metrics">采样：-- FPS · 0 帧</div>
       <div class="record-dialog-actions">

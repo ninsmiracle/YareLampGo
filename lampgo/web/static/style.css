@@ -1095,6 +1095,54 @@ button.device-chip.is-active {
   accent-color: var(--accent, #be7c72);
 }
 
+.led-brightness-control {
+  height: auto;
+  min-height: 28px;
+  padding-right: 7px;
+}
+
+.led-brightness-quick {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 1px;
+}
+
+.led-brightness-quick button {
+  min-width: 25px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid #d7dde1;
+  border-radius: 999px;
+  background: #f7f8f9;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 10px;
+  line-height: 18px;
+}
+
+.led-brightness-quick button:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.led-brightness-quick button.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.led-brightness-status {
+  min-width: 0;
+  color: var(--success);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.led-brightness-control.is-syncing .led-brightness-status { color: #b77a24; }
+.led-brightness-control.is-error .led-brightness-status { color: var(--danger); }
+
 .joint-popover {
   position: fixed;
   z-index: 1000;
@@ -2989,6 +3037,28 @@ button.device-chip.is-active {
   font-size: 12px;
 }
 
+.expression-range-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+}
+
+.expression-range-control input { width: 100%; min-width: 0; }
+
+.expression-range-control output {
+  color: #227c75;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.expression-brightness-hint {
+  margin-top: -5px;
+  padding-left: 62px;
+  color: #7b858d;
+  font-size: 10.5px;
+}
+
 .expression-direction,
 .expression-playback {
   display: grid;
@@ -4118,6 +4188,15 @@ button.device-chip.is-active {
 
   .music-mode-label {
     display: none;
+  }
+
+  .led-brightness-control {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .led-brightness-control .volume-slider {
+    flex: 1 1 90px;
   }
 
   .view {

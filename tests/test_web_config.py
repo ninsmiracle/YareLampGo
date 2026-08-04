@@ -1,6 +1,7 @@
 """End-to-end smoke tests for the generic web config endpoints (PR-C)."""
 from __future__ import annotations
 
+import pytest
 from starlette.testclient import TestClient
 
 from lampgo import personastore
@@ -161,6 +162,8 @@ def test_led_brightness_is_persisted_and_caps_direct_led_commands(monkeypatch, t
     with TestClient(gateway.app) as client:
         saved = client.post("/api/config/device_esp32", json={"led_brightness": 24})
         direct = client.post("/api/device/led", json={"expression": "heart", "brightness": 96})
+        direct_low = client.post("/api/device/led", json={"expression": "heart", "brightness": 8})
+        loaded = client.get("/api/config")
 
     assert saved.status_code == 200
     assert saved.json()["result"]["led_brightness_sync"] == {"ok": True, "level": 24}
@@ -171,6 +174,41 @@ def test_led_brightness_is_persisted_and_caps_direct_led_commands(monkeypatch, t
     assert sent[0][1]["brightness"] == 24
     assert sent[1][0] == "/device/led"
     assert sent[1][1]["brightness"] == 24
+    assert direct_low.status_code == 200
+    assert sent[2][0] == "/device/led"
+    assert sent[2][1]["brightness"] == 8
+    assert loaded.status_code == 200
+    assert (
+        loaded.json()["result"]["sections"]["device_esp32"]["device_esp32.led_brightness"]["value"]
+        == 24
+    )
+
+
+@pytest.mark.parametrize("value", [0, 97, "bright"])
+def test_led_brightness_rejects_invalid_values(monkeypatch, tmp_path, value):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/config/device_esp32", json={"led_brightness": value})
+
+    assert response.status_code == 400
+    assert response.json()["ok"] is False
+
+
+def test_led_brightness_is_saved_when_device_sync_is_unavailable(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+
+    async def fake_proxy_post(_path: str, _payload: dict):
+        return 503, {"ok": False, "error": "offline"}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/config/device_esp32", json={"led_brightness": 16})
+
+    assert response.status_code == 200
+    assert response.json()["result"]["led_brightness_sync"] == {"ok": False, "level": 16}
+    assert gateway.server.config.device_esp32.led_brightness == 16
 
 
 def test_api_config_post_rejects_unknown_fields(monkeypatch, tmp_path):
