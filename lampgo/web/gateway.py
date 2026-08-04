@@ -2923,10 +2923,21 @@ class WebGateway:
         if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not c6_confirmed:
             device = self.server.esp32.get_status().get("device")
             update_expression_clip_sync(clip_id, status="sync_failed", device=device)
+            device_error = (
+                str(last_body.get("error") or "").strip()
+                if isinstance(last_body, dict)
+                else ""
+            )
+            if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False):
+                error = "device sync failed"
+                if device_error:
+                    error = f"{error}: {device_error}"
+            else:
+                error = "C6 did not confirm clip sync"
             return JSONResponse(
                 {
                     "ok": False,
-                    "error": "device sync failed" if status >= 400 else "C6 did not confirm clip sync",
+                    "error": error,
                     "result": {
                         "transfer_mode": "bulk",
                         "sent_chunks": 1,
@@ -3098,6 +3109,7 @@ class WebGateway:
                     close_timeout=2.0,
                     ping_interval=None,
                     max_size=None,
+                    proxy=None,
                 )
             except Exception as exc:
                 next_connect_at = now + 0.5
@@ -4317,6 +4329,7 @@ class WebGateway:
                         close_timeout=2,
                         ping_interval=None,
                         max_size=None,
+                        proxy=None,
                     ) as esp32_ws:
                         self.server.esp32.mark_active_healthy()
                         safe_url = redact_ws_owner_token(url)

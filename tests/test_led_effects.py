@@ -97,6 +97,17 @@ def test_pixel_effect_storage_capacity_and_llm_catalog(monkeypatch, tmp_path):
     assert any(item["effect_id"] == "rainbow_smile" for item in catalog["led_effects"])
 
 
+def test_pixel_effect_supports_once_as_default_playback(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    authored = _effect("one_shot")
+    authored["default_playback"] = "once"
+
+    saved = save_led_effect(authored)
+
+    assert saved["default_playback"] == "once"
+    assert load_pixel_led_source("one_shot")["default_playback"] == "once"
+
+
 def test_custom_effect_limit_is_shared_with_legacy_templates(monkeypatch, tmp_path):
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     monkeypatch.setattr(expression_library, "MAX_CUSTOM_LED_EFFECTS", 1)

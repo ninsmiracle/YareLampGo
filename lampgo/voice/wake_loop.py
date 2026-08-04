@@ -265,7 +265,11 @@ class WakeLoop:
             try:
                 logger.info("wake_loop.device_wake_connecting", url=safe_url)
                 async with websockets.connect(
-                    url, open_timeout=5, close_timeout=2, ping_interval=None
+                    url,
+                    open_timeout=5,
+                    close_timeout=2,
+                    ping_interval=None,
+                    proxy=None,
                 ) as ws:
                     self._server.esp32.mark_active_healthy()
                     logger.info("wake_loop.device_wake_connected", url=safe_url)

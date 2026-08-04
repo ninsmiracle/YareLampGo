@@ -9,7 +9,11 @@ import pytest
 from starlette.testclient import TestClient
 
 from lampgo.core.config import DeviceConfig, LampgoConfig
-from lampgo.expression_clips import create_expression_clip, list_expression_clips
+from lampgo.expression_clips import (
+    create_expression_clip,
+    list_expression_clips,
+    update_expression_clip_sync,
+)
 from lampgo.server import LampgoServer
 from lampgo.web.gateway import WebGateway
 
@@ -74,6 +78,21 @@ def test_expression_clip_rejects_short_duration(monkeypatch, tmp_path):
         )
 
 
+def test_expression_clip_rejects_id_that_exceeds_s3_spiffs_filename_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+
+    with pytest.raises(ValueError, match="1-13 chars"):
+        create_expression_clip(
+            clip_id="pixel-cat-eyes",
+            expression="pixel-cat",
+            source_bytes=_png_sprite_sheet(),
+            filename="pixel-cat.png",
+            fps=10,
+            grid_rows=3,
+            grid_cols=10,
+        )
+
+
 def test_create_expression_clip_supports_precise_two_second_30fps_performance(monkeypatch, tmp_path):
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
 
@@ -100,9 +119,66 @@ def test_create_expression_clip_supports_precise_two_second_30fps_performance(mo
 
     assert manifest["duration_ms"] == 2000
     assert manifest["frame_count"] == 60
+    assert manifest["led"]["effect"] == "ecstatic-mouth"
+    assert manifest["default_led_effect_id"] == "ecstatic-mouth"
     assert fps == 30
     assert set(durations) == {33, 34}
     assert sum(durations) == 2000
+
+
+def test_expression_clip_accepts_a_six_second_source_window(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+
+    manifest = create_expression_clip(
+        clip_id="long-eyes",
+        expression="long",
+        source_bytes=_png_sprite_sheet(),
+        filename="long.png",
+        content_type="image/png",
+        fps=10,
+        duration_s=6.0,
+        grid_rows=3,
+        grid_cols=10,
+    )
+
+    assert manifest["duration_ms"] == 6000
+
+
+def test_rebuilding_identical_eye_preserves_sync_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    source = _png_sprite_sheet()
+    create_expression_clip(
+        clip_id="stable-eyes",
+        expression="stable",
+        source_bytes=source,
+        filename="stable.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+        default_led_effect_id="soft-mouth",
+    )
+    update_expression_clip_sync(
+        "stable-eyes",
+        status="synced",
+        device={"c6_confirmed": True},
+    )
+
+    rebuilt = create_expression_clip(
+        clip_id="stable-eyes",
+        expression="stable",
+        source_bytes=source,
+        filename="stable.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+        default_led_effect_id="soft-mouth",
+    )
+
+    assert rebuilt["sync"]["status"] == "synced"
+    assert rebuilt["sync"]["last_synced_at"] is not None
+    assert rebuilt["sync"]["device"] == {"c6_confirmed": True}
 
 
 def test_expression_clip_api_upload_and_sync(monkeypatch, tmp_path):
@@ -179,3 +255,28 @@ def test_expression_clip_sync_rejects_missing_c6_confirmation(monkeypatch, tmp_p
 
     assert response.status_code == 502
     assert response.json()["error"] == "C6 did not confirm clip sync"
+
+
+def test_expression_clip_sync_surfaces_device_error(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    create_expression_clip(
+        clip_id="focused",
+        expression="focused",
+        source_bytes=_png_sprite_sheet(),
+        filename="focused.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+    )
+
+    async def fake_proxy_post_bytes(*_args, **_kwargs):
+        return 400, {"ok": False, "error": "manifest open failed"}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/device/expression-clips/sync", json={"clip_id": "focused"})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "device sync failed: manifest open failed"

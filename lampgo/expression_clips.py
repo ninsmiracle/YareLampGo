@@ -19,19 +19,22 @@ from lampgo import personastore
 
 TARGET_DURATION_S = 1.0
 MIN_DURATION_S = 1.0
-MAX_DURATION_S = 3.5
+# Keep a finite composition window while allowing a complete short source
+# sequence without silently truncating it to the legacy 3.5-second limit.
+MAX_DURATION_S = 6.0
 MIN_FPS = 8
 MAX_FPS = 30
 DEFAULT_FPS = 30
 MAX_CLIPS = 10
 MAX_LCD_BYTES = 256 * 1024
+MAX_DEVICE_CLIP_ID_LENGTH = 13
 
 LCD_WIDTH = 320
 LCD_HEIGHT = 172
 
 LCD_MAGIC = b"LGLCD1"
 
-_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+_SAFE_ID_RE = re.compile(rf"^[a-zA-Z0-9_-]{{1,{MAX_DEVICE_CLIP_ID_LENGTH}}}$")
 
 
 class ExpressionClipError(ValueError):
@@ -105,7 +108,10 @@ def sanitize_clip_id(value: str) -> str:
     if not clip_id:
         raise ExpressionClipError("clip_id is required")
     if not _SAFE_ID_RE.match(clip_id):
-        raise ExpressionClipError("clip_id must be 1-32 chars: letters, numbers, dash, underscore")
+        raise ExpressionClipError(
+            f"clip_id must be 1-{MAX_DEVICE_CLIP_ID_LENGTH} chars: "
+            "letters, numbers, dash, underscore (S3 SPIFFS filename limit)"
+        )
     return clip_id
 
 
@@ -270,6 +276,13 @@ def create_expression_clip(
             "converted LCD clip exceeds device cache budget "
             f"(lcd={len(lcd_payload)} bytes)"
         )
+    normalized_default_led_effect_id = (default_led_effect_id or "").strip().lower() or None
+    existing_manifest: dict[str, Any] | None = None
+    if _manifest_path(clip_id).is_file():
+        try:
+            existing_manifest = load_expression_clip(clip_id)
+        except Exception:
+            existing_manifest = None
 
     clip_dir = _clip_dir(clip_id)
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -291,14 +304,19 @@ def create_expression_clip(
         source_content_type=content_type,
         lcd_bytes=len(lcd_payload),
         lcd_sha256=_sha256(lcd_payload),
-        led_effect=expression,
-        default_led_effect_id=(default_led_effect_id or "").strip().lower() or None,
+        led_effect=normalized_default_led_effect_id or expression,
+        default_led_effect_id=normalized_default_led_effect_id,
         source_stored_filename=source_stored_filename,
         grid_rows=grid_rows,
         grid_cols=grid_cols,
         path=clip_dir,
     )
     manifest = package.to_manifest()
+    if (
+        existing_manifest
+        and str((existing_manifest.get("lcd") or {}).get("sha256") or "") == package.lcd_sha256
+    ):
+        manifest["sync"] = dict(existing_manifest.get("sync") or manifest["sync"])
     (clip_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest
 

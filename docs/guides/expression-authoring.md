@@ -7,8 +7,8 @@ LampGo expressions are reusable compositions, not a single animation file:
   uploaded to the S3 for a mouth, symbol, direction, or accent.
 - `ExpressionPreset` references one optional eye and one optional LED effect.
 
-At least one channel must be present. The two channels start at `t=0` and use
-the same 0-1 phase over a default three-second duration. Expressions loop by
+At least one channel must be present. The two channels start at `t=0`; the eye
+clip duration is authoritative when it is selected. Expressions loop by
 default and keep looping for the full action; callers must explicitly request
 `once` when they want a one-shot micro-expression.
 
@@ -23,11 +23,14 @@ default and keep looping for the full action; callers must explicitly request
    10fps, up to 16 RGB colors including the off color, and no executable code.
 4. For energetic expressions, keep the 30fps render cadence while holding
    readable key poses. A useful default is 60 eye frames over 2.0 seconds.
-   Slower expressions remain supported. The accepted range is 8-30fps and
-   1.0-3.5 seconds.
+   Slower source clips remain supported. The accepted range is 8-30fps and
+   1.0-6.0 seconds, subject to the 256KiB C6 package cap.
 5. A transient composition may be previewed or played without being saved.
    An LLM must receive explicit user confirmation before saving a preset.
-6. Do not emit arbitrary code, jumps, unbounded loops, or device allocations.
+6. A 6-second eye clip can outlast the current 3-second custom LED pixel clip.
+   Do not present that pairing as frame-synchronous: use an eye-only scene, a
+   looping LED accent, or author a matching LED format before claiming sync.
+7. Do not emit arbitrary code, jumps, unbounded loops, or device allocations.
    Repeated frames use `ticks`; their sum must be exactly 30. Firmware v1
    templates remain available only for official and backward-compatible assets.
 
@@ -38,6 +41,7 @@ default and keep looping for the full action; callers must explicitly request
   "effect_id": "rainbow_smile",
   "label": "Rainbow smile",
   "role": "mouth",
+  "default_playback": "once",
   "program": {
     "version": 2,
     "type": "pixel_clip",
@@ -66,6 +70,8 @@ Palette symbols are `.123456789ABCDEF`; `.` is always off. The backend maps
 the logical grid to physical wiring, deduplicates frames, compiles LEF1, and
 rejects packages over 8KiB. `primary`, `secondary`, and `accent` palette roles
 may be recolored by a preset without copying the animation.
+`default_playback` may be `once` or `loop`; omit it to retain the legacy
+`loop` default.
 
 ## Capacity Contract
 
@@ -98,6 +104,10 @@ The same catalog is atomically written to
 `~/.lampgo/expression_library/llm-catalog.json` for local agents that cannot
 call the HTTP API. It is a generated read-only projection, not a second source
 of truth.
+
+Keep eye `clip_id` values to 13 characters or fewer. The S3 stages each eye
+package in SPIFFS as `/ec_<clip_id>_manifest.json`; longer ids exceed the
+device's 31-character filename limit and cannot be synchronized.
 
 Play a saved preset:
 

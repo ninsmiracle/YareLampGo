@@ -326,6 +326,9 @@ def save_pixel_led_effect(
 ) -> dict[str, Any]:
     effect_id = _safe_effect_id(effect_id)
     normalized_program, package = compile_led_program(raw.get("program"))
+    default_playback = str(raw.get("default_playback") or "loop").strip().lower()
+    if default_playback not in {"once", "loop"}:
+        raise LedEffectError("default_playback must be once or loop")
     existing = list_pixel_led_effects()
     current = next((item for item in existing if item.get("effect_id") == effect_id), None)
     if current is None and len(existing) + external_count >= MAX_CUSTOM_LED_EFFECTS:
@@ -342,6 +345,7 @@ def save_pixel_led_effect(
         "effect_id": effect_id,
         "label": label,
         "role": role,
+        "default_playback": default_playback,
         "program": normalized_program,
     }
     manifest = {
@@ -351,7 +355,7 @@ def save_pixel_led_effect(
         "source": "custom",
         "kind": "pixel_clip",
         "animated": True,
-        "default_playback": "loop",
+        "default_playback": default_playback,
         "duration_ms": 3000,
         "program": {
             "version": 2,

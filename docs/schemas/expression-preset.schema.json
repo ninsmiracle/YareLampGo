@@ -24,7 +24,7 @@
     "led_effect_id": {"type": ["string", "null"]},
     "led_params": {"type": "object"},
     "playback": {"enum": ["once", "loop"], "default": "loop"},
-    "duration_ms": {"type": "integer", "minimum": 2500, "maximum": 3500},
+    "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 6000},
     "confirmed": {"const": true}
   }
 }

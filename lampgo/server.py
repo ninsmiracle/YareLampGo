@@ -116,7 +116,11 @@ class LampgoServer:
         # LED expressions now go through the paired ESP32 Wi-Fi endpoint. Keep
         # the old serial config fields readable for legacy files, but do not
         # open a local LED serial port from the web runtime.
-        self.led = LEDController(LEDConfig(port="", baud_rate=config.led.baud_rate), esp32_manager=self.esp32)
+        self.led = LEDController(
+            LEDConfig(port="", baud_rate=config.led.baud_rate),
+            esp32_manager=self.esp32,
+            brightness_ceiling=lambda: self.config.device_esp32.led_brightness,
+        )
         self.clock = ClockController(
             self.led,
             brightness_ceiling=lambda: self.config.device_esp32.led_brightness,
