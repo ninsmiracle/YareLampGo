@@ -35,7 +35,7 @@ LampgoServer
 | 入口 | 代码 | 用途 |
 | --- | --- | --- |
 | CLI | `lampgo/cli.py` | 启动服务、调用技能、录制动作、校准、探测设备。 |
-| IPC | `lampgo/ipc.py` | CLI 和本地脚本通过 Unix socket 调用运行中的守护进程。 |
+| IPC | `lampgo/ipc.py` | CLI 和本地脚本通过本地 IPC 调用运行中的守护进程；POSIX 使用 Unix socket，Windows 使用回环 TCP。 |
 | Web UI | `lampgo/web/gateway.py` + `lampgo/web/static/` | 浏览器控制台，提供聊天、设置、录制、表情、技能和设备管理。 |
 | REST / WebSocket | `lampgo/web/gateway.py` | Web UI、MCP 代理和外部程序的 HTTP / WS 接口。 |
 | Codex Harness | `lampgo/agent/`、`lampgo/mcp_stdio.py` | 启动复杂任务，并把台灯能力暴露为 Codex MCP 工具。 |

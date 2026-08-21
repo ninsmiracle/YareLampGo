@@ -97,6 +97,50 @@ logger = structlog.get_logger(__name__)
 RECORDING_ALIASES_FILE = "aliases.json"
 
 
+def _install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event):
+    """Install portable Ctrl+C / termination handlers and return a cleanup hook."""
+    signals = [sig for sig in (signal.SIGINT, getattr(signal, "SIGTERM", None)) if sig is not None]
+    loop_signals: list[signal.Signals] = []
+    fallback_signals: list[tuple[signal.Signals, Any]] = []
+
+    try:
+        for sig in signals:
+            loop.add_signal_handler(sig, stop.set)
+            loop_signals.append(sig)
+    except (NotImplementedError, RuntimeError):
+        for sig in loop_signals:
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, RuntimeError):
+                pass
+        loop_signals.clear()
+
+        def on_signal(_signum, _frame) -> None:
+            loop.call_soon_threadsafe(stop.set)
+
+        for sig in signals:
+            try:
+                previous = signal.getsignal(sig)
+                signal.signal(sig, on_signal)
+                fallback_signals.append((sig, previous))
+            except (OSError, ValueError):
+                logger.warning("server.signal_handler_unavailable", signal=str(sig))
+
+    def restore() -> None:
+        for sig in loop_signals:
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, RuntimeError):
+                pass
+        for sig, previous in fallback_signals:
+            try:
+                signal.signal(sig, previous)
+            except (OSError, ValueError):
+                pass
+
+    return restore
+
+
 def _log_safe(value: Any, *, limit: int = 200) -> str:
     text = str(value or "")
     text = re.sub(r"[\r\n\t\x00-\x1f\x7f]+", " ", text)
@@ -2231,7 +2275,7 @@ class LampgoServer:
             "server.ready",
             skills=self.registry.list_ids(),
             motor_port="(disabled)" if self.config.no_hw else self.config.device.motor_port,
-            socket=self.config.socket_path,
+            socket=self._ipc.socket_path,
         )
         self._started = True
 
@@ -2466,8 +2510,7 @@ class LampgoServer:
         await self.start()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
+        restore_stop_handlers = _install_stop_handlers(loop, stop)
         gateway_host = self._gateway_bind_host()
         local_url = await self._start_web_gateway(print_banner=False, host=gateway_host) or ""
         if self.config.web_enabled:
@@ -2478,8 +2521,11 @@ class LampgoServer:
         if self.config.web_enabled and local_url:
             self._print_connection_banner(local_url)
         logger.info("server.running (Ctrl+C to stop)")
-        await stop.wait()
-        await self.shutdown()
+        try:
+            await stop.wait()
+        finally:
+            restore_stop_handlers()
+            await self.shutdown()
 
     def _gateway_bind_host(self) -> str:
         """Keep the implicit Codex API local unless the user enabled the Web UI."""

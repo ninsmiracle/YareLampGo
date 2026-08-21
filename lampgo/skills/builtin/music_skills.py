@@ -46,7 +46,7 @@ class DanceToMusicSkill(Skill):
             type="str",
             required=False,
             default="system",
-            description="Audio source: system (macOS ScreenCaptureKit), mic, blackhole, or synthetic.",
+            description="Audio source: system (macOS capture or Windows recording/loopback input), mic, or synthetic.",
         ),
         "style": ParameterSpec(
             name="style",

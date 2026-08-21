@@ -71,7 +71,7 @@ Skill 会自动判断你是“先体验软件”“已有成品机”还是“�
 
 不用 Codex，也可以完整手动安装。DIY 用户需要依次完成：安装软件 → 给五颗舵机写入 ID 1～5 → 烧录 S3/C6 → 断电组装和检查供电 → 扫描舵机 → 校准 → 配网并启动。
 
-完整命令、安全检查和 Windows/macOS/Linux 说明见 [V2.0 手动安装、烧录与首次启动](docs/getting-started/manual-hardware-setup.md)。固件烧录以独立的 [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) 仓库为准。
+完整命令、安全检查和 Windows/macOS/Linux 说明见 [V2.0 手动安装、烧录与首次启动](docs/getting-started/manual-hardware-setup.md)。Windows x64 从零装机可直接按 [Windows x64 硬件完整流程](docs/getting-started/windows-hardware-flow.md) 执行。固件烧录以独立的 [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) 仓库为准。
 
 ## 只想先看看软件
 
@@ -90,13 +90,17 @@ uv run lampgo run --web --no-hw
 ```bash
 uv run lampgo help                 # 查看 CLI 说明和可复制示例
 uv run lampgo detect               # 发现串口、摄像头和 ESP32
-uv run lampgo scan-motors --ids 1-5
-uv run lampgo calibrate            # 交互式校准 5 个关节
+uv run lampgo setup-motors         # 自动选择或提示选择电机 COM，交互写入 ID
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
+uv run lampgo calibrate --auto-detect # 交互式校准 5 个关节
 uv run lampgo run --web            # 启动真实台灯和 Web 控制台
 uv run lampgo run --web --no-hw    # 无硬件体验
 uv run lampgo status               # 查看正在运行的服务
 uv run lampgo clear                # 结束残留进程并释放电机扭矩
 ```
+
+`setup-motors`、`scan-motors`、`ping` 和 `calibrate` 会优先使用显式的 `--port`，其次使用已保存的电机端口，最后自动检测。需要忽略旧配置并强制重扫时，使用 `--auto-detect`（或同义参数 `--rescan`）。多个 COM 口无法安全区分时，程序会列出候选让你确认，不会盲目写入舵机 ID。
 
 更多参数：`uv run lampgo <command> --help`。
 
@@ -106,6 +110,7 @@ V2.0 已直接替换 V1.0，请不要混用两代结构件、接线图或校准�
 
 | 你需要的资料 | 入口 |
 | --- | --- |
+| Windows x64 从零装机、COM 自动检测和首次验收 | [Windows x64 硬件完整流程](docs/getting-started/windows-hardware-flow.md) |
 | V2 硬件、组装和首次上电 | [V2.0 硬件与组装](docs/hardware/v2/README.md) |
 | 电源、S3/C6、功放、LED 和舵机接线 | [V2.0 接线表](docs/hardware/wiring.md) |
 | 完整 STEP 总成 | [V2.0 结构件](assets/printable/README.md) |

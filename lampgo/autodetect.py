@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import glob
 import platform
+import re
 
 import structlog
 
@@ -21,6 +22,27 @@ ESP32_PROBE_TIMEOUT = 0.5
 def _list_serial_ports() -> list[str]:
     """List candidate serial ports on the current platform."""
     system = platform.system()
+    if system == "Windows":
+        try:
+            from serial.tools import list_ports
+
+            ports = set()
+            for info in list_ports.comports():
+                device = str(getattr(info, "device", "") or "").strip()
+                if not device:
+                    continue
+                if _is_bluetooth_serial_port(info):
+                    logger.info("autodetect.skip_bluetooth_serial_port", port=device)
+                    continue
+                ports.add(device)
+        except ImportError:
+            logger.warning("autodetect.no_pyserial")
+            return []
+        except Exception as exc:
+            logger.warning("autodetect.windows_port_enumeration_failed", error=str(exc))
+            return []
+        return sorted(ports, key=_serial_port_sort_key)
+
     patterns: list[str] = []
     if system == "Linux":
         patterns = ["/dev/ttyUSB*", "/dev/ttyACM*"]
@@ -33,6 +55,24 @@ def _list_serial_ports() -> list[str]:
     for pattern in patterns:
         ports.extend(sorted(glob.glob(pattern)))
     return ports
+
+
+def _is_bluetooth_serial_port(info) -> bool:
+    """Return whether a Windows serial-port record is a Bluetooth virtual port."""
+    metadata = " ".join(
+        str(getattr(info, field, "") or "")
+        for field in ("hwid", "description", "name", "manufacturer", "product")
+    ).casefold()
+    return "bthenum" in metadata or "bluetooth" in metadata or "蓝牙" in metadata
+
+
+def _serial_port_sort_key(port: str) -> tuple[str, int, str]:
+    """Sort COM2 before COM10 while keeping Unix paths deterministic."""
+    match = re.search(r"(\d+)$", port)
+    if match is None:
+        return (port.casefold(), -1, port.casefold())
+    prefix = port[: match.start()].casefold()
+    return (prefix, int(match.group(1)), port.casefold())
 
 
 def _probe_feetech(port: str) -> bool:
@@ -62,6 +102,7 @@ def _probe_feetech(port: str) -> bool:
             packet = b"\xff\xff" + payload + bytes([checksum])
             ser.reset_input_buffer()
             ser.write(packet)
+            ser.flush()
             # Read up to 12 bytes: 6 possible TX echo + 6 response
             raw = ser.read(12)
             # Scan for a valid status-packet header anywhere in the buffer
@@ -110,6 +151,8 @@ def _probe_esp32(port: str) -> bool:
 def _list_camera_names() -> dict[int, str]:
     """Best-effort: get human-readable camera names from the OS."""
     names: dict[int, str] = {}
+    if platform.system() != "Darwin":
+        return names
     try:
         import json as _json
         import subprocess
@@ -141,18 +184,28 @@ def _detect_camera() -> tuple[str | None, list[str]]:
 
     import os
 
+    camera_backends: list[int | None] = [None]
+    if platform.system() == "Windows" and hasattr(cv2, "CAP_DSHOW"):
+        camera_backends.insert(0, cv2.CAP_DSHOW)
+
     for idx in range(4):
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        old_stderr = os.dup(2)
-        os.dup2(devnull, 2)
-        try:
-            cap = cv2.VideoCapture(idx)
-            opened = cap.isOpened()
-            cap.release()
-        finally:
-            os.dup2(old_stderr, 2)
-            os.close(devnull)
-            os.close(old_stderr)
+        opened = False
+        for backend in camera_backends:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            old_stderr = os.dup(2)
+            os.dup2(devnull, 2)
+            cap = None
+            try:
+                cap = cv2.VideoCapture(idx, backend) if backend is not None else cv2.VideoCapture(idx)
+                opened = cap.isOpened()
+            finally:
+                if cap is not None:
+                    cap.release()
+                os.dup2(old_stderr, 2)
+                os.close(devnull)
+                os.close(old_stderr)
+            if opened:
+                break
         if opened:
             name = cam_names.get(idx, "")
             label = f"{idx} ({name})" if name else str(idx)
@@ -194,23 +247,14 @@ def _detect_microphones() -> tuple[str | None, list[str]]:
     return recommended, messages
 
 
-def detect_ports() -> dict:
-    """Auto-detect motor bus, LED controller, USB camera, and microphones.
-
-    Returns:
-        {
-            "motor_port": "/dev/ttyUSB0" or None,
-            "led_port": "/dev/ttyUSB1" or None,
-            "camera_port": "0" or None,
-            "mic_device": "2" or None,
-            "all_ports": [...],
-            "messages": ["..."]
-        }
-    """
+def _detect_serial_ports() -> dict:
+    """Detect serial devices and classify the motor/LED candidates."""
     ports = _list_serial_ports()
     messages: list[str] = []
     motor_port: str | None = None
     led_port: str | None = None
+    motor_candidates: list[str] = []
+    motor_detection = "none"
 
     if not ports:
         messages.append("No serial ports found. Is the hardware connected?")
@@ -224,6 +268,8 @@ def detect_ports() -> dict:
             if _probe_feetech(port):
                 motor_port = port
                 messages.append(f"Motor bus detected: {port}")
+                motor_candidates = [port]
+                motor_detection = "feetech_probe"
 
         if motor_port is None:
             # SCS half-duplex probing often fails without direction-pin support;
@@ -231,13 +277,18 @@ def detect_ports() -> dict:
             # don't accidentally assign the only port to LED instead of motors.
             if len(ports) == 1:
                 motor_port = ports[0]
+                motor_candidates = [motor_port]
+                motor_detection = "single_port_fallback"
                 messages.append(
                     f"Motor bus auto-probe inconclusive (expected for SCS half-duplex). "
                     f"Only one port available — assuming motor bus: {motor_port}"
                 )
             else:
+                motor_candidates = list(ports)
+                motor_detection = "ambiguous"
                 messages.append(
-                    "Motor bus not detected. Check USB connection and power supply."
+                    "Motor bus not detected automatically. Candidate ports require confirmation: "
+                    f"{motor_candidates}"
                 )
 
         remaining = [p for p in ports if p != motor_port]
@@ -252,6 +303,39 @@ def detect_ports() -> dict:
         if led_port is None and remaining:
             messages.append(f"LED controller not detected. Candidate ports: {remaining}")
 
+    return {
+        "motor_port": motor_port,
+        "motor_candidates": motor_candidates,
+        "motor_detection": motor_detection,
+        "led_port": led_port,
+        "all_ports": ports if ports else [],
+        "messages": messages,
+    }
+
+
+def detect_motor_port() -> dict:
+    """Detect only serial ports needed for motor setup and calibration."""
+    return _detect_serial_ports()
+
+
+def detect_ports() -> dict:
+    """Auto-detect motor bus, LED controller, USB camera, and microphones.
+
+    Returns:
+        {
+            "motor_port": "/dev/ttyUSB0" or None,
+            "motor_candidates": [...],
+            "motor_detection": "feetech_probe|single_port_fallback|ambiguous|none",
+            "led_port": "/dev/ttyUSB1" or None,
+            "camera_port": "0" or None,
+            "mic_device": "2" or None,
+            "all_ports": [...],
+            "messages": ["..."]
+        }
+    """
+    detected = _detect_serial_ports()
+    messages = list(detected["messages"])
+
     camera_port, cam_msgs = _detect_camera()
     if cam_msgs:
         messages.extend(cam_msgs)
@@ -261,11 +345,11 @@ def detect_ports() -> dict:
     mic_device, mic_msgs = _detect_microphones()
     messages.extend(mic_msgs)
 
-    return {
-        "motor_port": motor_port,
-        "led_port": led_port,
-        "camera_port": camera_port,
-        "mic_device": mic_device,
-        "all_ports": ports if ports else [],
-        "messages": messages,
-    }
+    detected.update(
+        {
+            "camera_port": camera_port,
+            "mic_device": mic_device,
+            "messages": messages,
+        }
+    )
+    return detected

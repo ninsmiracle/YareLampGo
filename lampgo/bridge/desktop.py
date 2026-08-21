@@ -86,10 +86,17 @@ class PyAutoGUIBackend(InputBackend):
             self._pyautogui.hotkey(*keys)
 
     def app_launch(self, app_name: str) -> bool:
+        import os
+        import platform
         import subprocess
 
         try:
-            subprocess.Popen(["xdg-open", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.name == "nt":
+                os.startfile(app_name)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen(["xdg-open", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except Exception:
             logger.exception("desktop.app_launch_failed", app=app_name)

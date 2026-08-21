@@ -619,6 +619,15 @@ class SounddeviceMusicSource:
             return None
 
 
+class WindowsSystemAudioSource(SounddeviceMusicSource):
+    """Windows audio source using the selected recording device.
+
+    Windows exposes desktop audio to PortAudio when a device such as Stereo
+    Mix or a virtual loopback input is enabled. Falling back to the default
+    microphone keeps the music skill usable on machines without that device.
+    """
+
+
 class SyntheticMusicSource:
     """Deterministic beat source for no-hardware tests and demos."""
 
@@ -751,6 +760,9 @@ class MacSystemAudioSource:
 def make_music_source(source: str) -> MusicAudioSource:
     normalized = str(source or "system").strip().lower()
     if normalized in {"system", "macos", "screencapturekit"}:
+        if platform.system() == "Windows":
+            device = os.environ.get("LAMPGO_MUSIC_INPUT_DEVICE", "").strip() or None
+            return WindowsSystemAudioSource(device=device)
         return MacSystemAudioSource()
     if normalized in {"mic", "microphone", "blackhole"}:
         device = os.environ.get("LAMPGO_MUSIC_INPUT_DEVICE", "").strip() or None

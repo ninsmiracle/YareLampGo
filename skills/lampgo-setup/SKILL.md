@@ -43,6 +43,7 @@ Before changing files, read:
 
 - `README.md`
 - `docs/getting-started/manual-hardware-setup.md` for the complete manual command flow
+- `docs/getting-started/windows-hardware-flow.md` for the Windows x64 hardware sequence and COM detection rules
 - `docs/hardware/v2/README.md` for hardware routes
 - `docs/hardware/wiring.md` before any wiring or first power
 - `docs/getting-started/quick-start.md`
@@ -164,7 +165,7 @@ Show the mapping before any write:
 | Wrist roll | `wrist_roll` | 4 |
 | Wrist pitch | `wrist_pitch` | 5 |
 
-Start one interactive PTY session with `uv run lampgo setup-motors`, adding `--port <port>` when detection is ambiguous. The command itself walks through the five positions. At every position prompt:
+Start one interactive PTY session with `uv run lampgo setup-motors`. The command uses an explicit `--port <port>` first, then the saved `device.motor_port`, then Feetech-aware serial detection. On Windows, `COM` ports are probed automatically; use `--auto-detect` (or `--rescan`) to ignore a stale saved port and force a fresh scan. If multiple ports remain ambiguous, let the user choose from the numbered candidates or ask for an explicit `--port`; never guess. The command itself walks through the five positions. At every position prompt:
 
 1. Ask the user to remove 12V.
 2. Ask them to connect exactly one servo to the bus adapter.
@@ -178,7 +179,7 @@ Do not relaunch the full five-servo wizard once per motor. If the session aborts
 After all five writes, connect the completed chain and run:
 
 ```bash
-uv run lampgo scan-motors --ids 1-5
+uv run lampgo scan-motors --auto-detect --ids 1-5
 ```
 
 Require one unique response for every ID. Duplicate, missing, or unstable IDs block assembly/calibration until resolved.
@@ -232,8 +233,8 @@ Run read-only detection first:
 
 ```bash
 uv run lampgo detect
-uv run lampgo scan-motors --ids 1-5
-uv run lampgo ping
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
 ```
 
 Before calibration:
@@ -243,7 +244,7 @@ Before calibration:
 3. If `assets/calibration/<lamp_id>.json` exists, copy it to a timestamped directory under `~/.lampgo/backups/calibration/` and report the backup path.
 4. Never stage, commit, discard, or silently replace a user's calibration file.
 5. Ask the user to support the mechanism, clear its motion envelope, keep joints away from hard stops, and prepare the 12V disconnect/estop.
-6. Obtain explicit confirmation, then run `uv run lampgo calibrate`, adding `--port` if needed.
+6. Obtain explicit confirmation, then run `uv run lampgo calibrate --auto-detect`, adding `--port` if needed.
 
 After calibration, read back the selected lamp ID and resulting calibration path. Validate with a small movement only after the user confirms the area is clear. Prefer `return_safe` or a small single-joint test; do not begin with a dance or full-range action.
 

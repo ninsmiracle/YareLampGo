@@ -71,7 +71,7 @@ See [Codex Integration](docs/guides/codex-integration.md) for details.
 
 Manual installation and flashing are still fully documented. The DIY sequence is: install software → assign servo IDs 1–5 → flash the S3/C6 → assemble and verify power while unpowered → scan motors → calibrate → provision and start.
 
-See [Manual V2.0 Setup, Flashing, and First Start](docs/getting-started/manual-hardware-setup.en.md) for commands, safety checks, and Windows/macOS/Linux notes. Use the separate [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) repository as the source of truth for firmware flashing.
+See [Manual V2.0 Setup, Flashing, and First Start](docs/getting-started/manual-hardware-setup.en.md) for commands, safety checks, and Windows/macOS/Linux notes. Windows x64 users can follow the [Windows x64 Hardware Flow](docs/getting-started/windows-hardware-flow.md) from installation through the first motion. Use the separate [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) repository as the source of truth for firmware flashing.
 
 ## Try The Software First
 
@@ -90,13 +90,17 @@ Open <http://127.0.0.1:8420>. See [Quick Start](docs/getting-started/quick-start
 ```bash
 uv run lampgo help                 # CLI explanations and copyable examples
 uv run lampgo detect               # Find serial ports, cameras, and ESP32 devices
-uv run lampgo scan-motors --ids 1-5
-uv run lampgo calibrate            # Interactive five-joint calibration
+uv run lampgo setup-motors         # Auto-select or ask for the motor COM port
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
+uv run lampgo calibrate --auto-detect # Interactive five-joint calibration
 uv run lampgo run --web            # Start the physical lamp and Web console
 uv run lampgo run --web --no-hw    # Software-only Web console
 uv run lampgo status               # Inspect the running daemon
 uv run lampgo clear                # Stop leftovers and release motor torque
 ```
+
+`setup-motors`, `scan-motors`, `ping`, and `calibrate` prefer an explicit `--port`, then the saved motor port, then automatic detection. Use `--auto-detect` (or `--rescan`) to ignore a stale saved port and rescan. When several COM ports remain ambiguous, LampGo asks you to choose instead of guessing before an ID write.
 
 For command-specific options, run `uv run lampgo <command> --help`.
 
@@ -106,6 +110,7 @@ V2.0 replaces V1.0. Do not mix structures, wiring, or calibration files across g
 
 | What you need | Entry point |
 | --- | --- |
+| Windows x64 installation, COM auto-detection, servo IDs, calibration, and acceptance | [Complete Windows hardware flow](docs/getting-started/windows-hardware-flow.md) |
 | V2 hardware, assembly, and first power | [V2.0 Hardware and Assembly](docs/hardware/v2/README.en.md) |
 | Power, S3/C6, audio, LED, and servo wiring | [V2.0 Wiring](docs/hardware/wiring.md) |
 | Complete STEP assembly | [V2.0 Structure](assets/printable/README.en.md) |

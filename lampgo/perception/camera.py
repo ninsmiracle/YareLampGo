@@ -191,6 +191,8 @@ class CameraCapture:
         backends: list[int | None] = [None]
         if isinstance(device, int) and sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
             backends.insert(0, cv2.CAP_AVFOUNDATION)
+        elif isinstance(device, (int, str)) and sys.platform.startswith("win") and hasattr(cv2, "CAP_DSHOW"):
+            backends.insert(0, cv2.CAP_DSHOW)
         elif isinstance(device, (int, str)) and sys.platform.startswith("linux") and hasattr(cv2, "CAP_V4L2"):
             backends.insert(0, cv2.CAP_V4L2)
         return backends

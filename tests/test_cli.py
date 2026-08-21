@@ -33,7 +33,7 @@ def test_build_help_text_contains_common_commands():
     assert "uv run lampgo <command> --help" in text
 
 
-def test_find_related_pids_filters_self_and_parent(monkeypatch):
+def test_find_related_pids_posix_filters_self_and_parent(monkeypatch):
     monkeypatch.setattr(cli.os, "getpid", lambda: 100)
     monkeypatch.setattr(cli.os, "getppid", lambda: 99)
     fake_ps = SimpleNamespace(
@@ -47,8 +47,152 @@ def test_find_related_pids_filters_self_and_parent(monkeypatch):
     )
     monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: fake_ps)
 
-    pids = cli._find_related_pids()
+    pids = cli._find_related_pids_posix()
     assert pids == [200]
+
+
+def test_find_related_pids_windows_does_not_fall_back_to_posix(monkeypatch):
+    monkeypatch.setattr(cli.os, "name", "nt")
+    monkeypatch.setattr(cli, "_find_related_pids_windows", lambda: [])
+    monkeypatch.setattr(
+        cli,
+        "_find_related_pids_posix",
+        lambda: (_ for _ in ()).throw(AssertionError("POSIX fallback must not run on Windows")),
+    )
+
+    assert cli._find_related_pids() == []
+
+
+def test_find_related_pids_windows_warns_when_psutil_is_missing(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "psutil", None)
+
+    assert cli._find_related_pids_windows() == []
+    assert "requires psutil" in capsys.readouterr().err
+
+
+def test_terminate_pids_windows_waits_after_force_kill(monkeypatch):
+    events: list[str] = []
+
+    class NoSuchProcess(Exception):
+        pass
+
+    class AccessDenied(Exception):
+        pass
+
+    class Process:
+        pid = 200
+
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+
+    process = Process()
+    waits = iter([
+        ([], [process]),
+        ([process], []),
+    ])
+    fake_psutil = SimpleNamespace(
+        NoSuchProcess=NoSuchProcess,
+        AccessDenied=AccessDenied,
+        Process=lambda _pid: process,
+        wait_procs=lambda processes, timeout: next(waits),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert cli._terminate_pids_windows([process.pid]) == ([process.pid], [])
+    assert events == ["terminate", "kill"]
+
+
+def test_cmd_clear_skips_torque_release_when_processes_remain(monkeypatch, capsys):
+    args = argparse.Namespace(config=None, skip_kill=False, skip_release=False)
+
+    import lampgo.core.config as config_mod
+    import lampgo.ipc as ipc
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            socket_path="tcp://127.0.0.1:28420",
+            device=SimpleNamespace(motor_port="COM5", lamp_id="AL02"),
+        ),
+    )
+    monkeypatch.setattr(cli, "_find_related_pids", lambda: [200])
+    monkeypatch.setattr(cli, "_terminate_pids", lambda _pids: ([], [200]))
+    monkeypatch.setattr(
+        cli,
+        "_release_motor_torque",
+        lambda _config: (_ for _ in ()).throw(AssertionError("motor port must stay closed")),
+    )
+    monkeypatch.setattr(ipc, "cleanup_ipc_endpoint", lambda _path: False)
+
+    cli._cmd_clear(args)
+
+    output = capsys.readouterr().out
+    assert "Failed to terminate PIDs: [200]" in output
+    assert "Skipped torque release" in output
+
+
+def test_cmd_clear_skip_kill_does_not_release_torque(monkeypatch, capsys):
+    args = argparse.Namespace(config=None, skip_kill=True, skip_release=False)
+
+    import lampgo.core.config as config_mod
+    import lampgo.ipc as ipc
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            socket_path="tcp://127.0.0.1:28420",
+            device=SimpleNamespace(motor_port="COM5", lamp_id="AL02"),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_release_motor_torque",
+        lambda _config: (_ for _ in ()).throw(AssertionError("motor port must stay closed")),
+    )
+    monkeypatch.setattr(ipc, "cleanup_ipc_endpoint", lambda _path: False)
+
+    cli._cmd_clear(args)
+
+    output = capsys.readouterr().out
+    assert "Skip process cleanup" in output
+    assert "torque release is also skipped" in output
+    assert "Skipped torque release" in output
+
+
+def test_cmd_clear_missing_psutil_does_not_release_torque(monkeypatch, capsys):
+    args = argparse.Namespace(config=None, skip_kill=False, skip_release=False)
+
+    import lampgo.core.config as config_mod
+    import lampgo.ipc as ipc
+
+    monkeypatch.setattr(cli.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda config_path=None: SimpleNamespace(
+            socket_path="tcp://127.0.0.1:28420",
+            device=SimpleNamespace(motor_port="COM5", lamp_id="AL02"),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_release_motor_torque",
+        lambda _config: (_ for _ in ()).throw(AssertionError("motor port must stay closed")),
+    )
+    monkeypatch.setattr(ipc, "cleanup_ipc_endpoint", lambda _path: False)
+
+    cli._cmd_clear(args)
+
+    captured = capsys.readouterr()
+    assert "requires psutil" in captured.err
+    assert "Skipped process cleanup" in captured.out
+    assert "Skipped torque release" in captured.out
 
 
 def test_resolve_calibration_port_prefers_cli_or_config(monkeypatch):
@@ -56,13 +200,13 @@ def test_resolve_calibration_port_prefers_cli_or_config(monkeypatch):
     config = SimpleNamespace(device=SimpleNamespace(motor_port="/dev/tty.usbmodemA"))
     called = {"detect": False}
 
-    def _detect_ports():
+    def _detect_motor_port():
         called["detect"] = True
         return {"motor_port": "/dev/tty.usbmodemB", "messages": []}
 
     import lampgo.autodetect as autodetect
 
-    monkeypatch.setattr(autodetect, "detect_ports", _detect_ports)
+    monkeypatch.setattr(autodetect, "detect_motor_port", _detect_motor_port)
     port = cli._resolve_calibration_port(args, config)
     assert port == "/dev/tty.usbmodemA"
     assert called["detect"] is False
@@ -72,14 +216,64 @@ def test_resolve_calibration_port_falls_back_to_autodetect(monkeypatch):
     args = argparse.Namespace(port=None)
     config = SimpleNamespace(device=SimpleNamespace(motor_port=""))
 
-    def _detect_ports():
+    def _detect_motor_port():
         return {"motor_port": "/dev/tty.usbmodemB", "messages": ["Found 1 serial port(s)"]}
 
     import lampgo.autodetect as autodetect
 
-    monkeypatch.setattr(autodetect, "detect_ports", _detect_ports)
+    monkeypatch.setattr(autodetect, "detect_motor_port", _detect_motor_port)
     port = cli._resolve_calibration_port(args, config)
     assert port == "/dev/tty.usbmodemB"
+
+
+def test_resolve_motor_port_auto_detect_ignores_saved_port(monkeypatch):
+    args = argparse.Namespace(port=None, auto_detect=True)
+    config = SimpleNamespace(device=SimpleNamespace(motor_port="COM7"))
+
+    import lampgo.autodetect as autodetect
+
+    monkeypatch.setattr(
+        autodetect,
+        "detect_motor_port",
+        lambda: {
+            "motor_port": "COM5",
+            "motor_detection": "feetech_probe",
+            "motor_candidates": ["COM5"],
+            "messages": ["Motor bus detected: COM5"],
+        },
+    )
+
+    assert cli._resolve_motor_port(args, config) == "COM5"
+
+
+def test_resolve_motor_port_keeps_multiple_ports_ambiguous_when_noninteractive(
+    monkeypatch,
+    capsys,
+):
+    args = argparse.Namespace(port=None, auto_detect=True)
+    config = SimpleNamespace(device=SimpleNamespace(motor_port="COM7"))
+
+    import lampgo.autodetect as autodetect
+
+    monkeypatch.setattr(
+        autodetect,
+        "detect_motor_port",
+        lambda: {
+            "motor_port": None,
+            "motor_detection": "ambiguous",
+            "motor_candidates": ["COM2", "COM5"],
+            "messages": ["Candidate ports require confirmation"],
+        },
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    assert cli._resolve_motor_port(args, config, interactive=False) is None
+    error = capsys.readouterr().err
+    assert "COM2, COM5" in error
+    assert "Use --port <COMx>" in error
 
 
 def test_calibration_aborts_outside_project_root(monkeypatch, tmp_path, capsys):
@@ -229,7 +423,9 @@ def test_virtual_motion_stream_frames_updates_joint_state():
         motion.stop()
 
 
-def test_no_hw_server_uses_virtual_motion_for_skills(tmp_path):
+def test_no_hw_server_uses_virtual_motion_for_skills(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAMPGO_IPC_TOKEN_FILE", str(tmp_path / "ipc-token"))
+
     async def run() -> None:
         from lampgo.core.config import LampgoConfig
         from lampgo.server import LampgoServer

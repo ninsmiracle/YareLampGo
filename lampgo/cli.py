@@ -14,7 +14,7 @@ Usage:
     lampgo record my_action
 
 Commands that talk to the daemon (invoke, text, status, skills, estop)
-use Unix socket IPC for <100ms latency.
+use local IPC for <100ms latency (Unix socket on POSIX, loopback TCP on Windows).
 
 Commands that need standalone hardware access (move, play, calibrate, record)
 try IPC first, then fall back to creating their own server instance.
@@ -44,7 +44,22 @@ structlog.configure(
 logger = structlog.get_logger(__name__)
 
 
+def _configure_windows_console_encoding() -> None:
+    """Keep Windows CLI output printable when the active console is not UTF-8."""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
 def main() -> None:
+    _configure_windows_console_encoding()
     parser = argparse.ArgumentParser(
         prog="lampgo",
         description="lampgo — intelligent lamp robot runtime",
@@ -102,6 +117,13 @@ def main() -> None:
     cal_p = sub.add_parser("calibrate", help="Run interactive motor calibration")
     cal_p.add_argument("--id", default=None, help="Lamp ID (default: from config)")
     cal_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
+    cal_p.add_argument(
+        "--auto-detect",
+        "--rescan",
+        dest="auto_detect",
+        action="store_true",
+        help="Ignore the saved motor port and rescan serial ports",
+    )
 
     # --- record ---
     rec_p = sub.add_parser("record", help="Record a teach action (torque off, move arm manually)")
@@ -112,16 +134,34 @@ def main() -> None:
 
     # --- clear ---
     clear_p = sub.add_parser("clear", help="Stop related processes and release motor torque")
-    clear_p.add_argument("--skip-kill", action="store_true", help="Do not terminate related processes")
+    clear_p.add_argument(
+        "--skip-kill",
+        action="store_true",
+        help="Do not terminate related processes; also skip torque release",
+    )
     clear_p.add_argument("--skip-release", action="store_true", help="Do not connect/disconnect motor bus")
 
     # --- ping ---
     ping_p = sub.add_parser("ping", help="Ping all motor IDs and report status")
     ping_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
+    ping_p.add_argument(
+        "--auto-detect",
+        "--rescan",
+        dest="auto_detect",
+        action="store_true",
+        help="Ignore the saved motor port and rescan serial ports",
+    )
 
     # --- setup-motors ---
     setup_p = sub.add_parser("setup-motors", help="Interactively assign Feetech motor IDs")
     setup_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
+    setup_p.add_argument(
+        "--auto-detect",
+        "--rescan",
+        dest="auto_detect",
+        action="store_true",
+        help="Ignore the saved motor port and rescan serial ports",
+    )
 
     # --- scan-motors ---
     scan_p = sub.add_parser(
@@ -129,7 +169,14 @@ def main() -> None:
         help="Raw bus scan: probe ID 1-253 with bare pyserial, bypassing lerobot model checks. "
              "Use for hardware diagnosis when calibrate/ping find nothing.",
     )
-    scan_p.add_argument("--port", default=None, help="Serial port (default: auto-detect)")
+    scan_p.add_argument("--port", default=None, help="Serial port (default: config, then auto-detect)")
+    scan_p.add_argument(
+        "--auto-detect",
+        "--rescan",
+        dest="auto_detect",
+        action="store_true",
+        help="Ignore the saved motor port and rescan serial ports",
+    )
     scan_p.add_argument(
         "--baud", type=int, default=1_000_000, help="Baud rate (default: 1000000)"
     )
@@ -284,10 +331,12 @@ def _build_help_text() -> str:
         "2) 发现设备与诊断舵机总线\n"
         "  uv run lampgo detect               # 只读发现串口/摄像头/网络设备\n"
         "  uv run lampgo scan-motors --ids 1-5\n"
-        "                                      # 原始扫描 V2 的 5 个舵机 ID\n"
-        "  uv run lampgo scan-motors --port /dev/tty.usbmodemXXXX --ids 1-20\n"
-        "                                      # 指定串口并扩大扫描范围\n"
-        "  uv run lampgo ping                 # 读取已配置总线上的舵机状态\n\n"
+        "                                      # 默认自动选择电机 COM 并扫描 V2 的 5 个舵机 ID\n"
+        "  uv run lampgo scan-motors --auto-detect --ids 1-5\n"
+        "                                      # 忽略旧配置并强制重扫 COM\n"
+        "  uv run lampgo scan-motors --port COM5 --ids 1-20\n"
+        "                                      # 多串口时显式指定电机适配器\n"
+        "  uv run lampgo ping --auto-detect   # 自动重扫并读取舵机状态\n\n"
         "3) 启动、查看状态与退出\n"
         "  uv run lampgo run --web            # 真实硬件；浏览器打开 http://127.0.0.1:8420\n"
         "  uv run lampgo run --web --no-hw    # 无硬件体验 Web/Agent/配置\n"
@@ -305,10 +354,13 @@ def _build_help_text() -> str:
         "                                      # 校准后再做小角度、低速度测试\n"
         "  uv run lampgo invoke return_safe    # 回到安全位\n\n"
         "5) 舵机编号与校准（会改变硬件状态）\n"
-        "  uv run lampgo setup-motors --port /dev/tty.usbmodemXXXX\n"
-        "                                      # 一次只接一颗舵机，写入 ID 1-5\n"
-        "  uv run lampgo calibrate --port /dev/tty.usbmodemXXXX --id AL02\n"
-        "                                      # 从仓库根目录运行并保存校准文件\n\n"
+        "  uv run lampgo setup-motors         # 默认自动检测 COM 口\n"
+        "  uv run lampgo setup-motors --auto-detect\n"
+        "                                      # 忽略旧配置并重新扫描 COM 口\n"
+        "  uv run lampgo setup-motors --port COM5\n"
+        "                                      # 多串口且无法唯一识别时手动确认\n"
+        "  uv run lampgo calibrate --auto-detect --id AL02\n"
+        "                                      # 自动选择电机口并从仓库根目录校准\n\n"
         "6) 录制与回放动作\n"
         "  uv run lampgo record my_action --fps 30\n"
         "                                      # 释放扭矩后手动示教，Ctrl+C 结束\n"
@@ -326,14 +378,25 @@ def _build_help_text() -> str:
 
 def _find_related_pids() -> list[int]:
     """Find LampGo process ids, excluding the current command and its parent."""
+    if os.name == "nt":
+        return _find_related_pids_windows()
+    return _find_related_pids_posix()
+
+
+def _find_related_pids_posix() -> list[int]:
+    """Find LampGo processes from the POSIX process table."""
+
     current_pid = os.getpid()
     parent_pid = os.getppid()
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,command="],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
     markers = (
         "lampgo run",
         "lampgo invoke",
@@ -360,33 +423,148 @@ def _find_related_pids() -> list[int]:
     return sorted(set(pids))
 
 
+def _find_related_pids_windows() -> list[int]:
+    """Find LampGo processes through psutil on Windows."""
+    psutil = _load_windows_psutil()
+    if psutil is None:
+        return []
+
+    current_pid = os.getpid()
+    parent_pid = os.getppid()
+    markers = (
+        "lampgo run",
+        "lampgo invoke",
+        "lampgo move",
+        "lampgo play",
+        "lampgo.exe run",
+        "lampgo.exe invoke",
+        "lampgo.exe move",
+        "lampgo.exe play",
+    )
+    pids: list[int] = []
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            pid = int(process.info.get("pid", process.pid))
+            command = process.info.get("cmdline") or []
+            if isinstance(command, str):
+                text = command.casefold()
+            else:
+                text = " ".join(str(item) for item in command).casefold()
+        except (AttributeError, KeyError, TypeError, ValueError, psutil.Error):
+            continue
+        if pid in (current_pid, parent_pid):
+            continue
+        if any(marker in text for marker in markers):
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def _load_windows_psutil():
+    """Return psutil for Windows cleanup, or warn once per attempted operation."""
+    try:
+        import psutil
+    except ImportError:
+        print(
+            "[warn] Windows process cleanup requires psutil. "
+            "Re-run .\\install.ps1 or install the project dependencies.",
+            file=sys.stderr,
+        )
+        return None
+    return psutil
+
+
 def _terminate_pids(pids: list[int]) -> tuple[list[int], list[int]]:
-    """Try graceful terminate first, then force kill remaining."""
-    terminated: list[int] = []
-    failed: list[int] = []
-    for pid in pids:
+    """Stop related processes and return confirmed-stopped and failed PIDs."""
+    if os.name == "nt":
+        return _terminate_pids_windows(pids)
+
+    targets = sorted(set(pids))
+    failed: set[int] = set()
+    for pid in targets:
         try:
             os.kill(pid, signal.SIGTERM)
-            terminated.append(pid)
         except ProcessLookupError:
             pass
         except Exception:
-            failed.append(pid)
-    time.sleep(0.2)
-    for pid in list(terminated):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            continue
-        except Exception:
-            continue
+            failed.add(pid)
+
+    remaining = _wait_for_posix_pids(
+        [pid for pid in targets if pid not in failed],
+        timeout_s=1.0,
+    )
+    for pid in remaining:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            continue
+            pass
         except Exception:
-            failed.append(pid)
-    return terminated, sorted(set(failed))
+            failed.add(pid)
+
+    failed.update(
+        _wait_for_posix_pids(
+            [pid for pid in remaining if pid not in failed],
+            timeout_s=1.0,
+        )
+    )
+    stopped = [pid for pid in targets if pid not in failed]
+    return stopped, sorted(failed)
+
+
+def _wait_for_posix_pids(pids: list[int], timeout_s: float) -> list[int]:
+    """Wait for POSIX PIDs to disappear and return any still present."""
+    remaining = set(pids)
+    deadline = time.monotonic() + timeout_s
+    while remaining:
+        alive: set[int] = set()
+        for pid in remaining:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                alive.add(pid)
+            else:
+                alive.add(pid)
+        remaining = alive
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return sorted(remaining)
+
+
+def _terminate_pids_windows(pids: list[int]) -> tuple[list[int], list[int]]:
+    """Stop Windows processes, waiting after graceful and forced termination."""
+    psutil = _load_windows_psutil()
+    if psutil is None:
+        return [], sorted(set(pids))
+
+    targets = sorted(set(pids))
+    failed: set[int] = set()
+    processes = []
+    for pid in targets:
+        try:
+            process = psutil.Process(pid)
+            process.terminate()
+            processes.append(process)
+        except psutil.NoSuchProcess:
+            pass
+        except (psutil.AccessDenied, OSError):
+            failed.add(pid)
+
+    if processes:
+        _, alive = psutil.wait_procs(processes, timeout=1.0)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except (psutil.AccessDenied, OSError):
+                failed.add(process.pid)
+        _, still_alive = psutil.wait_procs(alive, timeout=1.0)
+        failed.update(process.pid for process in still_alive)
+
+    stopped = [pid for pid in targets if pid not in failed]
+    return stopped, sorted(failed)
 
 
 def _release_motor_torque(config) -> str:
@@ -412,14 +590,13 @@ def _cmd_ping(args: argparse.Namespace) -> None:
     from lampgo.core.config import load_config
 
     config = load_config(config_path=getattr(args, "config", None))
-    port = args.port or config.device.motor_port
+    port = _resolve_motor_port(args, config)
     if not port:
-        from lampgo.autodetect import detect_ports
-
-        detected = detect_ports()
-        port = detected.get("motor_port")
-    if not port:
-        print("Error: no motor port found. Use --port or configure it.", file=sys.stderr)
+        print(
+            "Error: no unique motor port found. Run `lampgo detect`, "
+            "use --auto-detect, or specify --port COM5.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
@@ -459,10 +636,11 @@ def _cmd_setup_motors(args: argparse.Namespace) -> None:
     from lampgo.core.config import load_config
 
     config = load_config(config_path=getattr(args, "config", None))
-    port = _resolve_calibration_port(args, config)
+    port = _resolve_calibration_port(args, config, interactive=True)
     if not port:
         print(
-            "Error: serial port required. Use --port, set LAMPGO_MOTOR_PORT, or connect hardware for auto-detect.",
+            "Error: no unique motor port found. Use --port COM5, "
+            "--auto-detect, or connect only the motor adapter.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -480,14 +658,19 @@ def _cmd_setup_motors(args: argparse.Namespace) -> None:
     }
     print(
         "This will assign Feetech motor IDs one at a time.\n"
-        "Connect exactly one motor when prompted; motors with duplicate IDs must not share the bus.\n"
-        f"Port: {port}\n"
+        "Automatic COM detection is enabled by default; use --auto-detect to ignore a saved port.\n"
+        "Connect exactly one motor at each prompt; remove 12V before changing motors.\n"
+        "Motors with duplicate IDs must not share the bus.\n"
+        f"Motor port: {port}\n"
     )
 
     ordered_names = list(motors)
     for index, name in enumerate(ordered_names, start=1):
         motor = motors[name]
-        input(f"[{index}/{len(ordered_names)}] Connect only '{name}' (target ID {motor.id}) and press ENTER.")
+        input(
+            f"[{index}/{len(ordered_names)}] Remove 12V, connect only '{name}' "
+            f"(target ID {motor.id}), restore power, then press ENTER."
+        )
 
         bus = FeetechMotorsBus(port=port, motors={name: motor})
         try:
@@ -506,8 +689,13 @@ def _cmd_setup_motors(args: argparse.Namespace) -> None:
                 bus.port_handler.closePort()
             except Exception:
                 pass
+        print("  Remove 12V before changing to the next motor.")
 
-    print("All configured motor IDs have been assigned. Run `uv run lampgo ping` to verify the full chain.")
+    print(
+        "All configured motor IDs have been assigned. "
+        "Run `lampgo scan-motors --auto-detect --ids 1-5` and `lampgo ping --auto-detect` "
+        "to verify the full chain."
+    )
 
 
 def _cmd_scan_motors(args: argparse.Namespace) -> None:
@@ -523,16 +711,16 @@ def _cmd_scan_motors(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # --- resolve port ---
-    port = getattr(args, "port", None)
+    from lampgo.core.config import load_config
+
+    cfg = load_config(config_path=getattr(args, "config", None))
+    port = _resolve_motor_port(args, cfg)
     if not port:
-        from lampgo.core.config import load_config
-        cfg = load_config(config_path=getattr(args, "config", None))
-        port = cfg.device.motor_port
-    if not port:
-        from lampgo.autodetect import detect_ports
-        port = detect_ports().get("motor_port")
-    if not port:
-        print("Error: no motor port found. Use --port or connect hardware.", file=sys.stderr)
+        print(
+            "Error: no unique motor port found. Run `lampgo detect`, "
+            "use --auto-detect, or specify --port COM5.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # --- parse ID range ---
@@ -822,31 +1010,43 @@ def _cmd_clear(args: argparse.Namespace) -> None:
 
     config = load_config(config_path=getattr(args, "config", None))
     lines: list[str] = []
+    process_cleanup_confirmed = False
 
     if getattr(args, "skip_kill", False):
-        lines.append("Skip process cleanup (--skip-kill).")
+        lines.append("Skip process cleanup (--skip-kill); torque release is also skipped.")
+    elif os.name == "nt" and _load_windows_psutil() is None:
+        lines.append("Skipped process cleanup: psutil is unavailable on Windows.")
     else:
         pids = _find_related_pids()
         if not pids:
             lines.append("No related processes found.")
+            process_cleanup_confirmed = True
         else:
-            terminated, failed = _terminate_pids(pids)
-            lines.append(f"Sent terminate to PIDs: {terminated}")
+            stopped, failed = _terminate_pids(pids)
+            lines.append(f"Stopped related PIDs: {stopped}")
             if failed:
                 lines.append(f"Failed to terminate PIDs: {failed}")
+            else:
+                process_cleanup_confirmed = True
 
     if getattr(args, "skip_release", False):
         lines.append("Skip torque release (--skip-release).")
+    elif not process_cleanup_confirmed:
+        lines.append("Skipped torque release: related processes may still own the motor port.")
     else:
         lines.append(_release_motor_torque(config))
 
-    socket_path = Path(config.socket_path)
-    if socket_path.exists():
-        try:
-            socket_path.unlink()
-            lines.append(f"Removed stale socket: {socket_path}")
-        except Exception as e:
-            lines.append(f"Failed to remove socket {socket_path}: {e}")
+    from lampgo.ipc import cleanup_ipc_endpoint
+
+    try:
+        removed = cleanup_ipc_endpoint(config.socket_path)
+    except Exception as exc:
+        lines.append(f"Failed to clean IPC endpoint {config.socket_path}: {exc}")
+    else:
+        if removed:
+            lines.append(f"Removed stale socket: {config.socket_path}")
+        elif os.name == "nt" or str(config.socket_path).startswith("tcp://"):
+            lines.append("IPC uses a loopback TCP endpoint; no socket file to remove.")
 
     print("\n".join(lines))
 
@@ -858,21 +1058,89 @@ def _cmd_detect(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def _resolve_calibration_port(args: argparse.Namespace, config) -> str | None:
-    """Resolve calibration port from CLI/config, then fall back to auto-detect."""
-    port = args.port or config.device.motor_port
-    if port:
-        return port
+def _choose_motor_port(candidates: list[str]) -> str | None:
+    """Ask for a safe choice when several serial ports remain ambiguous."""
+    if not candidates or not sys.stdin.isatty():
+        return None
 
-    from lampgo.autodetect import detect_ports
+    print("Automatic detection found multiple possible motor ports:", file=sys.stderr)
+    for index, candidate in enumerate(candidates, start=1):
+        print(f"  {index}. {candidate}", file=sys.stderr)
+    print("Choose the port connected to the Feetech motor adapter.", file=sys.stderr)
 
-    detected = detect_ports()
+    while True:
+        try:
+            choice = input("Motor port number (ENTER to cancel): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return None
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(candidates):
+            return candidates[int(choice) - 1]
+        print(f"Enter a number from 1 to {len(candidates)}, or press ENTER to cancel.", file=sys.stderr)
+
+
+def _resolve_motor_port(args: argparse.Namespace, config, *, interactive: bool = False) -> str | None:
+    """Resolve a motor port using explicit, saved, or safely detected settings."""
+    explicit_port = str(getattr(args, "port", "") or "").strip()
+    if explicit_port:
+        print(f"Using explicitly selected motor port: {explicit_port}", file=sys.stderr)
+        return explicit_port
+
+    configured_port = str(getattr(config.device, "motor_port", "") or "").strip()
+    force_detect = bool(getattr(args, "auto_detect", False))
+    if configured_port and not force_detect:
+        print(
+            f"Using configured motor port: {configured_port} "
+            "(use --auto-detect to rescan serial ports).",
+            file=sys.stderr,
+        )
+        return configured_port
+
+    from lampgo.autodetect import detect_motor_port
+
+    if force_detect:
+        print("Rescanning serial ports for the Feetech motor bus…", file=sys.stderr)
+    detected = detect_motor_port()
     for msg in detected.get("messages", []):
         print(f"[detect] {msg}", file=sys.stderr)
-    port = detected.get("motor_port")
+
+    port = str(detected.get("motor_port") or "").strip()
     if port:
-        print(f"Auto-detected motor port: {port}", file=sys.stderr)
-    return port
+        method = str(detected.get("motor_detection") or "")
+        if method == "feetech_probe":
+            detail = "Feetech response"
+        elif method == "single_port_fallback":
+            detail = "the only available serial port"
+        else:
+            detail = "automatic detection"
+        print(f"Auto-selected motor port: {port} ({detail}).", file=sys.stderr)
+        return port
+
+    candidates = [str(item) for item in detected.get("motor_candidates", []) if str(item).strip()]
+    if interactive and candidates:
+        selected = _choose_motor_port(candidates)
+        if selected:
+            print(f"Selected motor port: {selected}", file=sys.stderr)
+            return selected
+    if candidates:
+        print(
+            "Automatic detection could not distinguish the motor bus. "
+            f"Candidates: {', '.join(candidates)}. Use --port <COMx> after confirming the adapter.",
+            file=sys.stderr,
+        )
+    return None
+
+
+def _resolve_calibration_port(
+    args: argparse.Namespace,
+    config,
+    *,
+    interactive: bool = False,
+) -> str | None:
+    """Backward-compatible wrapper for calibration/setup motor-port resolution."""
+    return _resolve_motor_port(args, config, interactive=interactive)
 
 
 def _require_calibration_project_root() -> Path:
@@ -914,7 +1182,7 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
 
     project_root = _require_calibration_project_root()
     config = load_config(config_path=getattr(args, "config", None))
-    port = _resolve_calibration_port(args, config)
+    port = _resolve_calibration_port(args, config, interactive=True)
     lamp_id = args.id or config.device.lamp_id
     _require_calibration_path_in_project(project_root, config.device.calibration_dir, lamp_id)
 

@@ -67,7 +67,7 @@ Assign IDs before mechanical assembly:
 | Wrist roll | `wrist_roll` | 4 |
 | Wrist pitch | `wrist_pitch` | 5 |
 
-Discover the serial port, then start one complete assignment session:
+Discover the serial port, then start one complete assignment session. On Windows, `setup-motors` probes COM ports automatically; use `--auto-detect` (or `--rescan`) to ignore a stale saved port and force a fresh scan. If several ports remain ambiguous, choose the numbered candidate or specify `--port` explicitly.
 
 ```bash
 uv run lampgo detect
@@ -91,7 +91,8 @@ At every prompt, remove 12V, connect only the servo for the named position, then
 Connect the full chain and require one stable response from each ID:
 
 ```bash
-uv run lampgo scan-motors --ids 1-5
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
 ```
 
 Resolve missing, duplicate, or intermittent IDs before calibration.
@@ -163,8 +164,8 @@ The schematic PNG files are wiring and review references, not board-house-ready 
 ```bash
 cd YareLampGo
 uv run lampgo detect
-uv run lampgo scan-motors --ids 1-5
-uv run lampgo ping
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
 ```
 
 Do not calibrate until all five motors are stable and the direction, harness, and power checks have passed.
@@ -174,7 +175,7 @@ Do not calibrate until all five motors are stable and the direction, harness, an
 Run calibration from the YareLampGo repository root. Inspect `assets/calibration/` first. If the same `lamp_id` already has a file, copy it to a backup outside the repository instead of overwriting or deleting it.
 
 ```bash
-uv run lampgo calibrate
+uv run lampgo calibrate --auto-detect
 ```
 
 Specify a device when needed:

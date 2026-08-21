@@ -74,4 +74,9 @@ jobs:
         env:
           LAMPGO_FORCE_UV_BOOTSTRAP: "1"
           LAMPGO_UV_INSTALL_DIR: ${{ runner.temp }}/lampgo-uv
-        run: .\install.ps1 --skip-system-deps
+        run: .\install.ps1 --skip-system-deps --dev
+
+      - name: Run Windows compatibility tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: uv run pytest -q tests/test_windows_compat.py

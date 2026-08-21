@@ -73,7 +73,7 @@ def ensure_macos_audio_tap(*, auto_install_tools: bool = False, build: bool = Tr
         return AudioTapPrepareResult(
             ok=False,
             status="unsupported_os",
-            message="系统音频律动目前只支持 macOS；其他系统请改用麦克风或 synthetic 音源。",
+            message="macOS 系统音频组件无需在本平台构建；Windows 可使用录音设备或 Stereo Mix，其他系统请改用麦克风或 synthetic 音源。",
         )
 
     existing = find_audio_tap_binary()

@@ -1,6 +1,7 @@
 # YareLampGo V2.0 手动安装、烧录与首次启动
 
 本文给不使用 Codex skill 的用户提供完整手动路径：安装软件、给五颗舵机编号、烧录 S3/C6、断电组装、检查供电、校准并启动 Web 控制台。
+Windows x64 用户也可以直接按 [Windows 硬件完整流程](windows-hardware-flow.md) 逐步执行。
 
 如果你使用 Codex，可以改用仓库自带的 [`$lampgo-setup`](../../skills/lampgo-setup/SKILL.md)。它执行的仍是同一套流程，只是会读取实际环境、运行安全步骤，并在硬件写入和首次上电前停下来确认。
 
@@ -67,25 +68,31 @@ uv run lampgo run --web --no-hw
 | 手腕滚转 | `wrist_roll` | 4 |
 | 手腕俯仰 | `wrist_pitch` | 5 |
 
-先发现串口：
+先运行只读探测。Windows 会扫描 `COM` 口，并尝试识别 Feetech 电机总线：
 
 ```bash
 uv run lampgo detect
 ```
 
-再启动一次完整编号向导：
+再启动一次完整编号向导。省略 `--port` 时，命令先使用配置里已保存的 `device.motor_port`；没有保存端口时才自动探测：
 
 ```bash
 uv run lampgo setup-motors
 ```
 
-有多个串口时显式指定：
+如果旧配置可能过期，强制忽略已保存的端口并重新扫描：
+
+```bash
+uv run lampgo setup-motors --auto-detect
+```
+
+如果多个串口无法安全区分，向导会列出候选并要求选择；也可以显式指定：
 
 ```bash
 uv run lampgo setup-motors --port /dev/tty.usbmodemXXXX
 ```
 
-Windows PowerShell 把端口替换成实际的 `COM` 口：
+Windows PowerShell 使用实际的 `COM` 口：
 
 ```powershell
 uv run lampgo setup-motors --port COM5
@@ -96,7 +103,8 @@ uv run lampgo setup-motors --port COM5
 全部写完后连接完整总线，检查 ID 1～5 是否各有一个稳定响应：
 
 ```bash
-uv run lampgo scan-motors --ids 1-5
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
 ```
 
 缺失、重复或时有时无都要先排除，不能直接进入校准。
@@ -168,8 +176,8 @@ Windows 上安装了 `arduino-cli` 时使用同一条命令，并把 `--port` �
 ```bash
 cd YareLampGo
 uv run lampgo detect
-uv run lampgo scan-motors --ids 1-5
-uv run lampgo ping
+uv run lampgo scan-motors --auto-detect --ids 1-5
+uv run lampgo ping --auto-detect
 ```
 
 只有五颗舵机全部稳定在线，且方向、线束和电源均确认后，才能校准。
@@ -179,13 +187,13 @@ uv run lampgo ping
 从 YareLampGo 仓库根目录运行校准。先检查 `assets/calibration/`；如果相同 `lamp_id` 已有文件，先复制到仓库外的备份目录，不要直接覆盖或删除。
 
 ```bash
-uv run lampgo calibrate
+uv run lampgo calibrate --auto-detect
 ```
 
 需要指定设备时：
 
 ```bash
-uv run lampgo calibrate --port /dev/tty.usbmodemXXXX --id AL02
+uv run lampgo calibrate --auto-detect --id AL02
 ```
 
 Windows 示例：

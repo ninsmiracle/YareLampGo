@@ -107,7 +107,7 @@ def validate_host(host: HostInfo) -> list[str]:
 
     warnings: list[str] = []
     if host.family == "windows":
-        warnings.append("Windows 已覆盖依赖安装；LampGo 的 Unix IPC/进程管理仍在适配，暂不承诺端到端运行。")
+        warnings.append("Windows 运行时使用回环 TCP IPC 和 Windows 进程管理；音乐模式默认读取录音设备或 Stereo Mix。")
     if host.family == "linux" and "musl" in host.libc.lower():
         warnings.append("检测到 musl Linux；部分 LiveKit 原生 wheel 仅提供 manylinux/glibc 版本，安装可能失败。")
     return warnings

@@ -1,6 +1,9 @@
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,19 +45,33 @@ def test_codex_skill_installers_include_setup_and_control() -> None:
 
 
 def test_shell_installer_is_idempotent_for_both_skills(tmp_path: Path) -> None:
-    installer = REPO_ROOT / "install-codex-skill.sh"
     env = os.environ.copy()
     env["CODEX_HOME"] = str(tmp_path / "codex")
 
+    if os.name == "nt":
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if powershell is None:
+            pytest.skip("PowerShell is not available")
+        command = [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPO_ROOT / "install-codex-skill.ps1"),
+        ]
+    else:
+        command = ["bash", str(REPO_ROOT / "install-codex-skill.sh")]
+
     first = subprocess.run(
-        ["bash", str(installer)],
+        command,
         check=False,
         capture_output=True,
         text=True,
         env=env,
     )
     second = subprocess.run(
-        ["bash", str(installer)],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -65,5 +82,8 @@ def test_shell_installer_is_idempotent_for_both_skills(tmp_path: Path) -> None:
     assert second.returncode == 0, second.stderr
     for skill_name in ("lampgo-setup", "lampgo-control"):
         target = tmp_path / "codex" / "skills" / skill_name
-        assert target.is_symlink()
+        if os.name == "nt":
+            assert target.is_dir()
+        else:
+            assert target.is_symlink()
         assert target.resolve() == (REPO_ROOT / "skills" / skill_name).resolve()

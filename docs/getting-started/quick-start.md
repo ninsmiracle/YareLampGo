@@ -34,7 +34,7 @@ powershell -ExecutionPolicy Bypass -File .\install-codex-skill.ps1
 
 新建 Codex 任务后说：`用 $lampgo-setup 帮我安装和配置 YareLampGo V2.0`。skill 会区分纯软件、已组装成品和 DIY V2.0 三条路径，并在硬件写入/上电/校准前逐步确认。手工安装可以继续按下文执行。
 
-如果需要从舵机编号和 S3/C6 烧录开始复刻整机，请直接阅读 [V2.0 手动安装、烧录与首次启动](manual-hardware-setup.md)。
+如果需要从舵机编号和 S3/C6 烧录开始复刻整机，请直接阅读 [V2.0 手动安装、烧录与首次启动](manual-hardware-setup.md)。Windows x64 用户也可以直接按 [Windows x64 硬件完整流程](windows-hardware-flow.md) 从安装一路执行到首次动作。
 
 ## 一键安装全部依赖
 
@@ -59,11 +59,20 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | 平台 | 安装状态 | 说明 |
 | --- | --- | --- |
 | macOS 14+ Apple Silicon | 支持 | 包含预编译系统音频组件。 |
-| Windows x64 | 支持依赖安装 | LampGo 运行时的 Unix IPC、信号和进程组逻辑仍在适配。 |
+| Windows x64 | 支持 | 使用回环 TCP IPC、COM 串口探测和 Windows 进程管理；音乐模式可读取默认录音设备或 Stereo Mix。 |
 | 常见 glibc Linux x64 / ARM64 | 支持 | 自动识别 apt、dnf、yum、zypper 或 pacman 安装 PortAudio。 |
 | Intel Mac / Windows ARM64 | 暂不支持 | 当前锁定的原生 wheel 不完整，安装器会提前给出明确提示。 |
 
 如果只想先调试 Web、配置和 Agent 链路，可以不连接硬件。
+
+### Windows 注意事项
+
+- PowerShell 中使用 COM5 这类实际串口名，不要填写 Linux 的 /dev/ttyUSB0。
+- LampGo 在 Windows 上通过 127.0.0.1 的本地 TCP 端点连接 CLI 和后台服务，不需要创建 Unix socket 文件。
+- 音乐模式的 source=system 会读取 Windows 录音设备；如果要捕获电脑播放的声音，请在系统声音设置中启用 Stereo Mix 或安装虚拟回环输入，并将设备名写入 LAMPGO_MUSIC_INPUT_DEVICE。
+- 摄像头默认优先使用 DirectShow；多个摄像头时可在设置页填写数字索引，例如 0。
+
+真实硬件从零开始时，建议先阅读 [Windows x64 硬件完整流程](windows-hardware-flow.md)。它特别说明了 COM 自动检测、单舵机写 ID、S3/C6 烧录、断电组装、首次上电和校准的顺序。
 
 ## 首次配置
 
@@ -150,14 +159,16 @@ uv run lampgo text "点个头"
 
 1. 接入电机总线。
 2. 执行 `uv run lampgo detect` 查看候选串口和网络设备。
-3. 执行 `uv run lampgo onboard` 或在 Web 设置页写入串口和 ESP32 设备信息。
-4. 首次使用新设备时执行 `uv run lampgo calibrate`。
-5. 启动 `uv run lampgo run --web`。
+3. 如果舵机尚未编号，执行 `uv run lampgo setup-motors`；它会优先使用已保存端口，否则自动检测电机 COM。多个候选时按提示选择。
+4. 执行 `uv run lampgo scan-motors --auto-detect --ids 1-5` 和 `uv run lampgo ping --auto-detect` 做只读验证。
+5. 执行 `uv run lampgo onboard` 或在 Web 设置页写入串口和 ESP32 设备信息。
+6. 首次使用新设备时执行 `uv run lampgo calibrate --auto-detect`。
+7. 启动 `uv run lampgo run --web`。
 
 常见调试命令：
 
 ```bash
-uv run lampgo ping
+uv run lampgo ping --auto-detect
 uv run lampgo invoke return_safe
 uv run lampgo invoke set_expression expression=heart
 uv run lampgo estop
@@ -166,7 +177,8 @@ uv run lampgo clear
 
 ## 下一步
 
-- 阅读 [V2.0 手动安装](manual-hardware-setup.md) 完成舵机编号、固件烧录、首次上电和校准。
+- 阅读 [Windows x64 硬件完整流程](windows-hardware-flow.md) 从零完成 Windows 硬件验收。
+- 阅读 [V2.0 手动安装](manual-hardware-setup.md) 完成跨平台舵机编号、固件烧录、首次上电和校准。
 - 阅读 [配置说明](configuration.md) 理解配置来源和凭证管理。
 - 阅读 [动作与表情](../guides/motion-and-expression.md) 学习录制、回放和 LED 控制。
 - 阅读 [Codex 集成](../guides/codex-integration.md) 将台灯接入本机复杂任务工作流。

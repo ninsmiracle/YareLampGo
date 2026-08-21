@@ -22,6 +22,8 @@ from typing import Any, ClassVar, Literal
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
+from lampgo.ipc import DEFAULT_SOCKET_PATH, DEFAULT_TCP_HOST, DEFAULT_TCP_PORT
+
 
 class JointLimits(BaseModel):
     """Position limits for a single joint (degrees)."""
@@ -37,6 +39,13 @@ DEFAULT_JOINT_LIMITS: dict[str, JointLimits] = {
     "wrist_roll": JointLimits(min=-75.0, max=75.0),
     "wrist_pitch": JointLimits(min=-45.0, max=100.0),
 }
+
+
+def _default_socket_path() -> str:
+    """Return the platform-native local IPC endpoint setting."""
+    if os.name == "nt":
+        return f"tcp://{DEFAULT_TCP_HOST}:{DEFAULT_TCP_PORT}"
+    return DEFAULT_SOCKET_PATH
 
 
 class MotorConfig(BaseModel):
@@ -595,7 +604,7 @@ class LampgoConfig(BaseModel):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     recordings_dir: Path = Field(default=Path("assets/recordings"))
-    socket_path: str = Field(default="/tmp/lampgo.sock", description="Unix socket path for IPC")
+    socket_path: str = Field(default_factory=_default_socket_path, description="Local IPC endpoint")
     web_enabled: bool = Field(default=False, description="Enable web UI on startup")
     home_on_start: bool = Field(default=False, description="Slowly return to safe position on startup")
     no_hw: bool = Field(default=False, description="Skip hardware connections (motors/LED)")
