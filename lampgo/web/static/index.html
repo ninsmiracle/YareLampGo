@@ -1022,7 +1022,7 @@
                 <div class="esp32-inline-actions">
                   <button id="btn-esp32-setup-wifi" class="ghost-button" type="button" title="连接 ESP32 临时热点并配置 WiFi">配网</button>
                   <button id="btn-esp32-reboot" class="ghost-button" type="button">重启</button>
-                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除当前配对和设备 WiFi，重启后重新开启 Lampgo-Setup 热点">解绑设备</button>
+                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除当前配对和设备 WiFi，重启后重新开启设备配网热点">解绑设备</button>
                   <span id="esp32-action-status" class="settings-status" aria-live="polite"></span>
                 </div>
               </div>
@@ -1066,17 +1066,32 @@
             </div>
 
             <div class="settings-card">
-              <div class="settings-card-title">本机硬件</div>
+              <div class="settings-card-title">舵机与本机输入</div>
               <div class="settings-card-desc">
-                选电机串口、摄像头和麦克风。标定和角度单位一般不用改，已收在高级里。
+                新 P4 选择无线舵机执行器；旧设备仍可选电脑串口。这里也保留本机摄像头和麦克风回退。
               </div>
 
               <div class="settings-form" data-cfg-section="hardware">
+                <label class="settings-field" data-cfg-field="device.motor_transport">
+                  <span class="settings-field-label">舵机连接方式</span>
+                  <select class="settings-input" data-cfg-input="device.motor_transport">
+                    <option value="p4">P4 无线执行器</option>
+                    <option value="serial">电脑本地串口（旧架构）</option>
+                  </select>
+                  <span class="settings-field-hint">P4 模式复用上方无线设备地址，动作指令不再经过电脑 USB。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.motor_transport"></span>
+                </label>
                 <label class="settings-field" data-cfg-field="device.motor_port">
                   <span class="settings-field-label">电机串口 (motor_port)</span>
                   <input class="settings-input" type="text" placeholder="/dev/tty.usbmodem..." data-cfg-input="device.motor_port" list="cfg-hw-serial-list">
                   <span class="settings-field-hint">为空时会自动检测并预填；保存后立即热重连电机。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.motor_port"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device.p4_motion_port">
+                  <span class="settings-field-label">P4 运动端口</span>
+                  <input class="settings-input" type="number" min="1" max="65535" data-cfg-input="device.p4_motion_port">
+                  <span class="settings-field-hint">固件默认 82；设备地址复用无线 ESP32 的首选地址。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.p4_motion_port"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="camera.port">
                   <span class="settings-field-label">摄像头端口 (camera.port)</span>
@@ -1469,15 +1484,15 @@
 
       <section class="esp32-setup-step hidden" data-step="1">
         <div class="esp32-setup-desc">
-          首次使用或重置网络后，ESP32 会开启一个临时 WiFi 热点，名字形如
-          <code>Lampgo-Setup-XXXX</code>（XXXX 为设备 MAC 末 4 位，印在卡片上或串口日志里），
-          默认密码 <code>lampgo123</code>。
+          首次使用或重置网络后，ESP32 会开启临时 WiFi 热点。P4 新板为
+          <code>Lampgo-P4-Setup-XXXX</code>，密码 <code>lampgo-p4-setup</code>；旧 S3 板为
+          <code>Lampgo-Setup-XXXX</code>，密码 <code>lampgo123</code>。XXXX 是设备 MAC 末 4 位。
           <ol class="esp32-setup-hint-list">
             <li>用手机 / 笔记本连上该热点。</li>
             <li>系统可能会弹出"无互联网连接"的提示，<b>保持连接</b>即可。</li>
             <li>连上后回到这个页面，点击下一步。一般不需要手动打开其它网页。</li>
           </ol>
-          <p class="esp32-setup-tip">找不到 <code>Lampgo-Setup-XXXX</code>？先在已连接电脑上点击「解绑设备」清除 WiFi；如果无法访问设备，请通过 USB 重新烧录或擦除。</p>
+          <p class="esp32-setup-tip">找不到设备配网热点？先在已连接电脑上点击「解绑设备」清除 WiFi；如果设备完全无法访问，再使用 USB 维护。</p>
         </div>
         <div class="esp32-setup-actions">
           <button id="btn-esp32-setup-next-1" class="send-button" type="button">我已连上设备热点 →</button>

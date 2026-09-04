@@ -151,7 +151,11 @@ silence_timeout_s = 60
 
 ```toml
 [device]
+motor_transport = "p4"
 motor_port = "/dev/ttyUSB0"
+p4_motion_port = 82
+p4_connect_timeout_s = 8.0
+p4_feedback_timeout_s = 1.0
 lamp_id = "AL02"
 use_degrees = true
 max_torque_pct = 80
@@ -167,11 +171,33 @@ jpeg_quality = 10
 http_timeout_s = 5.0
 ```
 
-- `motor_port`：Feetech 电机总线串口，可在 Web 硬件页保存后热重连。
+- `motor_transport`：`serial` 保留旧 USB 舵机总线路径；`p4` 通过已配对 P4 的 WebSocket 控制头部舵机，不再要求电脑接舵机线。
+- `motor_port`：仅 `serial` 使用的 Feetech 电机总线串口，可在 Web 硬件页保存后热重连。
+- `p4_motion_port`：P4 运动通道端口，固件默认 `82`；设备地址复用 `device_esp32` 的发现/首选地址。
+- `p4_feedback_timeout_s`：舵机遥测超时门限；超时后后端把运动链路降级，不积压旧轨迹。
 - `lamp_id`：用于匹配 `assets/calibration/` 下的校准文件。
 - `max_torque_pct`：电机 Torque_Limit 百分比，默认 `80`；降低堵转电流和转接板发热，不改变正常空载速度。
 - `camera.port`：本地 USB 摄像头索引，如 `0` 或 `1`；使用 ESP32 摄像头时通常留空。
-- `device_esp32.preferred_host`：留空表示自动发现，也可指定 `lampgo-cam-XXXX.local` 或设备 IP。
+- `device_esp32.preferred_host`：留空表示自动发现，也可指定 `lampgo-p4-XXXX.local`、旧 `lampgo-cam-XXXX.local` 或设备 IP。P4 电机模式要求 `device_esp32.enabled = true`。
+
+P4 无线配置示例：
+
+```toml
+[device]
+motor_transport = "p4"
+lamp_id = "AL02"
+p4_motion_port = 82
+
+[device_esp32]
+enabled = true
+preferred_host = "lampgo-p4-ABCD.local"
+mic_enabled = true
+
+[voice]
+call_mode = "esp32_aec"
+```
+
+后端继续使用原有角度制动作与校准文件；原始舵机位置映射、总线串口、限位复核和掉线释放由 P4 执行。切换到 P4 前必须保证该 `lamp_id` 的五个关节校准完整，并先完成无负载/低扭矩物理验收。
 
 ### 运动与安全
 

@@ -254,7 +254,31 @@ def test_expression_clip_sync_rejects_missing_c6_confirmation(monkeypatch, tmp_p
         response = client.post("/api/device/expression-clips/sync", json={"clip_id": "focused"})
 
     assert response.status_code == 502
-    assert response.json()["error"] == "C6 did not confirm clip sync"
+    assert response.json()["error"] == "device display did not confirm clip sync"
+
+
+def test_expression_clip_sync_accepts_direct_p4_display_confirmation(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    create_expression_clip(
+        clip_id="p4-direct",
+        expression="focused",
+        source_bytes=_png_sprite_sheet(),
+        filename="focused.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+    )
+
+    async def fake_proxy_post_bytes(*_args, **_kwargs):
+        return 200, {"ok": True, "display_confirmed": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/device/expression-clips/sync", json={"clip_id": "p4-direct"})
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
 
 
 def test_expression_clip_sync_surfaces_device_error(monkeypatch, tmp_path):

@@ -348,13 +348,13 @@
 
   if (dom.btnForget) {
     dom.btnForget.addEventListener("click", async () => {
-      if (!confirm("解绑设备会清除当前配对和设备 WiFi，ESP32 将重启并重新开启 Lampgo-Setup 热点。继续？")) return;
+      if (!confirm("解绑设备会清除当前配对和设备 WiFi，ESP32 将重启并重新开启设备配网热点。继续？")) return;
       setActionStatus("解绑并重置 WiFi 中…");
       try {
         const res = await fetch("/api/device/forget-wifi", { method: "POST" });
         const body = await res.json().catch(() => ({}));
         if (body && body.ok) {
-          setActionStatus("已清除设备 WiFi，等待 ESP32 重启并开启 Lampgo-Setup 热点");
+          setActionStatus("已清除设备 WiFi，等待 ESP32 重启并开启设备配网热点");
           const status = await fetchStatus();
           renderStatus(status);
         } else {
@@ -512,7 +512,7 @@
         });
     } catch (err) {
       dom.ssidSelect.innerHTML = '<option value="">扫描失败</option>';
-      setError("扫描失败：" + err.message + "（请确认已连上 Lampgo-Setup 热点，或填写直连地址）");
+      setError("扫描失败：" + err.message + "（请确认已连上设备配网热点，或填写直连地址）");
     }
   }
 
@@ -560,7 +560,7 @@
   async function waitUntilDiscovered() {
     if (!dom.wait) return;
     dom.wait.classList.remove("is-ok", "is-err");
-    dom.wait.textContent = "已发送 WiFi 信息，ESP32 正在重启并连接…\n请将电脑切回家庭 WiFi（如仍连着 Lampgo-Setup 热点）";
+    dom.wait.textContent = "已发送 WiFi 信息，ESP32 正在重启并连接…\n请将电脑切回家庭 WiFi（如仍连着设备配网热点）";
     const start = Date.now();
     let phase2 = false;
     let lastDiscoveryRestartAt = 0;

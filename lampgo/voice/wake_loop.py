@@ -279,7 +279,7 @@ class WakeLoop:
                             message = await asyncio.wait_for(
                                 ws.recv(), timeout=DEVICE_WAKE_IDLE_LOG_S
                             )
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             logger.debug("wake_loop.device_wake_idle", url=safe_url)
                             continue
                         if isinstance(message, bytes):
@@ -336,10 +336,22 @@ class WakeLoop:
             logger.debug("wake_loop.wake_model_status_unavailable", status=status)
             return
 
+        capabilities = body.get("capabilities")
+        if isinstance(capabilities, dict) and capabilities.get("wake_word") is False:
+            # P4 head boards provide full-duplex audio/AEC without bundling a
+            # WakeNet model partition. Manual and app-initiated calls remain
+            # available, so do not repeatedly push an unsupported model.
+            return
+
         active = str(body.get("wake_model") or "")
         requested = str(body.get("wake_requested_model") or "")
         audio_profile = str(body.get("audio_profile") or "")
-        call_mode = str(getattr(self._server.config.voice, "call_mode", "") or "stable").strip().lower().replace("-", "_")
+        call_mode = (
+            str(getattr(self._server.config.voice, "call_mode", "") or "stable")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
         desired_audio_profile = (
             ESP32_AEC_AUDIO_PROFILE if call_mode == "esp32_aec" else ESP32_WAKE_AUDIO_PROFILE
         )

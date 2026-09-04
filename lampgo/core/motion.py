@@ -45,7 +45,8 @@ from enum import Enum, auto
 import structlog
 
 from lampgo.core.config import MotionConfig
-from lampgo.core.hal import HardwareAbstraction, MotorStartupState
+from lampgo.core.hal import MotorStartupState
+from lampgo.core.motor_hal import MotorHAL
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.spring import SecondOrderDynamics, cap_spring_f
 from lampgo.core.style import get_motion_style, resolve_style_name
@@ -90,7 +91,7 @@ class MotionRuntime:
 
     def __init__(
         self,
-        hal: HardwareAbstraction,
+        hal: MotorHAL,
         safety: SafetyKernel,
         config: MotionConfig,
     ) -> None:

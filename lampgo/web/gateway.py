@@ -1804,7 +1804,8 @@ class WebGateway:
     # Fields that require a daemon restart to take effect.
     #
     # Deliberately NOT listed here:
-    #   - device.motor_port → hot-reconnected by `server.reload_motor_runtime`.
+    #   - device.motor_transport / motor_port → hot-reconnected by
+    #     `server.reload_motor_runtime`.
     #   - camera.port      → hot-swapped via the set_camera WS command in
     #                        `server._handle_set_camera`; the Web UI also
     #                        rebroadcasts this on save.
@@ -1839,7 +1840,11 @@ class WebGateway:
     # Each path uses the same dotted notation as the provenance map.
     _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         "device": (
+            "device.motor_transport",
             "device.motor_port",
+            "device.p4_motion_port",
+            "device.p4_connect_timeout_s",
+            "device.p4_feedback_timeout_s",
             "device.lamp_id",
             "device.use_degrees",
         ),
@@ -2126,9 +2131,19 @@ class WebGateway:
         except Exception:
             return response
         saved = set((payload.get("result") or {}).get("saved") or [])
-        if "device.motor_port" in saved:
+        reconnect_fields = {
+            "device.motor_transport",
+            "device.motor_port",
+            "device.p4_motion_port",
+            "device.p4_connect_timeout_s",
+            "device.p4_feedback_timeout_s",
+        }
+        reconnect_saved = reconnect_fields & saved
+        if reconnect_saved:
             reload_result = await self.server.reload_motor_runtime()
-            payload.setdefault("result", {}).setdefault("hot_reload", {})["device.motor_port"] = reload_result
+            hot_reload = payload.setdefault("result", {}).setdefault("hot_reload", {})
+            for field in reconnect_saved:
+                hot_reload[field] = reload_result
         return JSONResponse(payload, status_code=response.status_code)
 
     async def api_config_voice(self, request: Request) -> JSONResponse:
@@ -2730,7 +2745,7 @@ class WebGateway:
                     timeout=1.5,
                 )
                 if device_status_code == 200 and isinstance(device_body, dict):
-                    mic_streaming = bool(device_body.get("mic_streaming") and device_body.get("wake_ready"))
+                    mic_streaming = bool(device_body.get("mic_streaming"))
                     wake_event_clients = int(device_body.get("wake_event_clients") or 0)
                     wake_ready = bool(device_body.get("wake_ready"))
                     wake_model = str(device_body.get("wake_model") or "")
@@ -2919,8 +2934,10 @@ class WebGateway:
             payload,
             params=query,
         )
-        c6_confirmed = isinstance(last_body, dict) and last_body.get("c6_confirmed") is True
-        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not c6_confirmed:
+        display_confirmed = isinstance(last_body, dict) and (
+            last_body.get("display_confirmed") is True or last_body.get("c6_confirmed") is True
+        )
+        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not display_confirmed:
             device = self.server.esp32.get_status().get("device")
             update_expression_clip_sync(clip_id, status="sync_failed", device=device)
             device_error = (
@@ -2933,7 +2950,7 @@ class WebGateway:
                 if device_error:
                     error = f"{error}: {device_error}"
             else:
-                error = "C6 did not confirm clip sync"
+                error = "device display did not confirm clip sync"
             return JSONResponse(
                 {
                     "ok": False,
@@ -3201,8 +3218,10 @@ class WebGateway:
             logger.info("web.esp32_speaker_proxy_closed", frames=frames, bytes=bytes_sent, dropped_frames=dropped_frames)
 
     async def api_esp32_reboot(self, request: Request) -> JSONResponse:
-        status, body, _ = await self.server.esp32.proxy_post("/device/reboot", {})
-        self.server.esp32.reset_session()
+        payload = self.server.esp32.owner_auth_payload(reason="reboot")
+        status, body, _ = await self.server.esp32.proxy_post("/device/reboot", payload)
+        if 200 <= status < 300:
+            self.server.esp32.reset_session()
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def api_esp32_forget_wifi(self, request: Request) -> JSONResponse:
@@ -3211,12 +3230,16 @@ class WebGateway:
         Also sets enabled/mic_enabled to false so the backend stops mDNS
         discovery until the next provisioning cycle re-enables them.
         """
-        try:
-            await self.server.esp32.unpair_device(reason="forget_wifi")
-        except Exception:
-            logger.debug("web.forget_wifi_unpair_failed", exc_info=True)
+        # The P4 endpoint clears WiFi and pairing atomically. Sending a
+        # separate unpair first would invalidate the credential needed by the
+        # following reset request.
         payload = self.server.esp32.owner_auth_payload(reason="forget_wifi") if hasattr(self.server.esp32, "owner_auth_payload") else {}
         status, body, _ = await self.server.esp32.proxy_post("/device/forget-wifi", payload)
+        if not 200 <= status < 300:
+            return JSONResponse(
+                body if isinstance(body, dict) else {"ok": False, "raw": str(body)},
+                status_code=status,
+            )
         try:
             await self.server.esp32.shutdown()
             self.server.esp32.reset_session()
@@ -4342,7 +4365,7 @@ class WebGateway:
                         while True:
                             try:
                                 data = await asyncio.wait_for(esp32_ws.recv(), timeout=idle_timeout_s)
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 idle_timeouts += 1
                                 if idle_timeouts == 1 or idle_timeouts % 6 == 0:
                                     logger.warning(

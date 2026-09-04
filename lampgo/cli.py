@@ -958,7 +958,8 @@ def _load_config_from_args(args: argparse.Namespace):
 
     config = load_config(config_path=getattr(args, "config", None), cli_overrides=cli_overrides)
 
-    if not config.device.motor_port and not getattr(args, "no_hw", False):
+    uses_local_motor_port = getattr(config.device, "motor_transport", "serial") == "serial"
+    if uses_local_motor_port and not config.device.motor_port and not getattr(args, "no_hw", False):
         try:
             from lampgo.autodetect import detect_ports
 
@@ -973,7 +974,7 @@ def _load_config_from_args(args: argparse.Namespace):
         except Exception as exc:  # noqa: BLE001
             logger.warning("cli.motor_port_autodetect_failed", error=str(exc))
 
-    if not config.device.motor_port:
+    if uses_local_motor_port and not config.device.motor_port:
         # Degrade to no-hardware mode instead of exiting so the Web UI can still boot
         # and let the user configure a motor port through the settings page.
         print(

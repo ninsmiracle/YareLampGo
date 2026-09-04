@@ -67,7 +67,19 @@ DEFAULT_MOTORS: dict[str, MotorConfig] = {
 class DeviceConfig(BaseModel):
     """Hardware connection settings."""
 
+    motor_transport: Literal["serial", "p4"] = Field(
+        default="serial",
+        description="Motor transport: local serial adapter or ESP32-P4 wireless executor.",
+    )
     motor_port: str = Field(default="", description="Serial port for the Feetech motor bus, e.g. /dev/ttyUSB0")
+    p4_motion_port: int = Field(default=82, ge=1, le=65535, description="ESP32-P4 motion WebSocket port")
+    p4_connect_timeout_s: float = Field(default=8.0, gt=0, le=60, description="P4 motion handshake timeout")
+    p4_feedback_timeout_s: float = Field(
+        default=1.0,
+        gt=0.1,
+        le=10,
+        description="Maximum age of P4 servo telemetry before the transport is unhealthy.",
+    )
     led_port: str = Field(default="", description="Serial port for ESP32 LED controller (empty = disabled)")
     lamp_id: str = Field(default="AL02", description="Device identity used for calibration file lookup")
     motors: dict[str, MotorConfig] = Field(default_factory=lambda: dict(DEFAULT_MOTORS))
@@ -750,6 +762,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
     """
     changed: list[str] = []
     env_map = {
+        "LAMPGO_MOTOR_TRANSPORT": ("device", "motor_transport"),
         "LAMPGO_MOTOR_PORT": ("device", "motor_port"),
         "LAMPGO_LED_PORT": ("device", "led_port"),
         "LAMPGO_LAMP_ID": ("device", "lamp_id"),

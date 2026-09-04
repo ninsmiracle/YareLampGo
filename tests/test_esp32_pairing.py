@@ -198,3 +198,71 @@ def test_probe_connect_injects_pairing_payload(monkeypatch, tmp_path) -> None:
     assert body["owner_id"] == server.esp32.owner_id
     assert body["owner_label"] == server.esp32.owner_label
     assert body["pairing_secret"] == server.esp32.pairing_secret
+
+
+def test_reboot_sends_owner_auth(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(
+        LampgoConfig(
+            device=DeviceConfig(motor_port="/dev/null"),
+            device_esp32=DeviceEsp32Config(enabled=True),
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_proxy_post(path: str, body: dict[str, object]):
+        captured["path"] = path
+        captured["body"] = body
+        return 200, {"ok": True}, "application/json"
+
+    monkeypatch.setattr(server.esp32, "proxy_post", fake_proxy_post)
+
+    with TestClient(WebGateway(server).app) as client:
+        response = client.post("/api/device/reboot")
+
+    assert response.status_code == 200
+    assert captured["path"] == "/device/reboot"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["owner_id"] == server.esp32.owner_id
+    assert body["pairing_secret"] == server.esp32.pairing_secret
+    assert body["reason"] == "reboot"
+
+
+def test_forget_wifi_uses_atomic_authenticated_endpoint(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(
+        LampgoConfig(
+            device=DeviceConfig(motor_port="/dev/null"),
+            device_esp32=DeviceEsp32Config(enabled=True, mic_enabled=True),
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_proxy_post(path: str, body: dict[str, object]):
+        captured["path"] = path
+        captured["body"] = body
+        return 200, {"ok": True}, "application/json"
+
+    async def fake_shutdown() -> None:
+        captured["shutdown"] = True
+
+    async def forbidden_unpair(*, reason: str = ""):
+        raise AssertionError(f"separate unpair must not run: {reason}")
+
+    monkeypatch.setattr(server.esp32, "proxy_post", fake_proxy_post)
+    monkeypatch.setattr(server.esp32, "shutdown", fake_shutdown)
+    monkeypatch.setattr(server.esp32, "unpair_device", forbidden_unpair)
+
+    with TestClient(WebGateway(server).app) as client:
+        response = client.post("/api/device/forget-wifi")
+
+    assert response.status_code == 200
+    assert captured["path"] == "/device/forget-wifi"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["owner_id"] == server.esp32.owner_id
+    assert body["pairing_secret"] == server.esp32.pairing_secret
+    assert body["reason"] == "forget_wifi"
+    assert captured["shutdown"] is True
+    assert server.config.device_esp32.enabled is False

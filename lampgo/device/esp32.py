@@ -354,6 +354,8 @@ class Esp32DeviceManager:
         for key in (
             "firmware",
             "hostname",
+            "platform",
+            "motion_port",
             "paired",
             "paired_owner_id",
             "paired_owner_label",
