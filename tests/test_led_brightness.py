@@ -60,6 +60,29 @@ def test_led_controller_caps_direct_and_dynamic_expression_brightness(monkeypatc
     assert sent[-1][1]["led_params"]["brightness"] == 8
 
 
+def test_led_controller_uses_p4_composite_endpoint_for_builtin_modes():
+    ceiling = {"value": 16}
+    controller, sent = _controller_with_capture(ceiling)
+    controller.bind_esp32_manager(
+        SimpleNamespace(get_status=lambda: {"device": {"platform": "esp32-p4"}})
+    )
+
+    assert controller.set_mode("check") is True
+
+    assert sent == [
+        (
+            "/device/expressions/play",
+            {
+                "expression": "check",
+                "led_mode": 15,
+                "led_params": {"brightness": 16},
+                "playback": "loop",
+            },
+            "expression_play",
+        )
+    ]
+
+
 @pytest.mark.asyncio
 async def test_set_expression_builtin_route_uses_runtime_brightness_ceiling():
     ceiling = {"value": 16}

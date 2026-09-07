@@ -53,6 +53,7 @@
   const btnLedCopyFrameToAll = document.getElementById("btn-led-copy-frame-to-all");
   const btnLedClearAllFrames = document.getElementById("btn-led-clear-all-frames");
   const btnLedEditorPreview = document.getElementById("btn-led-editor-preview");
+  const btnLedTopologyTest = document.getElementById("btn-led-topology-test");
   const btnLedEditorSave = document.getElementById("btn-led-editor-save");
   const composerEye = document.getElementById("composer-eye");
   const composerLed = document.getElementById("composer-led");
@@ -4368,6 +4369,19 @@
       const library = capacity.library;
       const device = capacity.device;
       if (expressionCapacityEl && library) {
+        const isP4 = device && device.platform === "esp32-p4";
+        if (isP4) {
+          const lcd = `${device.lcd_width || 320}×${device.lcd_height || 172}`;
+          const led = `${device.led_width || 54}×${device.led_height || 9}`;
+          expressionCapacityEl.textContent = [
+            `P4 屏幕 ${lcd} · 本地素材直传`,
+            `P4 LED ${led} · 物理走线待校准`,
+            `组合 ${library.presets.installed}/${library.presets.max_count}`,
+          ].join("  |  ");
+          void refreshClock();
+          void refreshOcean();
+          return;
+        }
         const deviceEyeCount = device && Number(device.c6_eye_max_count || 0) > 0
           ? `${device.c6_eye_installed_count}/${device.c6_eye_max_count}`
           : `${library.eyes.installed}/${library.eyes.max_count}`;
@@ -4662,6 +4676,18 @@
     }
   }
 
+  async function runLedTopologyTest() {
+    try {
+      await fetchJson("/api/device/led-topology-test", { method: "POST" });
+      if (ledEditorStatus) {
+        ledEditorStatus.textContent = "走线标记已显示：红 #0、绿 #53、蓝 #54、黄 #107、青 #432、品红 #485";
+      }
+    } catch (error) {
+      if (ledEditorStatus) ledEditorStatus.textContent = "走线校准失败";
+      window.alert(`走线校准失败：${error.message || error}`);
+    }
+  }
+
   async function playLedEffect(name) {
     const effect = expressionLedEffects.find((item) => item.effect_id === name);
     await playExpression({
@@ -4928,6 +4954,7 @@
     });
   }
   if (btnExpressionPreview) btnExpressionPreview.addEventListener("click", () => { void previewExpression(); });
+  if (btnLedTopologyTest) btnLedTopologyTest.addEventListener("click", () => { void runLedTopologyTest(); });
   if (btnExpressionSync) btnExpressionSync.addEventListener("click", () => { void syncExpressionResources(); });
   if (btnExpressionSetDefault) {
     btnExpressionSetDefault.addEventListener("click", () => { void setDefaultLedForEye(); });

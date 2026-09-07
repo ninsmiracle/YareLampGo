@@ -257,6 +257,7 @@ class WebGateway:
             Route("/api/expressions/preview", self.api_expression_preview, methods=["POST"]),
             Route("/api/expressions/play", self.api_expression_play, methods=["POST"]),
             Route("/api/expressions/stop", self.api_expression_stop, methods=["POST"]),
+            Route("/api/device/led-topology-test", self.api_led_topology_test, methods=["POST"]),
             Route("/api/device/expression-capabilities", self.api_expression_capabilities, methods=["GET"]),
             Route("/api/clock", self.api_clock, methods=["GET"]),
             Route("/api/clock/show", self.api_clock_show, methods=["POST"]),
@@ -1160,6 +1161,14 @@ class WebGateway:
             return 503, {"ok": False, "error": "no_device"}
         self.server.clock.deactivate()
         self.server.electronic_ocean.deactivate()
+        eye_clip_id = composition.get("eye_storage_clip_id")
+        if eye_clip_id:
+            # An eye clip is a P4-local LittleFS asset, not a C6 relay.  Do
+            # the upload in the same user action so Play cannot silently fall
+            # back to the firmware's generic circular eyes.
+            sync_status, sync_body = await self._sync_eye_to_device(str(eye_clip_id))
+            if sync_status >= 400 or sync_body.get("ok") is False:
+                return sync_status, sync_body
         effect = composition.get("led_effect") or {}
         if effect.get("kind") == "pixel_clip" and composition.get("led_effect_id"):
             sync_status, sync_body, _ = await self._sync_led_effect_to_device(
@@ -1212,6 +1221,21 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
         payload = self.server.esp32.with_owner_auth({}, reason="expression_stop")
         status, body, _ = await self.server.esp32.proxy_post("/device/expressions/stop", payload)
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_led_topology_test(self, request: Request) -> JSONResponse:
+        """Show P4 physical LED-index markers without enabling motion."""
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        device = self.server.esp32.get_status().get("device")
+        if not isinstance(device, dict) or device.get("platform") != "esp32-p4":
+            return JSONResponse(
+                {"ok": False, "error": "p4_led_topology_test_requires_active_p4"}, status_code=409
+            )
+        payload = self.server.esp32.with_owner_auth(
+            {"diagnostic": "topology", "brightness": 8}, reason="led_topology_test"
+        )
+        status, body, _ = await self.server.esp32.proxy_post("/device/led", payload)
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def api_clock(self, request: Request) -> JSONResponse:
@@ -1275,6 +1299,14 @@ class WebGateway:
                     device = body.get("result") or body
             except Exception:
                 logger.exception("expression_capabilities.device_failed")
+            # ESP32-P4 keeps expression assets directly on the head board and
+            # reports its geometry from /device/status rather than emulating
+            # the legacy S3/C6 capacity endpoint.
+            if device is None:
+                status_snapshot = self.server.esp32.get_status()
+                candidate = status_snapshot.get("device") if isinstance(status_snapshot, dict) else None
+                if isinstance(candidate, dict) and candidate.get("platform") == "esp32-p4":
+                    device = candidate
         return JSONResponse({"ok": True, "result": {"library": local, "device": device}})
 
     async def api_expression_clips(self, request: Request) -> JSONResponse:
@@ -2905,17 +2937,22 @@ class WebGateway:
         return await self._sync_eye_response(clip_id)
 
     async def _sync_eye_response(self, eye_id: str) -> JSONResponse:
+        status, body = await self._sync_eye_to_device(eye_id)
+        return JSONResponse(body, status_code=status)
+
+    async def _sync_eye_to_device(self, eye_id: str) -> tuple[int, dict[str, Any]]:
+        """Copy one LCD clip to the paired P4 and return an API-safe result."""
         if not self.server.esp32:
-            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+            return 503, {"ok": False, "error": "no_device"}
         try:
             clip_id = eye_storage_id(eye_id)
             manifest = load_expression_clip(clip_id)
             payload = load_expression_clip_lcd_payload(clip_id)
         except (ExpressionClipError, ExpressionLibraryError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return 404, {"ok": False, "error": str(exc)}
         except Exception as exc:
             logger.exception("expression_clip.sync_prepare_failed", clip_id=clip_id)
-            return JSONResponse({"ok": False, "error": f"sync prepare failed: {exc}"}, status_code=500)
+            return 500, {"ok": False, "error": f"sync prepare failed: {exc}"}
 
         lcd_meta = manifest.get("lcd") or {}
         query = {
@@ -2951,34 +2988,29 @@ class WebGateway:
                     error = f"{error}: {device_error}"
             else:
                 error = "device display did not confirm clip sync"
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": error,
-                    "result": {
-                        "transfer_mode": "bulk",
-                        "sent_chunks": 1,
-                        "device_status": status,
-                        "device_body": last_body,
-                    },
-                },
-                status_code=status if status >= 400 else 502,
-            )
-
-        device = self.server.esp32.get_status().get("device")
-        manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
-        return JSONResponse(
-            {
-                "ok": True,
+            return status if status >= 400 else 502, {
+                "ok": False,
+                "error": error,
                 "result": {
-                    "clip": manifest,
                     "transfer_mode": "bulk",
                     "sent_chunks": 1,
                     "device_status": status,
                     "device_body": last_body,
                 },
             }
-        )
+
+        device = self.server.esp32.get_status().get("device")
+        manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
+        return 200, {
+            "ok": True,
+            "result": {
+                "clip": manifest,
+                "transfer_mode": "bulk",
+                "sent_chunks": 1,
+                "device_status": status,
+                "device_body": last_body,
+            },
+        }
 
     async def api_esp32_pair(self, request: Request) -> JSONResponse:
         if not self.server.esp32:

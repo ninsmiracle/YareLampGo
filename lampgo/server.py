@@ -1840,6 +1840,7 @@ class LampgoServer:
             esp32 = self._esp32_camera_info()
             return (
                 bool(esp32.get("online"))
+                and bool(esp32.get("camera_ready"))
                 and not bool(esp32.get("hidden"))
                 and not bool(esp32.get("needs_firmware_update"))
             )
@@ -1918,6 +1919,9 @@ class LampgoServer:
         return {
             "enabled": True,
             "online": online,
+            # A reachable P4 can still have failed its OV5640 probe.  Surface
+            # that state instead of treating an HTTP connection as a camera.
+            "camera_ready": bool(device.get("camera_ready")) if isinstance(device, dict) else False,
             "host": host or cfg.preferred_host or "",
             "ip": device.get("ip", "") if isinstance(device, dict) else "",
             "port": device.get("port", 80) if isinstance(device, dict) else 80,

@@ -277,6 +277,25 @@ def test_cat_teaser_frame_source_uses_local_camera_fallback(monkeypatch) -> None
     assert fake_cv2.captures[0].released is True
 
 
+def test_cat_teaser_never_opens_local_fallback_when_p4_is_selected(monkeypatch) -> None:
+    fake_cv2 = _FakeCv2()
+    monkeypatch.setattr(cat_perception_mod, "_import_cv2", lambda: fake_cv2)
+    p4 = SimpleNamespace(is_online=lambda: False, get_active_host=lambda: "lampgo-p4.local")
+    source = CatTeaserFrameSource(
+        CameraConfig(port=""),
+        device_esp32_config=DeviceEsp32Config(enabled=True),
+        esp32_manager=p4,
+        allow_local_camera_fallback=True,
+    )
+
+    source.start()
+
+    assert source.enabled is True
+    assert source.device_label == "esp32://lampgo-p4.local"
+    assert fake_cv2.devices == []
+    assert source.read() is None
+
+
 def test_cat_teaser_frame_source_requires_camera_without_fallback() -> None:
     source = CatTeaserFrameSource(CameraConfig(port=""))
 

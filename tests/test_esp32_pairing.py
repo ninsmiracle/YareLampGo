@@ -70,6 +70,11 @@ def test_preferred_fallback_keeps_pairing_probe_status(monkeypatch, tmp_path) ->
             "paired_owner_id": manager.owner_id,
             "paired_owner_label": manager.owner_label,
             "pairing_state": "paired",
+            "camera_ready": False,
+            "camera_width": 800,
+            "camera_height": 600,
+            "led_width": 54,
+            "led_height": 9,
         },
     )
     fallback.last_health_ok = True
@@ -86,6 +91,9 @@ def test_preferred_fallback_keeps_pairing_probe_status(monkeypatch, tmp_path) ->
     assert status["device"]["pairing_supported"] is True
     assert status["device"]["needs_firmware_update"] is False
     assert status["device"]["is_paired_to_self"] is True
+    assert status["device"]["camera_ready"] is False
+    assert status["device"]["led_width"] == 54
+    assert status["device"]["led_height"] == 9
     assert [d["host"] for d in status["all_devices"]] == ["lampgo-cam-0834.local"]
 
 
