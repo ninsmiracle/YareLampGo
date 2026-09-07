@@ -787,7 +787,14 @@ class Esp32DeviceManager:
                             f"{upload_base_url}{path}",
                             params=request_params,
                             content=content,
-                            headers={**headers, "X-Lampgo-Upload-Phase": phase},
+                            # Arduino WebServer completes a request only after the
+                            # peer closes its connection. Reusing keep-alive here
+                            # would stall the next bounded chunk indefinitely.
+                            headers={
+                                **headers,
+                                "Connection": "close",
+                                "X-Lampgo-Upload-Phase": phase,
+                            },
                             timeout=upload_timeout_s,
                         )
                         response_type = response.headers.get("content-type", "application/json")
