@@ -771,12 +771,12 @@ class Esp32DeviceManager:
                 upload_port = dev.port
                 if str(dev.extras.get("platform") or "") == "esp32-p4":
                     try:
-                        # P4 shares its bounded asset receiver with the audio HTTP
-                        # service.  Discovery can precede the first health payload,
+                        # P4 receives bounded asset chunks on its control HTTP
+                        # service. Discovery can precede the first health payload,
                         # so use that stable port until the advertised value arrives.
-                        upload_port = int(dev.extras.get("asset_upload_port") or 81)
+                        upload_port = int(dev.extras.get("asset_upload_port") or 80)
                     except (TypeError, ValueError):
-                        upload_port = 81
+                        upload_port = 80
                 upload_base_url = dev.base_url
                 if upload_port != dev.port:
                     upload_host = dev.ip or dev.host
