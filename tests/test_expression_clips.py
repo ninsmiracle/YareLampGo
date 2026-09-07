@@ -314,6 +314,40 @@ def test_expression_play_uploads_eye_to_p4_before_playing(monkeypatch, tmp_path)
     assert calls == ["/device/expression-clips/upload", "/device/expressions/play"]
 
 
+def test_expression_play_keeps_legacy_s3_c6_upload_contract(monkeypatch, tmp_path):
+    """The P4 direct-display path must not replace the S3-to-C6 protocol."""
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    create_expression_clip(
+        clip_id="legacy-play",
+        expression="focused",
+        source_bytes=_png_sprite_sheet(),
+        filename="focused.png",
+        content_type="image/png",
+        fps=10,
+        grid_rows=3,
+        grid_cols=10,
+    )
+    calls: list[str] = []
+
+    async def fake_proxy_post_bytes(path, *_args, **_kwargs):
+        calls.append(path)
+        return 200, {"ok": True, "c6_confirmed": True}, "application/json"
+
+    async def fake_proxy_post(path, *_args, **_kwargs):
+        calls.append(path)
+        return 200, {"ok": True, "c6_confirmed": True}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/expressions/play", json={"eye_clip_id": "legacy-play"})
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert calls == ["/device/expression-clips/upload", "/device/expressions/play"]
+
+
 def test_expression_clip_sync_surfaces_device_error(monkeypatch, tmp_path):
     gateway = _make_gateway(monkeypatch, tmp_path)
     create_expression_clip(

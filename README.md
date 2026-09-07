@@ -16,6 +16,17 @@
 
 YareLampGo 把电机、屏幕、RGB LED、摄像头、麦克风和大模型装进一盏台灯里。你可以在网页上控制它，也可以直接对它说话，或者让 Codex 帮你装机、排查问题和完成复杂任务。
 
+> **先选硬件路线。** 本仓库同时支持旧 S3/C6 硬件和新的 P4 无线头部板；P4 是可选路径，不会覆盖旧用户的固件、串口配置或 S3→C6 表情流程。
+
+## 硬件路线：旧 S3/C6 与新 P4 并存
+
+| 你手上的硬件 | 选择与入口 | 关键边界 |
+| --- | --- | --- |
+| **旧版：S3 + 独立 C6 小屏** | 保持 `device.motor_transport = "serial"`（默认），按 [V2.0 手动安装](docs/getting-started/manual-hardware-setup.md) 和固件仓库根目录烧录 | 电脑仍经 USB 控制 Feetech 舵机；表情素材由 S3 转发给 C6。 |
+| **新版：ESP32-P4 头部板 + C6 Wi-Fi** | 显式设为 `device.motor_transport = "p4"`，烧录固件仓库的 `ESP32_P4_HEAD/` | 后端经 Wi-Fi 控制 P4；C6 仅作 P4 网络协处理器，P4 直驱灯头舵机、LED 和 LCD。 |
+
+两条路线的详细配置、烧录、资产传输和回退规则见 [P4 无线头部板路线](docs/hardware/p4-wireless-head.md)。不要把旧 C6 小屏固件刷到 P4 方案的 C6，也不要把 P4 原生 USB 调试端口当作旧 Feetech 电机串口。
+
 ## 它能做什么
 
 - **会动，也会表达。** 5 自由度机械臂、动态眼睛和 RGB 点阵灯会一起回应，不是只会亮灯的普通台灯。
@@ -69,7 +80,7 @@ Skill 会自动判断你是“先体验软件”“已有成品机”还是“�
 
 ## 不用 Codex？也可以手动安装
 
-不用 Codex，也可以完整手动安装。DIY 用户需要依次完成：安装软件 → 给五颗舵机写入 ID 1～5 → 烧录 S3/C6 → 断电组装和检查供电 → 扫描舵机 → 校准 → 配网并启动。
+不用 Codex，也可以完整手动安装。旧 S3/C6 用户需要依次完成：安装软件 → 给五颗舵机写入 ID 1～5 → 烧录 S3/C6 → 断电组装和检查供电 → 扫描舵机 → 校准 → 配网并启动。P4 用户请使用上方的独立无线头部板路线。
 
 完整命令、安全检查和 Windows/macOS/Linux 说明见 [V2.0 手动安装、烧录与首次启动](docs/getting-started/manual-hardware-setup.md)。Windows x64 从零装机可直接按 [Windows x64 硬件完整流程](docs/getting-started/windows-hardware-flow.md) 执行。固件烧录以独立的 [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) 仓库为准。
 
@@ -104,7 +115,7 @@ uv run lampgo clear                # 结束残留进程并释放电机扭矩
 
 更多参数：`uv run lampgo <command> --help`。
 
-## 复刻 V2.0
+## 旧 S3/C6 复刻资料
 
 V2.0 已直接替换 V1.0，请不要混用两代结构件、接线图或校准文件。
 
@@ -116,7 +127,8 @@ V2.0 已直接替换 V1.0，请不要混用两代结构件、接线图或校准�
 | 完整 STEP 总成 | [V2.0 结构件](assets/printable/README.md) |
 | GitHub 网页版图文组装说明 | [组装说明 Markdown](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.md) |
 | 原始图文组装说明 | [组装 DOCX 下载](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) |
-| S3/C6 固件 | [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) |
+| S3/C6 固件 | [YareLampGo_esp32 根目录](https://github.com/shelly-tang/YareLampGo_esp32) |
+| P4 无线头部板固件与切换规则 | [P4 无线头部板路线](docs/hardware/p4-wireless-head.md) · [固件 `ESP32_P4_HEAD/`](https://github.com/shelly-tang/YareLampGo_esp32/tree/main/ESP32_P4_HEAD) |
 
 当前公开的是完整 STEP 总成，不是已经拆好的逐件 STL/3MF；电路 PNG 也是接线和走线参考，不是可以直接交给板厂的 Gerber 制板包。
 

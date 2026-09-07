@@ -65,11 +65,14 @@ DEFAULT_MOTORS: dict[str, MotorConfig] = {
 
 
 class DeviceConfig(BaseModel):
-    """Hardware connection settings."""
+    """Hardware connection settings for the legacy S3 path or opt-in P4 path."""
 
     motor_transport: Literal["serial", "p4"] = Field(
         default="serial",
-        description="Motor transport: local serial adapter or ESP32-P4 wireless executor.",
+        description=(
+            "Motor transport. 'serial' preserves the legacy USB Feetech bus; "
+            "'p4' opts into the ESP32-P4 wireless head executor."
+        ),
     )
     motor_port: str = Field(default="", description="Serial port for the Feetech motor bus, e.g. /dev/ttyUSB0")
     p4_motion_port: int = Field(default=82, ge=1, le=65535, description="ESP32-P4 motion WebSocket port")
@@ -390,7 +393,7 @@ class CameraConfig(BaseModel):
 
 
 class DeviceEsp32Config(BaseModel):
-    """Wireless camera/mic device (XIAO ESP32S3 Sense running lampgo-cam firmware).
+    """Wireless head device (legacy ESP32-S3 or opt-in ESP32-P4).
 
     Semantics of ``enabled``: *prefer* ESP32 over local. When the device is
     discovered via mDNS and reachable, perception pulls frames/audio from it.
@@ -408,8 +411,8 @@ class DeviceEsp32Config(BaseModel):
     preferred_host: str = Field(
         default="",
         description=(
-            "Optional mDNS hostname to pin (e.g. 'lampgo-cam-AB12.local'). "
-            "Empty = auto-discover first reachable lampgo-cam device."
+            "Optional mDNS hostname to pin (e.g. 'lampgo-cam-AB12.local' or "
+            "'lampgo-p4-AB12.local'). Empty = auto-discover a reachable LampGo device."
         ),
     )
     jpeg_quality: int = Field(
@@ -432,7 +435,7 @@ class DeviceEsp32Config(BaseModel):
         default=32,
         ge=1,
         le=96,
-        description="Global S3 LED brightness ceiling. Expression brightness may be lower but never higher.",
+        description="Wireless LED brightness ceiling. Expression brightness may be lower but never higher.",
     )
     http_timeout_s: float = Field(
         default=5.0,

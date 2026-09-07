@@ -193,3 +193,8 @@ def test_p4_hal_requires_complete_calibration(tmp_path) -> None:
             DeviceConfig(motor_transport="p4", lamp_id="TEST", calibration_dir=tmp_path),
             _FakeManager(),
         )
+
+
+def test_default_transport_preserves_legacy_serial_hardware() -> None:
+    """P4 is opt-in; existing S3/USB installations must not change route."""
+    assert DeviceConfig().motor_transport == "serial"

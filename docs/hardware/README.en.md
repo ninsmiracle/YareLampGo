@@ -4,6 +4,15 @@
 
 V2.0 is the only maintained public YareLampGo hardware and mechanical version. V1.0 wiring, structure, and calibration data are no longer the main line and must not be mixed with V2.0.
 
+## Choose a hardware route first
+
+| Route | Firmware target | Boundary |
+| --- | --- | --- |
+| Legacy S3 + standalone C6 display | Firmware repository root and `ESP32_C6_LCD_1_47_UART/` | C6 is the display; S3 synchronizes expressions over UART; keep `motor_transport = "serial"`. |
+| P4 head + C6 Wi-Fi | Firmware repository `ESP32_P4_HEAD/` | C6 is P4's network coprocessor and must not run the display firmware; explicitly set `motor_transport = "p4"`. |
+
+The routes coexist and must not be cross-flashed or cross-wired. See the [P4 wireless head guide](p4-wireless-head.md) for the runtime boundary.
+
 ## Current entry points
 
 | File | Purpose |
@@ -15,6 +24,7 @@ V2.0 is the only maintained public YareLampGo hardware and mechanical version. V
 | [V2.0 STEP structure](../../assets/printable/README.en.md) | Complete STEP AP214 assembly, preview, and usage limits. |
 | [Source manifest](v2/SOURCE_MANIFEST.md) | Original names, SHA-256 values, inspection results, and publication limits. |
 | [Hardware and asset scope](../hardware-and-assets-scope.md) | Licensing and publication boundary. |
+| [P4 wireless head guide](p4-wireless-head.md) | P4 selection, provisioning, wireless motion, and legacy S3/C6 rollback. |
 
 ## Important boundary
 

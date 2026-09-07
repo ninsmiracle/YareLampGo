@@ -1,6 +1,8 @@
 # Manual YareLampGo V2.0 Setup, Flashing, and First Start
 
-This guide covers the complete non-Codex path: install the software, assign five servo IDs, flash the S3 and C6, assemble while unpowered, verify power, calibrate, and start the Web console.
+This guide covers the complete non-Codex path for the **legacy S3 + C6 display + USB motor-bus** hardware: install the software, assign five servo IDs, flash the S3 and C6, assemble while unpowered, verify power, calibrate, and start the Web console.
+
+The P4 head board is a parallel wireless hardware route. Do not reuse this guide's S3/C6 flashing or serial wiring steps for it; see the [P4 wireless head guide](../hardware/p4-wireless-head.md).
 
 Codex users can use the repository's [`$lampgo-setup`](../../skills/lampgo-setup/SKILL.md) instead. It follows the same sequence, inspects the actual environment, performs safe steps, and pauses before hardware writes and first power.
 

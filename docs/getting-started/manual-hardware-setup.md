@@ -1,7 +1,9 @@
 # YareLampGo V2.0 手动安装、烧录与首次启动
 
-本文给不使用 Codex skill 的用户提供完整手动路径：安装软件、给五颗舵机编号、烧录 S3/C6、断电组装、检查供电、校准并启动 Web 控制台。
+本文给不使用 Codex skill 的用户提供 **旧 S3 + C6 显示屏 + USB 舵机总线** 的完整手动路径：安装软件、给五颗舵机编号、烧录 S3/C6、断电组装、检查供电、校准并启动 Web 控制台。
 Windows x64 用户也可以直接按 [Windows 硬件完整流程](windows-hardware-flow.md) 逐步执行。
+
+P4 头部板是并存的无线硬件路线，不应套用本文的 S3/C6 烧录和串口接线步骤；请改看 [P4 无线头部板路线](../hardware/p4-wireless-head.md)。
 
 如果你使用 Codex，可以改用仓库自带的 [`$lampgo-setup`](../../skills/lampgo-setup/SKILL.md)。它执行的仍是同一套流程，只是会读取实际环境、运行安全步骤，并在硬件写入和首次上电前停下来确认。
 

@@ -10,7 +10,7 @@
 # 首次安装/迁移旧配置：`uv run lampgo onboard`
 
 [device]
-motor_transport = "serial"     # serial = 旧 USB 舵机总线；p4 = 新头部板无线执行器
+motor_transport = "serial"     # 默认/旧方案：S3 + C6 + USB 舵机总线；仅 P4 头部板设为 p4
 motor_port = "/dev/ttyUSB0"    # 仅 serial 使用；p4 模式无需电脑连接舵机线
 p4_motion_port = 82             # P4 运动 WebSocket 端口
 p4_connect_timeout_s = 8.0
@@ -71,8 +71,8 @@ web_search_city = ""
 port = ""                      # USB 摄像头索引（0 / 1）；使用 ESP32 摄像头时通常留空
 
 [device_esp32]
-enabled = false                # P4 模式必须为 true；发现同一块板上的相机/音频/灯板/小屏
-preferred_host = ""            # 留空自动发现；也可填 lampgo-p4-XXXX.local 或设备 IP
+enabled = false                # S3 或 P4 无线设备均可启用；P4 模式必须为 true
+preferred_host = ""            # 留空自动发现；可填 lampgo-cam-XXXX.local、lampgo-p4-XXXX.local 或 IP
 jpeg_quality = 10              # ESP32 JPEG 画质，4=最高，63=最低
 framesize = 8                  # ESP32 分辨率枚举；8 = SVGA 800x600
 mic_enabled = false            # 是否启用 ESP32 麦克风音频流

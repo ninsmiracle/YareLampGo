@@ -26,6 +26,17 @@ uv run lampgo run --web --web-port 18790
 LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 ```
 
+## 先选择硬件路线：旧 S3/C6 或新 P4
+
+两条路线同时受支持，P4 不是对旧设备的覆盖升级：
+
+| 路线 | 后端选择 | 小屏与表情资产 | 舵机通道 |
+| --- | --- | --- | --- |
+| 旧 S3 + C6 显示屏 | `device.motor_transport = "serial"`（默认） | 后端 → S3 → C6 | 电脑 USB → Feetech 总线 |
+| P4 头部板 + C6 Wi-Fi | `device.motor_transport = "p4"` | 后端 → P4 LittleFS，P4 同步 LED/LCD | 后端 Wi-Fi → P4 → 灯头舵机 |
+
+后端仅在你显式设置 `motor_transport = "p4"` 时才连接 P4 运动 WebSocket；发现 ESP32 设备本身不会改变旧用户的串口路径。设备的 `platform` 能力标识会让表情上传自动使用 P4 直连或旧 S3→C6 协议。完整选择、烧录和回退规则见 [P4 无线头部板路线](../hardware/p4-wireless-head.md)。
+
 ## 文件位置
 
 ```text
@@ -47,7 +58,7 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 硬件页可以配置：
 
 - `无线接入`：ESP32 设备自动发现或指定 `lampgo-cam-XXXX.local` / IP，调整画面尺寸、JPEG 画质和 HTTP 超时。
-- `本机硬件`：电机串口 `device.motor_port`、本地摄像头 `camera.port`、本地麦克风 `voice.mic_device`。
+- `本机硬件`：选择 `device.motor_transport`（旧 USB 串口或 P4 无线）、电机串口 `device.motor_port`、本地摄像头 `camera.port`、本地麦克风 `voice.mic_device`。
 - `高级`：设备标识 `device.lamp_id`、角度单位 `device.use_degrees` 和堵转保护 `device.max_torque_pct`。
 - `运动 / 安全`：默认动作速度、动作风格、待机随机摆动、安全速度和安全加速度。
 
