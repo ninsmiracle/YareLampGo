@@ -742,12 +742,13 @@ class Esp32DeviceManager:
         params: dict[str, Any] | None = None,
         content_type: str = "application/octet-stream",
     ) -> tuple[int, dict[str, Any], str]:
-        """Upload one device asset without buffering it in the P4 HTTP server.
+        """Stream an asset to the P4 without retaining its complete body in RAM.
 
-        Arduino ``WebServer`` exposes its bounded upload callback for multipart
-        file parts.  Sending a raw octet stream makes it fall back to the
-        generic request parser, which attempts to allocate the whole clip in
-        RAM.  Expression clips deliberately exceed that safe heap budget.
+        Arduino ``WebServer`` invokes a bounded raw-body callback while it
+        receives an octet stream.  Query parameters are not available to that
+        callback yet, so the small authentication and asset-routing fields are
+        duplicated as request headers.  The query stays for API compatibility
+        with older device firmwares.
         """
         dev = self._pick_active()
         if dev is None or self._http is None:
@@ -757,10 +758,20 @@ class Esp32DeviceManager:
             self.mark_active_healthy()
             try:
                 upload_timeout_s = max(float(self._config.http_timeout_s), min(180.0, 30.0 + len(payload) / 4_000.0))
+                request_params = params or {}
+                headers = {"Content-Type": content_type}
+                header_fields = {
+                    "X-Lampgo-Owner": request_params.get("owner_id"),
+                    "X-Lampgo-Token": request_params.get("pairing_secret"),
+                    "X-Lampgo-Clip-Id": request_params.get("clip_id"),
+                    "X-Lampgo-Effect-Id": request_params.get("effect_id"),
+                }
+                headers.update({key: str(value) for key, value in header_fields.items() if value})
                 resp = await self._http.post(
                     f"{dev.base_url}{path}",
-                    params=params or {},
-                    files={"asset": ("lampgo-asset.bin", payload, content_type)},
+                    params=request_params,
+                    content=payload,
+                    headers=headers,
                     timeout=upload_timeout_s,
                 )
                 if resp.status_code < 400:
