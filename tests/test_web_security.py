@@ -268,9 +268,11 @@ def test_livekit_token_allows_only_one_active_call(monkeypatch, tmp_path):
                 "user_identity": "user-a",
                 "voice_agent": "lampgo-jarvis",
                 "client_call_id": "call-a",
+                "audio_source": "esp32",
             },
         )
         first_room = first.json()["result"]["roomName"]
+        assert gateway._livekit_active_rooms[first_room]["audio_source"] == "esp32"
         gateway._livekit_token_gate_until = 0.0
         second = client.post(
             "/api/livekit/token",

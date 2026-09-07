@@ -1499,12 +1499,16 @@ class WebGateway:
             )
         client_call_id = str(body.get("client_call_id"))
         reason = str(body.get("reason") or "")
+        audio_source = str(body.get("audio_source") or "browser").lower()
+        if audio_source not in {"browser", "esp32"}:
+            audio_source = "browser"
         logger.info(
             "web.livekit_token_requested",
             user_identity=user_identity,
             voice_agent=voice_agent,
             client_call_id=client_call_id,
             reason=reason,
+            audio_source=audio_source,
         )
         async with self._livekit_token_lock:
             now = time.monotonic()
@@ -1524,6 +1528,7 @@ class WebGateway:
                     voice_agent=voice_agent,
                     client_call_id=client_call_id,
                     reason=reason,
+                    audio_source=audio_source,
                 )
         except Exception as exc:
             async with self._livekit_token_lock:
@@ -1540,6 +1545,7 @@ class WebGateway:
         voice_agent: str,
         client_call_id: str,
         reason: str,
+        audio_source: str,
     ) -> JSONResponse:
         from lampgo.voice.agent_sdk import AGENT_SDK_PORT
 
@@ -1610,6 +1616,7 @@ class WebGateway:
             room_name: {
                 "client_call_id": client_call_id,
                 "reason": reason,
+                "audio_source": audio_source,
                 "user_identity": user_identity,
                 "created_at": time.monotonic(),
             }
@@ -1619,6 +1626,7 @@ class WebGateway:
             room=room_name,
             client_call_id=client_call_id,
             reason=reason,
+            audio_source=audio_source,
         )
         return JSONResponse({"ok": True, "result": result})
 
@@ -4330,7 +4338,7 @@ class WebGateway:
 
     async def _relay_esp32_audio_to_browser(self, ws: WebSocket) -> None:
         """Forward ESP32 PCM16 frames directly to one browser WebSocket client."""
-        from lampgo.device.audio_stream import build_ws_audio_url
+        from lampgo.device.audio_stream import build_ws_audio_url, send_stream_auth
 
         claim_owner = getattr(self.server.esp32, "claim_owner", None) if self.server.esp32 else None
         if callable(claim_owner):
@@ -4377,6 +4385,9 @@ class WebGateway:
         frames = 0
         bytes_sent = 0
         idle_timeouts = 0
+        last_report_at = time.monotonic()
+        last_report_frames = 0
+        last_report_bytes = 0
         idle_timeout_s = 5.0
         reconnect_delay_s = 1.0
         safe_url = redact_ws_owner_token(url)
@@ -4399,9 +4410,10 @@ class WebGateway:
                         max_size=None,
                         proxy=None,
                     ) as esp32_ws:
+                        await send_stream_auth(esp32_ws, url)
                         self.server.esp32.mark_active_healthy()
                         safe_url = redact_ws_owner_token(url)
-                        logger.info("web.esp32_audio_relay_connected", url=safe_url)
+                        logger.info("web.esp32_audio_relay_authenticated", url=safe_url)
                         try:
                             await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus", "data": {"state": "connected", "url": safe_url}})
                         except Exception:
@@ -4428,8 +4440,24 @@ class WebGateway:
                             await ws.send_bytes(data)
                             frames += 1
                             bytes_sent += len(data)
-                            if frames == 1 or frames % 100 == 0:
-                                logger.info("web.esp32_audio_relay_forwarded", frames=frames, bytes=bytes_sent)
+                            if frames == 1:
+                                logger.info(
+                                    "web.esp32_audio_relay_first_pcm",
+                                    frame_bytes=len(data),
+                                    sample_rate=16000,
+                                )
+                            now = time.monotonic()
+                            if now - last_report_at >= 1.0:
+                                logger.info(
+                                    "web.esp32_audio_relay_rate",
+                                    frames=frames,
+                                    bytes=bytes_sent,
+                                    frames_per_s=frames - last_report_frames,
+                                    bytes_per_s=bytes_sent - last_report_bytes,
+                                )
+                                last_report_at = now
+                                last_report_frames = frames
+                                last_report_bytes = bytes_sent
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

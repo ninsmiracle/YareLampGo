@@ -7341,6 +7341,7 @@
             voice_agent: "lampgo-jarvis",
             client_call_id: callAttemptId,
             reason,
+            audio_source: useEsp32 ? "esp32" : "browser",
           }),
         });
         const body = await resp.json();
