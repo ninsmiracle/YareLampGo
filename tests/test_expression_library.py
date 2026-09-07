@@ -133,12 +133,18 @@ def test_expression_play_forwards_a_six_second_eye_only_scene(monkeypatch, tmp_p
     gateway = _gateway(monkeypatch, tmp_path)
     _create_eye("long_eyes")
     sent: list[tuple[str, dict]] = []
+    uploads: list[tuple[str, bytes]] = []
 
     async def fake_proxy_post(path: str, payload: dict):
         sent.append((path, payload))
         return 200, {"ok": True}, "application/json"
 
+    async def fake_proxy_post_bytes(path: str, payload: bytes, **_kwargs):
+        uploads.append((path, payload))
+        return 200, {"ok": True, "display_confirmed": True}, "application/json"
+
     monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
     with TestClient(gateway.app) as client:
         played = client.post(
             "/api/expressions/play",
@@ -146,6 +152,7 @@ def test_expression_play_forwards_a_six_second_eye_only_scene(monkeypatch, tmp_p
         )
 
     assert played.status_code == 200
+    assert uploads[0][0] == "/device/expression-clips/upload"
     assert len(sent) == 1
     path, payload = sent[0]
     assert path == "/device/expressions/play"
@@ -224,12 +231,21 @@ def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monke
     _create_eye("focused_eyes")
     _custom_effect("soft_mouth")
     sent: list[tuple[str, dict]] = []
+    uploads: list[tuple[str, bytes]] = []
 
     async def fake_proxy_post(path: str, payload: dict):
         sent.append((path, payload))
         return 200, {"ok": True}, "application/json"
 
+    async def fake_proxy_post_bytes(path: str, payload: bytes, **_kwargs):
+        uploads.append((path, payload))
+        response = {"ok": True}
+        if path == "/device/expression-clips/upload":
+            response["display_confirmed"] = True
+        return 200, response, "application/json"
+
     monkeypatch.setattr(gateway.server.esp32, "proxy_post", fake_proxy_post)
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post_bytes", fake_proxy_post_bytes)
     composition = {
         "eye_clip_id": "focused_eyes",
         "led_effect_id": "soft_mouth",
@@ -240,6 +256,7 @@ def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monke
     with TestClient(gateway.app) as client:
         played = client.post("/api/expressions/play", json=composition)
         assert played.status_code == 200
+        assert [path for path, _payload in uploads] == ["/device/expression-clips/upload"]
         assert list_expression_presets() == []
 
         rejected = client.post("/api/expression-presets", json={"preset_id": "focus", **composition})

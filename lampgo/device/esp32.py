@@ -742,6 +742,13 @@ class Esp32DeviceManager:
         params: dict[str, Any] | None = None,
         content_type: str = "application/octet-stream",
     ) -> tuple[int, dict[str, Any], str]:
+        """Upload one device asset without buffering it in the P4 HTTP server.
+
+        Arduino ``WebServer`` exposes its bounded upload callback for multipart
+        file parts.  Sending a raw octet stream makes it fall back to the
+        generic request parser, which attempts to allocate the whole clip in
+        RAM.  Expression clips deliberately exceed that safe heap budget.
+        """
         dev = self._pick_active()
         if dev is None or self._http is None:
             return 503, {"ok": False, "error": "no_device"}, "application/json"
@@ -753,8 +760,7 @@ class Esp32DeviceManager:
                 resp = await self._http.post(
                     f"{dev.base_url}{path}",
                     params=params or {},
-                    content=payload,
-                    headers={"Content-Type": content_type},
+                    files={"asset": ("lampgo-asset.bin", payload, content_type)},
                     timeout=upload_timeout_s,
                 )
                 if resp.status_code < 400:

@@ -2974,7 +2974,19 @@ class WebGateway:
         display_confirmed = isinstance(last_body, dict) and (
             last_body.get("display_confirmed") is True or last_body.get("c6_confirmed") is True
         )
+        log_fields = {
+            "clip_id": clip_id,
+            "device_status": status,
+            "device_ok": last_body.get("ok") if isinstance(last_body, dict) else None,
+            "display_confirmed": display_confirmed,
+            "device_error": (
+                str(last_body.get("error") or "").strip()
+                if isinstance(last_body, dict)
+                else ""
+            ),
+        }
         if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not display_confirmed:
+            logger.warning("expression_clip.p4_upload_failed", **log_fields)
             device = self.server.esp32.get_status().get("device")
             update_expression_clip_sync(clip_id, status="sync_failed", device=device)
             device_error = (
@@ -2999,6 +3011,7 @@ class WebGateway:
                 },
             }
 
+        logger.info("expression_clip.p4_upload_succeeded", **log_fields)
         device = self.server.esp32.get_status().get("device")
         manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
         return 200, {
