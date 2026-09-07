@@ -2,8 +2,8 @@
 
 Pipeline:
   [mic] → VAD → PCM → base64 WAV
-  → server.handle_request(cmd="audio") → Volcengine ASR → agent loop
-  → response text → VolcengineTTS / EdgeTTS → speaker
+  → server.handle_request(cmd="audio") → MiMo ASR → agent loop
+  → response text → MiMo TTS → speaker
 """
 
 from __future__ import annotations
@@ -17,12 +17,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from lampgo.voice.audio import AudioCapture, AudioPlayback
-from lampgo.voice.tts import (
-    DEFAULT_VOLCENGINE_TTS_VOICE,
-    TTS_SAMPLE_RATE,
-    EdgeTTS,
-    VolcengineTTS,
-)
+from lampgo.voice.mimo import build_mimo_speech_settings
+from lampgo.voice.tts import MiMoTTS, TTS_SAMPLE_RATE
 from lampgo.voice.vad import EnergyVAD
 
 if TYPE_CHECKING:
@@ -41,19 +37,7 @@ class VoiceLoop:
         self._server = server
         cfg = server.config
 
-        provider = (cfg.voice.tts_provider or "").strip().lower()
-        has_volcengine_credentials = bool(cfg.voice.volcengine_app_id and cfg.voice.volcengine_access_token)
-        if provider == "edge-tts" or not has_volcengine_credentials:
-            self._tts: VolcengineTTS | EdgeTTS = EdgeTTS(voice=_edge_voice_or_default(cfg.voice.tts_voice))
-            self._stream_tts = False
-        else:
-            self._tts = VolcengineTTS(
-                app_id=cfg.voice.volcengine_app_id,
-                access_token=cfg.voice.volcengine_access_token,
-                voice=cfg.voice.tts_voice or DEFAULT_VOLCENGINE_TTS_VOICE,
-                model=cfg.voice.tts_model,
-            )
-            self._stream_tts = True
+        self._tts = MiMoTTS(build_mimo_speech_settings(cfg.llm, cfg.voice))
 
         self._vad = EnergyVAD()
         self._capture = self._build_capture(cfg)
@@ -88,7 +72,7 @@ class VoiceLoop:
     async def run(self) -> None:
         self._capture.start()
         self._running = True
-        logger.info("voice.loop_started", tts=type(self._tts).__name__, stream_tts=self._stream_tts)
+        logger.info("voice.loop_started", tts=type(self._tts).__name__, stream_tts=True)
 
         try:
             while self._running:
@@ -130,18 +114,15 @@ class VoiceLoop:
         await self._speak(reply)
 
     async def _speak(self, text: str) -> None:
-        if self._stream_tts and isinstance(self._tts, VolcengineTTS):
-            player = AudioPlayback(sample_rate=TTS_SAMPLE_RATE)
-            player.start()
-            try:
-                async for pcm_chunk in self._tts.stream_pcm(text):
-                    player.feed(pcm_chunk)
-                player.finish()
-                await player.await_done(timeout=30.0)
-            finally:
-                player.stop()
-        else:
-            await self._tts.speak(text)
+        player = AudioPlayback(sample_rate=TTS_SAMPLE_RATE)
+        player.start()
+        try:
+            async for pcm_chunk in self._tts.stream_pcm(text):
+                player.feed(pcm_chunk)
+            player.finish()
+            await player.await_done(timeout=30.0)
+        finally:
+            player.stop()
 
     async def _collect_speech(self) -> bytes | None:
         buf = bytearray()
@@ -191,8 +172,3 @@ def _pcm_to_wav_b64(pcm: bytes, sample_rate: int) -> str:
         b"data", data_len,
     )
     return base64.b64encode(header + pcm).decode()
-
-
-def _edge_voice_or_default(voice: str) -> str:
-    voice = (voice or "").strip()
-    return voice if "-" in voice and voice.endswith("Neural") else "zh-CN-XiaoxiaoNeural"

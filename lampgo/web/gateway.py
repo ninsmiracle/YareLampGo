@@ -1864,6 +1864,8 @@ class WebGateway:
     _VOICE_HOT_RELOAD_FIELDS: frozenset[str] = frozenset(
         {
             "voice.wake_word",
+            "voice.stt_provider",
+            "voice.stt_model",
             "voice.tts_provider",
             "voice.tts_model",
             "voice.tts_voice",
@@ -1871,8 +1873,6 @@ class WebGateway:
             "voice.livekit_allow_interruptions",
             "voice.echo_gate_hangover_ms",
             "voice.echo_text_filter_enabled",
-            "voice.volcengine_app_id",
-            "voice.volcengine_access_token",
         }
     )
 
@@ -1902,8 +1902,6 @@ class WebGateway:
             "voice.echo_gate_hangover_ms",
             "voice.echo_text_filter_enabled",
             "voice.silence_timeout_s",
-            "voice.volcengine_app_id",
-            "voice.volcengine_access_token",
         ),
         "motion": (
             "motion.tick_rate_hz",
@@ -2157,9 +2155,9 @@ class WebGateway:
             current = getattr(obj, tail, None)
             coerced = _coerce_value(current, value)
             if head == "voice" and tail == "tts_voice":
-                from lampgo.voice.tts import _volcengine_voice_or_default
+                from lampgo.voice.mimo import mimo_tts_voice_or_default
 
-                coerced = _volcengine_voice_or_default(str(coerced or ""))
+                coerced = mimo_tts_voice_or_default(str(coerced or ""))
             setattr(obj, tail, coerced)
 
     async def api_config_device(self, request: Request) -> JSONResponse:
@@ -2188,9 +2186,12 @@ class WebGateway:
 
     async def api_config_voice(self, request: Request) -> JSONResponse:
         result = await self._save_section(request, "voice")
+        if result.status_code != 200:
+            return result
         try:
             from lampgo.voice.stt import build_stt
             self.server._stt = build_stt(self.server.config)
+            await self.server.restart_agent_sdk()
         except Exception:
             logger.exception("web.stt_rebuild_failed")
         return result
@@ -2582,6 +2583,7 @@ class WebGateway:
 
         try:
             self.server.reload_llm_client()
+            await self.server.restart_agent_sdk()
         except Exception:
             logger.exception("web.reload_llm_failed")
 

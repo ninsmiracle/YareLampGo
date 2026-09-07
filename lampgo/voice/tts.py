@@ -1,4 +1,4 @@
-"""TTS — Text-to-Speech via Volcengine streaming TTS or edge-tts fallback."""
+"""TTS primitives, with active LampGo routes backed by MiMo streaming TTS."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import tempfile
 import uuid
 import wave
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from pathlib import Path
 
@@ -448,6 +448,34 @@ class EdgeTTS:
                 pass
 
 
+class MiMoTTS:
+    """MiMo PCM16 TTS backed by LampGo's configured LLM credential."""
+
+    def __init__(self, settings) -> None:
+        self._settings = settings
+        self._sample_rate = TTS_SAMPLE_RATE
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
+        from lampgo.voice.mimo import MiMoAPIError, stream_mimo_tts_pcm
+
+        try:
+            async for pcm in stream_mimo_tts_pcm(self._settings, text):
+                yield pcm
+        except MiMoAPIError as exc:
+            logger.warning(
+                "tts.mimo_request_failed",
+                model=self._settings.tts_model,
+                status_code=exc.status_code,
+                request_id=exc.request_id,
+                error=str(exc),
+            )
+            raise
+
+
 async def play_audio_file(path: Path) -> None:
     """Play an audio file using system tools (ffplay, mpv, or aplay fallback)."""
     for cmd in ["ffplay -nodisp -autoexit -loglevel quiet", "mpv --no-terminal"]:
@@ -468,77 +496,53 @@ async def play_audio_file(path: Path) -> None:
 
 async def iter_synthesize_for_web(
     text: str,
-    app_id: str = "",
-    access_token: str = "",
+    *,
+    llm=None,
+    voice_config=None,
     voice: str = "",
-    provider: str = "",
-    model: str = "",
 ) -> AsyncIterator[tuple[str, str, int]]:
     """Yield TTS audio chunks suitable for browser playback.
 
-    Yields ``(base64_audio, format, sample_rate)``. Volcengine emits raw
-    ``pcm16`` chunks progressively; edge-tts emits one mp3 buffer.
+    Yields ``(base64_audio, format, sample_rate)``.  MiMo emits raw PCM16
+    chunks progressively on the same base URL and key as the configured LLM.
     """
     if not text.strip():
         return
 
-    chosen = _choose_provider(provider, app_id, access_token)
+    if llm is None or voice_config is None:
+        raise ValueError("MiMo web TTS requires the active LLM and voice configuration")
 
-    if chosen == "volcengine":
-        tts = VolcengineTTS(
-            app_id=app_id,
-            access_token=access_token,
-            voice=voice or DEFAULT_VOLCENGINE_TTS_VOICE,
-            model=model,
-        )
-        yielded = False
-        async for pcm in tts.stream_pcm(text):
-            if not pcm:
-                continue
-            yielded = True
+    from lampgo.voice.mimo import build_mimo_speech_settings
+
+    settings = build_mimo_speech_settings(llm, voice_config)
+    if voice.strip():
+        settings = replace(settings, tts_voice=voice.strip())
+    tts = MiMoTTS(settings)
+    async for pcm in tts.stream_pcm(text):
+        if pcm:
             yield base64.b64encode(pcm).decode("ascii"), "pcm16", tts.sample_rate
-        if yielded:
-            return
-
-        logger.warning("tts.web_volcengine_empty_falling_back_edge")
-        chosen = "edge-tts"
-
-    if chosen == "edge-tts":
-        try:
-            edge_voice = _edge_voice_or_default(voice)
-            edge = EdgeTTS(voice=edge_voice)
-            path = await edge.synthesize(text)
-            if path and path.exists():
-                mp3_bytes = path.read_bytes()
-                path.unlink(missing_ok=True)
-                yield base64.b64encode(mp3_bytes).decode("ascii"), "mp3", 0
-        except Exception:
-            logger.exception("tts.web_edge_synthesize_failed")
 
 
 async def synthesize_for_web(
     text: str,
-    app_id: str = "",
-    access_token: str = "",
+    *,
+    llm=None,
+    voice_config=None,
     voice: str = "",
-    provider: str = "",
-    model: str = "",
 ) -> tuple[str, str] | None:
     """Compatibility wrapper that collects web TTS into a single buffer.
 
-    New playback paths should use :func:`iter_synthesize_for_web` so Volcengine
-    audio can be played while it is still being synthesized.
+    New playback paths should use :func:`iter_synthesize_for_web` so MiMo audio
+    can be played while it is still being synthesized.
     """
     chunks: list[bytes] = []
     final_format = ""
     final_rate = 0
     async for audio_b64, fmt, sample_rate in iter_synthesize_for_web(
         text,
-        app_id=app_id,
-        access_token=access_token,
+        llm=llm,
+        voice_config=voice_config,
         voice=voice,
-        provider=provider,
-        model=model,
     ):
         chunks.append(base64.b64decode(audio_b64))
         final_format = fmt
@@ -552,6 +556,7 @@ async def synthesize_for_web(
 
 
 def _choose_provider(provider: str, app_id: str, access_token: str) -> str:
+    """Legacy helper retained for old imports; active routes always use MiMo."""
     chosen = (provider or "").strip().lower()
     if chosen in {"", "auto"}:
         return "volcengine" if app_id and access_token else "edge-tts"

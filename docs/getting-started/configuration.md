@@ -36,7 +36,7 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 └── <persona>.md         # 当前人设文件
 ```
 
-`~/.lampgo/config.toml` 和 `~/.lampgo/credentials.json` 都是本机私有文件，不要提交到仓库。火山引擎 App ID / Access Token 目前由 Web 设置页写入本地配置文件，也应按敏感信息处理。
+`~/.lampgo/config.toml` 和 `~/.lampgo/credentials.json` 都是本机私有文件，不要提交到仓库。MiMo API Key 由 LLM 设置页写入本地凭据文件，也应按敏感信息处理。
 
 ## Web 端配置入口
 
@@ -57,9 +57,9 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 模型页包含两类软件配置：
 
 - `LLM 模型`：Provider、Base URL、API Key、主模型、快速模型、消息格式、上下文窗口、输出 token、历史轮数、温度和超时。
-- `声音和唤醒`：火山引擎 TTS / ASR、Edge TTS 回退、火山 App ID / Access Token、唤醒词、通话模式和回声保护。
+- `声音和唤醒`：MiMo TTS / ASR（复用 LLM Base URL / API Key）、唤醒词、通话模式和回声保护。
 
-LLM 保存后下一条消息即可生效；火山引擎和语音相关字段保存后会重建语音链路。Web 端口这类服务监听配置保存后需要重启 `lampgo run --web`。
+LLM 保存后下一条消息即可生效；MiMo 语音和语音相关字段保存后会重建语音链路。Web 端口这类服务监听配置保存后需要重启 `lampgo run --web`。
 
 ## 配置 LLM
 
@@ -100,42 +100,29 @@ export LAMPGO_LLM_MODEL="mimo-v2.5"
 export LAMPGO_LLM_API_BASE="https://api.xiaomimimo.com/v1"
 ```
 
-## 配置火山引擎语音
+## 配置 MiMo 语音
 
-火山引擎用于语音识别和语音播报：
+MiMo 同时用于语音识别和语音播报，并复用 LLM 的 `api_base` 与 API Key：
 
-- `stt_provider = "volcengine"`：语音转文字，默认模型为 `bigmodel`。
-- `tts_provider = "volcengine"`：文字转语音，需要 App ID / Access Token。
-- 未配置火山凭证或改选 `edge-tts` 时，聊天播报会回退到 Edge TTS。
+- `stt_provider = "mimo"`，默认模型 `mimo-v2.5-asr`。
+- `tts_provider = "mimo"`，默认模型 `mimo-v2.5-tts`、音色 `mimo_default`。
+- 本地网页播报、设备侧唤醒语音循环与 LiveKit 通话 Agent 使用同一份 MiMo 语音设置。
 
-开通服务前先准备火山引擎账号。可参考 [豆包语音快速入门](https://www.volcengine.com/docs/6561/163043?lang=zh) 完成账号注册、实名认证、创建应用和服务开通；如果找不到 App ID / Access Token，可参考 [豆包语音控制台使用 FAQ](https://www.volcengine.com/docs/6561/196768?lang=zh) 查看参数位置。YareLampGo 当前需要填写的是旧版控制台兼容参数 `App ID` 和 `Access Token`。
+配置步骤：
 
-开通时建议确认应用已启用这些能力：
-
-- [大模型录音文件极速版识别](https://www.volcengine.com/docs/6561/1631584)：`volc.bigasr.auc_turbo`。用于 Web 录音、唤醒链路等短音频识别，接口会一次请求直接返回结果。
-- [大模型流式语音识别](https://www.volcengine.com/docs/6561/1354869?lang=zh)：`volc.bigasr.sauc.duration`。用于实时通话 / LiveKit 语音链路。
-- [豆包语音合成大模型 2.0](https://www.volcengine.com/docs/6561/1329505?lang=zh)：`seed-tts-2.0`。用于默认音色 `zh_female_vv_uranus_bigtts` 的台灯播报。
-
-Web 配置步骤：
-
-1. 打开 `设置 -> 模型 -> 声音和唤醒`。
-2. 将 `播报服务` 设为 `火山引擎 TTS（App ID / Token）`。
-3. 填写 `火山引擎 App ID` 和 `火山引擎 Access Token`。
-4. 首次使用可保持默认音色 `zh_female_vv_uranus_bigtts`。
-5. 如需调整音色或模型，展开 `高级：火山 TTS 音色和模型`。`TTS Model` 可选 `seed-tts-2.0-standard` / `seed-tts-2.0-expressive`；不确定时保持默认空值。
-6. 点击 `保存`，然后在聊天或通话里测试语音播报。
+1. 在 Web UI 的 `设置 → 大模型` 选择 MiMo 并保存 Base URL、API Key。
+2. 在 `设置 → 声音和唤醒` 保持 `MiMo V2.5 TTS（复用 LLM 配置）`。
+3. 保存任一 LLM 或声音设置后，后台会停止旧的语音 Agent；下一次通话会以新配置启动。
 
 对应配置大致如下：
 
 ```toml
 [voice]
-stt_provider = "volcengine"
-stt_model = "bigmodel"
-tts_provider = "volcengine"
-tts_model = ""
-tts_voice = "zh_female_vv_uranus_bigtts"
-volcengine_app_id = ""
-volcengine_access_token = ""
+stt_provider = "mimo"
+stt_model = "mimo-v2.5-asr"
+tts_provider = "mimo"
+tts_model = "mimo-v2.5-tts"
+tts_voice = "mimo_default"
 wake_word = ""
 call_mode = "stable"
 echo_gate_hangover_ms = 1000
@@ -247,6 +234,6 @@ sed -n '1,200p' lampgo.toml.example
 
 ## 开源发布注意事项
 
-- 不要提交 `~/.lampgo/config.toml`、`~/.lampgo/credentials.json`、`.env`、API key、火山引擎 token 或插件 token。
+- 不要提交 `~/.lampgo/config.toml`、`~/.lampgo/credentials.json`、`.env`、API key 或插件 token。
 - 公开 README 中尽量使用通用 provider 描述，例如 OpenAI-compatible、Anthropic-compatible、local。
 - 如果项目依赖私有包源，请在发布前提供公开安装路径或将相关能力标记为可选。

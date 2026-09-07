@@ -10144,30 +10144,21 @@
     sel.value = keep || "";
   }
 
-  // Voices offered per TTS provider. Volcengine supports many more voices; we
-  // surface voices that have been verified with the default Seed-TTS 2 grant,
-  // plus keep custom stored values.
+  // MiMo voices are intentionally listed here rather than coupled to a second
+  // credential form. Unknown stored values remain selectable as custom IDs.
   const TTS_VOICE_CUSTOM_VALUE = "__custom__";
   const TTS_VOICE_OPTIONS = {
-    volcengine: [
-      { value: "zh_male_lubanqihao_uranus_bigtts", label: "搞怪（鲁班七号）：zh_male_lubanqihao_uranus_bigtts" },
-      { value: "zh_male_liangsangmengzai_uranus_bigtts", label: "海绵（亮嗓萌仔）：zh_male_liangsangmengzai_uranus_bigtts" },
-      { value: "zh_female_jitangnv_uranus_bigtts", label: "电台：zh_female_jitangnv_uranus_bigtts" },
-      { value: "zh_female_vv_uranus_bigtts", label: "vivi：zh_female_vv_uranus_bigtts（默认）" },
-      { value: "zh_male_taocheng_uranus_bigtts", label: "小天：zh_male_taocheng_uranus_bigtts" },
-      { value: "saturn_zh_female_qingyingduoduo_cs_tob", label: "朵朵：saturn_zh_female_qingyingduoduo_cs_tob" },
-      { value: "zh_male_wennuanahu_uranus_bigtts", label: "阿虎：zh_male_wennuanahu_uranus_bigtts" },
+    mimo: [
+      { value: "mimo_default", label: "MiMo 默认音色：mimo_default" },
+      { value: "冰糖", label: "冰糖" },
+      { value: "茉莉", label: "茉莉" },
+      { value: "苏打", label: "苏打" },
+      { value: "白桦", label: "白桦" },
+      { value: "Mia", label: "Mia" },
+      { value: "Chloe", label: "Chloe" },
+      { value: "Milo", label: "Milo" },
+      { value: "Dean", label: "Dean" },
       { value: TTS_VOICE_CUSTOM_VALUE, label: "自定义…" },
-    ],
-    "edge-tts": [
-      { value: "zh-CN-XiaoxiaoNeural", label: "zh-CN-XiaoxiaoNeural（晓晓 · 中文女声）" },
-      { value: "zh-CN-YunxiNeural", label: "zh-CN-YunxiNeural（云希 · 中文男声，年轻）" },
-      { value: "zh-CN-XiaoyiNeural", label: "zh-CN-XiaoyiNeural（晓伊 · 中文女声）" },
-      { value: "zh-CN-YunjianNeural", label: "zh-CN-YunjianNeural（云健 · 中文男声）" },
-      { value: "zh-CN-YunyangNeural", label: "zh-CN-YunyangNeural（云扬 · 中文男声，播音）" },
-      { value: "zh-CN-XiaomengNeural", label: "zh-CN-XiaomengNeural（晓梦 · 中文女声）" },
-      { value: "en-US-JennyNeural", label: "en-US-JennyNeural（Jenny · 英文女声）" },
-      { value: "en-US-GuyNeural", label: "en-US-GuyNeural（Guy · 英文男声）" },
     ],
   };
 
@@ -10297,13 +10288,11 @@
     const modelInput = document.querySelector('[data-cfg-input="voice.tts_model"]');
     const fieldWrap = document.querySelector('[data-cfg-field="voice.tts_model"]');
     if (!providerSel || !modelInput) return;
-    if (!providerSel.value && providerSel.querySelector('option[value="volcengine"]')) {
-      providerSel.value = "volcengine";
+    if (!providerSel.value && providerSel.querySelector('option[value="mimo"]')) {
+      providerSel.value = "mimo";
     }
-    const provider = String(providerSel.value || "").toLowerCase();
-    const isVolcengine = provider === "volcengine" || provider === "volc";
-    modelInput.disabled = !isVolcengine;
-    if (fieldWrap) fieldWrap.classList.toggle("is-disabled", !isVolcengine);
+    modelInput.disabled = false;
+    if (fieldWrap) fieldWrap.classList.remove("is-disabled");
   }
 
   function syncTtsVoiceCustomInput() {
@@ -10341,8 +10330,7 @@
     const voiceSel = document.querySelector("[data-cfg-tts-voice]");
     const customInput = document.querySelector("[data-cfg-tts-voice-custom]");
     if (!voiceSel) return;
-    let provider = (providerSel && providerSel.value) || "volcengine";
-    if (provider === "mimo") provider = "volcengine";
+    const provider = (providerSel && providerSel.value) || "mimo";
     const options = TTS_VOICE_OPTIONS[provider] || [];
     const keep = desiredValue !== undefined ? desiredValue : voiceSel.value;
     voiceSel.innerHTML = "";

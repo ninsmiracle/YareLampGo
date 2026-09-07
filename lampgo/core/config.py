@@ -445,17 +445,14 @@ class DeviceEsp32Config(BaseModel):
 class VoiceConfig(BaseModel):
     """Voice / TTS / STT configuration."""
 
-    stt_provider: str = Field(default="volcengine", description="STT provider: volcengine")
-    stt_model: str = Field(default="bigmodel", description="Volcengine ASR model name")
-    tts_provider: str = Field(default="volcengine", description="TTS provider: volcengine, edge-tts")
+    stt_provider: str = Field(default="mimo", description="STT provider: MiMo (reuses LLM credential)")
+    stt_model: str = Field(default="mimo-v2.5-asr", description="MiMo ASR model name")
+    tts_provider: str = Field(default="mimo", description="TTS provider: MiMo (reuses LLM credential)")
     tts_model: str = Field(
-        default="",
-        description=(
-            "Optional Volcengine TTS model id (e.g. seed-tts-2.0-standard). "
-            "Ignored by edge-tts."
-        ),
+        default="mimo-v2.5-tts",
+        description="MiMo TTS model name.",
     )
-    tts_voice: str = Field(default="zh_female_vv_uranus_bigtts", description="TTS voice identifier")
+    tts_voice: str = Field(default="mimo_default", description="MiMo TTS voice identifier")
     tts_style_prompt: str = Field(default="", description="Reserved TTS style instruction")
     chat_model: str = Field(default="mimo-v2-pro", description="LLM model for voice chat streaming responses")
     mic_device: str = Field(default="", description="Microphone device index or name (empty = system default)")
@@ -499,10 +496,10 @@ class VoiceConfig(BaseModel):
         le=300,
         description="Seconds of silence before ending a conversation",
     )
-    volcengine_app_id: str = Field(default="", description="Volcengine app ID for ASR/TTS")
-    volcengine_access_token: str = Field(default="", description="Volcengine access token for ASR/TTS")
+    volcengine_app_id: str = Field(default="", description="Deprecated legacy voice field; ignored by MiMo")
+    volcengine_access_token: str = Field(default="", description="Deprecated legacy voice field; ignored by MiMo")
     livekit_tts_voice: str = Field(
-        default="zh_female_vv_uranus_bigtts",
+        default="mimo_default",
         description="Deprecated compatibility field; LiveKit conversations use tts_voice.",
     )
 
@@ -512,9 +509,11 @@ class VoiceConfig(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip().lower()
-        if s in {"mimo", "mimo-tts", "mimo-stt"}:
-            return "volcengine"
-        return s
+        # All active speech paths now use MiMo.  Normalize old provider names
+        # so persisted configs cannot route a new call back to legacy services.
+        if s in {"", "mimo", "mimo-tts", "mimo-stt", "volc", "volcano", "huoshan", "volcengine", "volcengine-tts", "edge-tts"}:
+            return "mimo"
+        return "mimo"
 
     @field_validator("call_mode", mode="before")
     @classmethod
@@ -551,9 +550,9 @@ class VoiceConfig(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip()
-        if s in {"mimo-v2.5", "mimo-v2-omni"}:
-            return "bigmodel"
-        return s
+        from lampgo.voice.mimo import mimo_asr_model_or_default
+
+        return mimo_asr_model_or_default(s)
 
     @field_validator("tts_model", mode="before")
     @classmethod
@@ -561,21 +560,18 @@ class VoiceConfig(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip()
-        if s in {"mimo-v2.5-tts", "mimo-v2-tts"}:
-            return ""
-        return s
+        from lampgo.voice.mimo import mimo_tts_model_or_default
+
+        return mimo_tts_model_or_default(s)
 
     @field_validator("tts_voice", "livekit_tts_voice", mode="before")
     @classmethod
     def _normalize_legacy_tts_voice(cls, v: Any) -> Any:
         if not isinstance(v, str):
             return v
-        from lampgo.voice.tts import _volcengine_voice_or_default
+        from lampgo.voice.mimo import mimo_tts_voice_or_default
 
-        s = v.strip()
-        if s == "BV700_streaming":
-            return "zh_female_vv_uranus_bigtts"
-        return _volcengine_voice_or_default(s)
+        return mimo_tts_voice_or_default(v)
 
     @field_validator(
         "livekit_url",

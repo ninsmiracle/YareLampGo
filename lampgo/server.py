@@ -92,7 +92,7 @@ from lampgo.skills.loader import (
 from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.registry import SkillRegistry
 from lampgo.voice.echo_filter import likely_recent_tts_echo, remember_tts_text
-from lampgo.voice.stt import VolcengineASR, build_stt
+from lampgo.voice.stt import MiMoASR, build_stt
 
 logger = structlog.get_logger(__name__)
 RECORDING_ALIASES_FILE = "aliases.json"
@@ -197,7 +197,7 @@ class LampgoServer:
         )
         self._agent_indicator = AgentLedIndicator(self.events, self._set_agent_indicator_led)
         self.router = IntentRouter()
-        self._stt: VolcengineASR = build_stt(config)
+        self._stt: MiMoASR = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
         self._voice = None
@@ -1599,7 +1599,7 @@ class LampgoServer:
     async def _tts_for_web(self, text: str, request_id: str) -> None:
         """Synthesize TTS and publish audio event for web playback.
 
-        During an active LiveKit voice call the Agent SDK plays Volcengine TTS
+        During an active LiveKit voice call the Agent SDK plays MiMo TTS
         directly into the room, so the local web TTS stream would only be
         wasted bandwidth (and may double-up with the call audio if the Web UI
         is also open). Skip the synthesis but keep the call signature so agent
@@ -1626,11 +1626,9 @@ class LampgoServer:
             published = False
             async for audio_b64, fmt, sample_rate in iter_synthesize_for_web(
                 text,
-                app_id=self.config.voice.volcengine_app_id,
-                access_token=self.config.voice.volcengine_access_token,
+                llm=self.config.llm,
+                voice_config=self.config.voice,
                 voice=self.config.voice.tts_voice,
-                provider=self.config.voice.tts_provider,
-                model=self.config.voice.tts_model,
             ):
                 published = True
                 await self.events.publish(
@@ -2744,6 +2742,7 @@ class LampgoServer:
                 return
             self._agent_sdk = AgentSDKManager(
                 self.config.voice,
+                self.config.llm,
                 web_port=self.config.web.port,
             )
             started = await self._agent_sdk.start()
@@ -2761,6 +2760,19 @@ class LampgoServer:
             logger.exception("server.agent_sdk_start_failed")
             if self._agent_sdk is not None:
                 await self._agent_sdk.stop()
+
+    async def restart_agent_sdk(self) -> None:
+        """Discard the current SDK worker after MiMo speech inputs change.
+
+        The next voice call starts a fresh worker using the new generated roles
+        file.  This avoids a long-running process retaining an old MiMo key,
+        base URL, model, or voice setting.
+        """
+        if self._agent_sdk is None:
+            return
+        await self._agent_sdk.stop()
+        self._agent_sdk = None
+        logger.info("server.agent_sdk_restarted_for_voice_config")
 
     async def ensure_agent_sdk_ready(self, *, timeout_s: float = 10.0) -> tuple[bool, str]:
         """Ensure the LiveKit Agent SDK is running for a manual browser call."""

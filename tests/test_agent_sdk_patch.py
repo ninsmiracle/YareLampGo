@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lampgo.core.config import VoiceConfig
+from lampgo.core.config import LLMConfig, VoiceConfig
 from lampgo.voice import agent_sdk
 from lampgo.voice.agent_sdk import _SITECUSTOMIZE_CODE
 
@@ -20,12 +20,9 @@ def test_agent_sdk_can_start_checks_lampgo_sdk_import(monkeypatch) -> None:
         return object() if name == agent_sdk.AGENT_SDK_MODULE else None
 
     monkeypatch.setattr(agent_sdk.importlib.util, "find_spec", fake_find_spec)
-    cfg = VoiceConfig(
-        livekit_url="https://rtc.yhaox.top",
-        volcengine_app_id="app",
-        volcengine_access_token="token",
-    )
-    manager = agent_sdk.AgentSDKManager(cfg)
+    cfg = VoiceConfig(livekit_url="https://rtc.yhaox.top")
+    manager = agent_sdk.AgentSDKManager(cfg, _mimo_llm())
+    monkeypatch.setattr(manager, "_local_livekit_server_reachable", lambda: True)
 
     assert manager._can_start()
     assert checked == [agent_sdk.AGENT_SDK_MODULE]
@@ -33,12 +30,9 @@ def test_agent_sdk_can_start_checks_lampgo_sdk_import(monkeypatch) -> None:
 
 def test_agent_sdk_can_start_reports_missing_lampgo_sdk(monkeypatch) -> None:
     monkeypatch.setattr(agent_sdk.importlib.util, "find_spec", lambda _name: None)
-    cfg = VoiceConfig(
-        livekit_url="https://rtc.yhaox.top",
-        volcengine_app_id="app",
-        volcengine_access_token="token",
-    )
-    manager = agent_sdk.AgentSDKManager(cfg)
+    cfg = VoiceConfig(livekit_url="https://rtc.yhaox.top")
+    manager = agent_sdk.AgentSDKManager(cfg, _mimo_llm())
+    monkeypatch.setattr(manager, "_local_livekit_server_reachable", lambda: True)
 
     assert not manager._can_start()
     assert agent_sdk.AGENT_SDK_PACKAGE in manager.last_error
@@ -54,7 +48,7 @@ def test_agent_sdk_binary_resolves_cli_in_current_env(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(agent_sdk.sys, "executable", str(python))
     monkeypatch.setattr(agent_sdk.shutil, "which", lambda _name: None)
 
-    manager = agent_sdk.AgentSDKManager(VoiceConfig())
+    manager = agent_sdk.AgentSDKManager(VoiceConfig(), _mimo_llm())
 
     assert manager._resolve_sdk_binary() == str(sdk_cli)
 
@@ -74,6 +68,19 @@ def test_agent_sdk_binary_falls_back_to_path(monkeypatch, tmp_path) -> None:
         lambda name: str(path_cli) if name == "lampgo-livekit-agent" else None,
     )
 
-    manager = agent_sdk.AgentSDKManager(VoiceConfig())
+    manager = agent_sdk.AgentSDKManager(VoiceConfig(), _mimo_llm())
 
     assert manager._resolve_sdk_binary() == str(path_cli)
+
+
+def test_sitecustomize_installs_mimo_factories_before_sdk_worker_import() -> None:
+    assert "install_livekit_agent_sdk_mimo_patch" in _SITECUSTOMIZE_CODE
+    assert "installed MiMo ASR/TTS adapter" in _SITECUSTOMIZE_CODE
+
+
+def _mimo_llm() -> LLMConfig:
+    return LLMConfig(
+        provider="mimo",
+        api_base="https://api.xiaomimimo.com/v1",
+        api_key="mimo-key",
+    )

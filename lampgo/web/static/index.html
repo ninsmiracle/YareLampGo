@@ -745,33 +745,18 @@
 
             <div class="settings-card">
               <div class="settings-card-title">声音和唤醒</div>
-              <div class="settings-card-desc">语音识别和火山播报共用火山引擎 App ID / Token；没有火山配置时会自动使用 Edge TTS 播放回复。</div>
+              <div class="settings-card-desc">语音识别与播报复用上方 LLM 设置中的 MiMo Base URL 和 API Key；无需另配语音服务商凭据。</div>
 
               <div class="settings-form" data-cfg-section="voice">
                 <label class="settings-field" data-cfg-field="voice.tts_provider">
                   <span class="settings-field-label">播报服务</span>
                   <select class="settings-input" data-cfg-input="voice.tts_provider">
-                    <option value="volcengine">火山引擎 TTS（App ID / Token）</option>
-                    <option value="edge-tts">Edge TTS（免费无 Key）</option>
+                    <option value="mimo">MiMo V2.5 TTS（复用 LLM 配置）</option>
                   </select>
                   <span class="settings-field-hint" data-cfg-tts-provider-hint>
-                    火山引擎使用下方 App ID / Token；未配置时会自动回退到 Edge TTS。
+                    ASR 使用 <code>mimo-v2.5-asr</code>，TTS 使用 <code>mimo-v2.5-tts</code>。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
-                </label>
-
-                <label class="settings-field" data-cfg-field="voice.volcengine_app_id">
-                  <span class="settings-field-label">火山引擎 App ID</span>
-                  <input class="settings-input" type="text" placeholder="your-app-id" data-cfg-input="voice.volcengine_app_id" autocomplete="off">
-                  <span class="settings-field-hint">火山 ASR 与火山 TTS 共用。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_app_id"></span>
-                </label>
-
-                <label class="settings-field" data-cfg-field="voice.volcengine_access_token">
-                  <span class="settings-field-label">火山引擎 Access Token</span>
-                  <input class="settings-input settings-secret-input" type="text" placeholder="your-access-token" data-cfg-input="voice.volcengine_access_token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
-                  <span class="settings-field-hint">留空时聊天播报会自动回退到 Edge TTS。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_access_token"></span>
                 </label>
 
                 <label class="settings-field" data-cfg-field="voice.wake_word">
@@ -787,24 +772,22 @@
                 </label>
 
                 <details class="settings-disclosure">
-                  <summary>高级：火山 TTS 音色和模型</summary>
+                  <summary>高级：MiMo TTS 音色和模型</summary>
                   <div class="settings-form settings-form-nested">
                     <label class="settings-field" data-cfg-field="voice.tts_voice">
-                      <span class="settings-field-label">火山 TTS 音色</span>
+                      <span class="settings-field-label">MiMo TTS 音色</span>
                       <select class="settings-input" data-cfg-input="voice.tts_voice" data-cfg-tts-voice>
                       </select>
-                      <input class="settings-input hidden" type="text" placeholder="输入火山音色 ID" title="按 Esc 返回音色列表" data-cfg-tts-voice-custom autocomplete="off">
-                      <span class="settings-field-hint">默认 <code>zh_female_vv_uranus_bigtts</code>；选择“自定义”后填写火山音色 ID，选择 Edge TTS 时这里会切换为 Edge 声音列表。</span>
+                      <input class="settings-input hidden" type="text" placeholder="输入 MiMo 音色 ID" title="按 Esc 返回音色列表" data-cfg-tts-voice-custom autocomplete="off">
+                      <span class="settings-field-hint">默认 <code>mimo_default</code>；选择“自定义”后填写 MiMo 音色 ID。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
                     </label>
                     <label class="settings-field" data-cfg-field="voice.tts_model">
-                      <span class="settings-field-label">火山 TTS Model</span>
+                      <span class="settings-field-label">MiMo TTS Model</span>
                       <select class="settings-input" data-cfg-input="voice.tts_model">
-                        <option value="">火山默认</option>
-                        <option value="seed-tts-2.0-standard">seed-tts-2.0-standard</option>
-                        <option value="seed-tts-2.0-expressive">seed-tts-2.0-expressive</option>
+                        <option value="mimo-v2.5-tts">mimo-v2.5-tts</option>
                       </select>
-                      <span class="settings-field-hint">仅火山引擎 TTS 使用，Edge TTS 会自动忽略。</span>
+                      <span class="settings-field-hint">与上方 MiMo Base URL/API Key 一起提交到 MiMo 语音接口。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_model"></span>
                     </label>
                   </div>

@@ -1,122 +1,121 @@
-"""Regression tests for the Volcengine/Edge TTS provider selection."""
+"""Regression coverage for MiMo speech routing and payloads."""
 
 from __future__ import annotations
 
 import asyncio
-import inspect
-import sys
-from types import SimpleNamespace
+import base64
+import json
 
-from lampgo.core.config import VoiceConfig
+import httpx
+import pytest
+
+from lampgo.core.config import LLMConfig, VoiceConfig
+from lampgo.voice import mimo
 from lampgo.voice.agent_sdk import AgentSDKManager
-from lampgo.voice.tts import (
-    DEFAULT_VOLCENGINE_TTS_VOICE,
-    VOLCENGINE_BIGTTS_RESOURCE_ID,
-    VOLCENGINE_SEED_TTS_1_RESOURCE_ID,
-    VOLCENGINE_SEED_TTS_2_RESOURCE_ID,
-    VOLCENGINE_TTS_ENDPOINT,
-    VolcengineTTS,
-    _resource_id_for_voice,
-    _volcengine_voice_or_default,
-    synthesize_for_web,
-)
+from lampgo.voice.tts import synthesize_for_web
 
 
-def test_volcengine_tts_defaults_to_v3_bidirectional_endpoint() -> None:
-    assert VOLCENGINE_TTS_ENDPOINT == "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
-
-
-def test_volcengine_tts_bypasses_unrelated_desktop_proxy(monkeypatch) -> None:
-    connect_kwargs = None
-
-    async def fake_connect(*_args, **kwargs):
-        nonlocal connect_kwargs
-        connect_kwargs = kwargs
-        raise RuntimeError("stop after inspecting connect options")
-
-    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=fake_connect))
-
-    async def run() -> None:
-        tts = VolcengineTTS(app_id="app", access_token="token")
-        async for _chunk in tts.stream_pcm("测试"):
-            raise AssertionError("the fake connection must not yield audio")
-
-    asyncio.run(run())
-
-    assert connect_kwargs is not None
-    assert connect_kwargs["proxy"] is None
-
-
-def test_volcengine_tts_default_voice_is_uranus_bigtts() -> None:
-    tts = VolcengineTTS(app_id="app", access_token="token")
-    assert tts._voice == DEFAULT_VOLCENGINE_TTS_VOICE == "zh_female_vv_uranus_bigtts"
-
-
-def test_volcengine_tts_resource_id_matches_voice_family() -> None:
-    assert _resource_id_for_voice(DEFAULT_VOLCENGINE_TTS_VOICE) == VOLCENGINE_SEED_TTS_2_RESOURCE_ID
-    assert _resource_id_for_voice("saturn_zh_female_qingyingduoduo_cs_tob") == VOLCENGINE_SEED_TTS_2_RESOURCE_ID
-    assert _resource_id_for_voice("zh_female_shuangkuaisisi_moon_bigtts") == VOLCENGINE_SEED_TTS_1_RESOURCE_ID
-    assert _resource_id_for_voice("zh_female_roumeinvyou_emo_v2_mars_bigtts") == VOLCENGINE_BIGTTS_RESOURCE_ID
-
-
-def test_volcengine_tts_normalizes_legacy_mimo_voice() -> None:
-    tts = VolcengineTTS(app_id="app", access_token="token", voice="mimo_default")
-    assert tts._voice == DEFAULT_VOLCENGINE_TTS_VOICE
-
-
-def test_volcengine_tts_normalizes_granted_voice_aliases() -> None:
-    assert _volcengine_voice_or_default("zh_male_lubanqihao_mars_bigtts") == "zh_male_lubanqihao_uranus_bigtts"
-    assert (
-        _volcengine_voice_or_default("zh_male_dongmanhaimian_mars_bigtts")
-        == "zh_male_liangsangmengzai_uranus_bigtts"
+def _llm() -> LLMConfig:
+    return LLMConfig(
+        provider="mimo",
+        api_base="https://api.xiaomimimo.com/v1",
+        api_key="mimo-key",
     )
-    assert _volcengine_voice_or_default("zh_male_wennuanahu_moon_bigtts") == "zh_male_wennuanahu_uranus_bigtts"
 
 
-def test_synthesize_for_web_uses_volcengine_credentials_not_llm_api_key() -> None:
-    params = inspect.signature(synthesize_for_web).parameters
-    assert "app_id" in params
-    assert "access_token" in params
-    assert "api_key" not in params
-
-
-def test_voice_config_migrates_legacy_mimo_voice_defaults() -> None:
+def test_voice_config_migrates_old_speech_settings_to_mimo() -> None:
     cfg = VoiceConfig(
-        stt_provider="mimo",
-        stt_model="mimo-v2.5",
-        tts_provider="mimo",
-        tts_model="mimo-v2.5-tts",
-        tts_voice="mimo_default",
+        stt_provider="volcengine",
+        stt_model="bigmodel",
+        tts_provider="edge-tts",
+        tts_model="seed-tts-2.0-standard",
+        tts_voice="zh_female_vv_uranus_bigtts",
         livekit_tts_voice="BV700_streaming",
     )
-    assert cfg.stt_provider == "volcengine"
-    assert cfg.stt_model == "bigmodel"
-    assert cfg.tts_provider == "volcengine"
-    assert cfg.tts_model == ""
-    assert cfg.tts_voice == DEFAULT_VOLCENGINE_TTS_VOICE
-    assert cfg.livekit_tts_voice == DEFAULT_VOLCENGINE_TTS_VOICE
+
+    assert cfg.stt_provider == "mimo"
+    assert cfg.stt_model == "mimo-v2.5-asr"
+    assert cfg.tts_provider == "mimo"
+    assert cfg.tts_model == "mimo-v2.5-tts"
+    assert cfg.tts_voice == "mimo_default"
+    assert cfg.livekit_tts_voice == "mimo_default"
 
 
-def test_voice_config_migrates_incompatible_builtin_voice_ids() -> None:
-    cfg = VoiceConfig(
-        tts_voice="zh_male_dongmanhaimian_mars_bigtts",
-        livekit_tts_voice="zh_male_wennuanahu_moon_bigtts",
-    )
-    assert cfg.tts_voice == "zh_male_liangsangmengzai_uranus_bigtts"
-    assert cfg.livekit_tts_voice == "zh_male_wennuanahu_uranus_bigtts"
+def test_mimo_settings_reuse_llm_base_url_and_key() -> None:
+    settings = mimo.build_mimo_speech_settings(_llm(), VoiceConfig())
+
+    assert settings.api_base == "https://api.xiaomimimo.com/v1"
+    assert settings.api_key == "mimo-key"
+    assert settings.asr_model == "mimo-v2.5-asr"
+    assert settings.tts_model == "mimo-v2.5-tts"
+    assert settings.tts_voice == "mimo_default"
 
 
-def test_agent_sdk_roles_yaml_uses_cloud_auth_and_frontend_tts_voice_for_livekit(monkeypatch) -> None:
+def test_mimo_settings_reject_non_mimo_llm_key() -> None:
+    llm = _llm().model_copy(update={"provider": "openai"})
+    with pytest.raises(ValueError, match="llm.provider"):
+        mimo.build_mimo_speech_settings(llm, VoiceConfig())
+
+
+def test_mimo_asr_uses_chat_completions_and_llm_auth(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "你好"}}]})
+
+    _use_mock_transport(monkeypatch, handler)
+    settings = mimo.build_mimo_speech_settings(_llm(), VoiceConfig())
+
+    result = asyncio.run(mimo.transcribe_mimo_wav(settings, "UklGRg=="))
+
+    body = captured["body"]
+    assert result.text == "你好"
+    assert captured["url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert captured["headers"]["api-key"] == "mimo-key"
+    assert body["model"] == "mimo-v2.5-asr"
+    assert body["messages"][0]["content"][0]["input_audio"]["data"].startswith("data:audio/wav;base64,")
+
+
+def test_mimo_tts_streams_pcm_from_openai_sse(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    expected_pcm = b"\x01\x00\x02\x00"
+    event = {
+        "choices": [{"delta": {"audio": {"data": base64.b64encode(expected_pcm).decode("ascii")}}}],
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode())
+
+    _use_mock_transport(monkeypatch, handler)
+    settings = mimo.build_mimo_speech_settings(_llm(), VoiceConfig())
+
+    async def collect() -> list[bytes]:
+        return [chunk async for chunk in mimo.stream_mimo_tts_pcm(settings, "测试播报")]
+
+    assert asyncio.run(collect()) == [expected_pcm]
+    body = captured["body"]
+    assert body["model"] == "mimo-v2.5-tts"
+    assert body["messages"][-1] == {"role": "assistant", "content": "测试播报"}
+    assert body["audio"] == {"format": "pcm16", "voice": "mimo_default"}
+    assert body["stream"] is True
+
+
+def test_web_tts_accepts_shared_llm_and_voice_config() -> None:
+    params = synthesize_for_web.__code__.co_varnames
+    assert "llm" in params
+    assert "voice_config" in params
+    assert "app_id" not in params
+    assert "access_token" not in params
+
+
+def test_agent_sdk_roles_yaml_uses_mimo_for_stt_and_tts(monkeypatch) -> None:
     monkeypatch.delenv("LAMPGO_RTC_TOKEN_API_KEY", raising=False)
     monkeypatch.delenv("LAMPGO_AGENT_REGISTRATION_TOKEN", raising=False)
-    cfg = VoiceConfig(
-        livekit_url="https://rtc.yhaox.top",
-        volcengine_app_id="app",
-        volcengine_access_token="token",
-        tts_voice="zh_male_liangsangmengzai_uranus_bigtts",
-        livekit_tts_voice="zh_female_jitangnv_uranus_bigtts",
-    )
-    manager = AgentSDKManager(cfg)
+    manager = AgentSDKManager(VoiceConfig(livekit_url="https://rtc.yhaox.top"), _llm())
     roles_path = manager._generate_roles_yaml()
     try:
         roles_yaml = roles_path.read_text(encoding="utf-8")
@@ -125,10 +124,19 @@ def test_agent_sdk_roles_yaml_uses_cloud_auth_and_frontend_tts_voice_for_livekit
 
     assert 'url: "wss://rtc.yhaox.top"' in roles_yaml
     assert 'rtc_token_endpoint: "https://rtc.yhaox.top/rtc/token"' in roles_yaml
-    assert 'agent_token_endpoint: "https://rtc.yhaox.top/agent/token"' in roles_yaml
-    assert 'rtc_token_api_key: "livekit-token"' in roles_yaml
-    assert 'registration_token: "livekit-token"' in roles_yaml
-    assert "\n  api_key:" not in roles_yaml
-    assert "\n  api_secret:" not in roles_yaml
-    assert 'voice: "zh_male_liangsangmengzai_uranus_bigtts"' in roles_yaml
-    assert "zh_female_jitangnv_uranus_bigtts" not in roles_yaml
+    assert 'base_url: "https://api.xiaomimimo.com/v1"' in roles_yaml
+    assert 'model: "mimo-v2.5-asr"' in roles_yaml
+    assert 'model: "mimo-v2.5-tts"' in roles_yaml
+    assert 'voice: "mimo_default"' in roles_yaml
+    assert "volcengine" not in roles_yaml.lower()
+
+
+def _use_mock_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    original = mimo.httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mimo.httpx, "AsyncClient", client)

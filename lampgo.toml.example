@@ -79,13 +79,11 @@ mic_enabled = false            # 是否启用 ESP32 麦克风音频流
 http_timeout_s = 5.0
 
 [voice]
-stt_provider = "volcengine"    # 语音转文字: volcengine
-stt_model = "bigmodel"
-tts_provider = "volcengine"    # 文字转语音: volcengine, edge-tts
-tts_model = ""                 # 火山 TTS 可选模型；留空使用服务默认
-tts_voice = "zh_female_vv_uranus_bigtts"
-volcengine_app_id = ""         # 火山引擎 App ID；TTS 未配置时自动回退 edge-tts
-volcengine_access_token = ""   # 火山引擎 Access Token
+stt_provider = "mimo"          # 语音转文字：复用 [llm] 的 MiMo Base URL / API Key
+stt_model = "mimo-v2.5-asr"
+tts_provider = "mimo"          # 文字转语音：复用 [llm] 的 MiMo Base URL / API Key
+tts_model = "mimo-v2.5-tts"
+tts_voice = "mimo_default"
 livekit_url = "https://rtc.yhaox.top" # 云端 LiveKit；SDK 内部会用云端鉴权取 token
 wake_word = ""                 # 唤醒词 (留空 = 禁用)
 call_mode = "stable"           # stable / interruptible / esp32_aec

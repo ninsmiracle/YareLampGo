@@ -3,8 +3,8 @@
 Generates ``roles.yaml`` from lampgo's VoiceConfig at runtime and
 manages the ``lampgo-livekit-agent-sdk`` child process lifecycle.
 The Agent SDK process connects to the LiveKit server, subscribes to
-audio in the room, runs ASR/TTS via Volcengine, and calls lampgo's
-``/v1/chat/completions`` endpoint for LLM responses.
+audio in the room, runs ASR/TTS through MiMo, and calls lampgo's
+``/v1/chat/completions`` endpoint for LampGo tool responses.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 import structlog
 
 if TYPE_CHECKING:
-    from lampgo.core.config import VoiceConfig
+    from lampgo.core.config import LLMConfig, VoiceConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -53,18 +53,17 @@ providers:
     api_key: lampgo-local
     base_url: http://127.0.0.1:{web_port}/v1
 
-  volc_main:
-    type: volcengine
-    app_id: {volcengine_app_id}
-    access_token: {volcengine_access_token}
+  mimo_voice:
+    type: openai
+    api_key: {mimo_api_key}
+    base_url: {mimo_api_base}
 
 defaults:
   stt:
-    provider: volc_main
+    provider: mimo_voice
     options:
-      resource_id: volc.bigasr.sauc.duration
-      sample_rate: 16000
-      result_type: single
+      model: {mimo_asr_model}
+      language: auto
 
   llm:
     provider: lampgo_llm
@@ -74,12 +73,11 @@ defaults:
       max_tokens: 512
 
   tts:
-    provider: volc_main
+    provider: mimo_voice
     options:
-      cluster: volcano_tts
-      voice: {tts_voice}
-      sample_rate: 24000
-      streaming: true
+      model: {mimo_tts_model}
+      voice: {mimo_tts_voice}
+      style_prompt: {mimo_tts_style_prompt}
 
 voice_agents:
   - name: lampgo-jarvis
@@ -185,6 +183,9 @@ def _livekit_http_url(value: str) -> str:
 #      monitor. OpenAI Chat Completions has no standard "flush this TTS segment
 #      now" event, but LiveKit's TTS pipeline does. This lets each lampgo ``say``
 #      narration start TTS before the final response completes.
+#   3. Add MiMo OpenAI-compatible ASR/TTS factories to the released SDK without
+#      patching its site-packages directory.  This sitecustomize file runs in
+#      every multiprocessing worker, before the SDK imports its worker module.
 _SITECUSTOMIZE_CODE = """\
 import os
 import sys
@@ -201,6 +202,15 @@ logging.basicConfig(
     stream=sys.stderr,
     force=True,
 )
+
+try:
+    from lampgo.voice.mimo_livekit import install_livekit_agent_sdk_mimo_patch
+
+    install_livekit_agent_sdk_mimo_patch()
+    print("[lampgo] installed MiMo ASR/TTS adapter (pid=%d)" % os.getpid(),
+          file=sys.stderr, flush=True)
+except Exception as e:
+    print("[lampgo] MiMo ASR/TTS adapter failed: %r" % (e,), file=sys.stderr, flush=True)
 
 try:
     from livekit.agents.tts.tts import AudioEmitter
@@ -597,8 +607,9 @@ except Exception as e:
 class AgentSDKManager:
     """Manage the lifecycle of the Lampgo LiveKit Agent SDK subprocess."""
 
-    def __init__(self, voice_config: VoiceConfig, web_port: int = 8420) -> None:
+    def __init__(self, voice_config: VoiceConfig, llm_config: LLMConfig, web_port: int = 8420) -> None:
         self._voice = voice_config
+        self._llm = llm_config
         self._web_port = web_port
         self._port = AGENT_SDK_PORT
         self._process: asyncio.subprocess.Process | None = None
@@ -649,10 +660,12 @@ class AgentSDKManager:
         missing = []
         if not v.livekit_url:
             missing.append("livekit_url")
-        if not v.volcengine_app_id:
-            missing.append("volcengine_app_id")
-        if not v.volcengine_access_token:
-            missing.append("volcengine_access_token")
+        try:
+            from lampgo.voice.mimo import build_mimo_speech_settings
+
+            build_mimo_speech_settings(self._llm, v)
+        except ValueError as exc:
+            missing.append(str(exc))
         if missing:
             self._set_last_error("Missing voice config: " + ", ".join(missing))
             logger.info("agent_sdk.missing_config", fields=missing)
@@ -673,7 +686,9 @@ class AgentSDKManager:
     def _generate_roles_yaml(self) -> Path:
         """Write a temporary roles.yaml from current config values."""
         livekit_http_url = _livekit_http_url(self._voice.livekit_url)
-        tts_voice = self._voice.tts_voice or "zh_female_vv_uranus_bigtts"
+        from lampgo.voice.mimo import build_mimo_speech_settings
+
+        speech = build_mimo_speech_settings(self._llm, self._voice)
         content = ROLES_YAML_TEMPLATE.format(
             livekit_url=_yaml_string(_livekit_ws_url(self._voice.livekit_url)),
             rtc_token_endpoint=_yaml_string(f"{livekit_http_url.rstrip('/')}/rtc/token"),
@@ -687,13 +702,23 @@ class AgentSDKManager:
                 or DEFAULT_LAMPGO_AGENT_REGISTRATION_TOKEN
             ),
             web_port=self._web_port,
-            volcengine_app_id=_yaml_string(self._voice.volcengine_app_id),
-            volcengine_access_token=_yaml_string(self._voice.volcengine_access_token),
-            tts_voice=_yaml_string(tts_voice),
+            mimo_api_key=_yaml_string(speech.api_key),
+            mimo_api_base=_yaml_string(speech.api_base),
+            mimo_asr_model=_yaml_string(speech.asr_model),
+            mimo_tts_model=_yaml_string(speech.tts_model),
+            mimo_tts_voice=_yaml_string(speech.tts_voice),
+            mimo_tts_style_prompt=_yaml_string(speech.tts_style_prompt),
         )
         tmp = Path(tempfile.mktemp(suffix=".yaml", prefix="lampgo-roles-"))
         tmp.write_text(content, encoding="utf-8")
-        logger.info("agent_sdk.roles_yaml_generated", path=str(tmp), tts_voice=tts_voice)
+        logger.info(
+            "agent_sdk.roles_yaml_generated",
+            path=str(tmp),
+            asr_model=speech.asr_model,
+            tts_model=speech.tts_model,
+            tts_voice=speech.tts_voice,
+            api_base=speech.api_base,
+        )
         return tmp
 
     def _generate_patch_dir(self) -> Path:
