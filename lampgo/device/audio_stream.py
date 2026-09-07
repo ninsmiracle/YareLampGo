@@ -49,6 +49,20 @@ def redact_ws_owner_token(url: str | None) -> str | None:
         return url.replace("token=", "token=<redacted>&")
 
 
+async def send_stream_auth(ws, url: str) -> None:
+    """Authenticate the post-handshake ESP32 audio session.
+
+    ESP-IDF's HTTP server can complete a WebSocket upgrade without invoking the
+    URI callback for the HTTP GET request.  Send the same URL-safe owner/token
+    pair as the first text frame so firmware can explicitly register the audio
+    client after the upgrade.
+    """
+    query = urlsplit(url).query
+    if not query:
+        raise ValueError("ESP32 audio WebSocket URL is missing owner authentication")
+    await ws.send(query)
+
+
 class Esp32AudioCapture:
     """Receive PCM audio from an ESP32 via WebSocket.
 
@@ -158,6 +172,7 @@ class Esp32AudioCapture:
             ping_interval=None,
             proxy=None,
         ) as ws:
+            await send_stream_auth(ws, url)
             logger.info("esp32_audio.connected", url=safe_url)
             self._connected = True
             self._last_frame_at = time.monotonic()
@@ -289,6 +304,7 @@ class Esp32AudioSession:
                 ping_interval=None,
                 proxy=None,
             ) as ws:
+                await send_stream_auth(ws, url)
                 self._esp32.mark_active_healthy()
                 frames = 0
                 while not self._stop_event.is_set():
