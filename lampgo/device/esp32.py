@@ -36,6 +36,7 @@ logger = structlog.get_logger(__name__)
 MDNS_SERVICE_TYPE = "_lampgo-cam._tcp.local."
 HEALTH_TTL_S = 5.0
 OWNER_LEASE_TTL_MS = 120_000
+P4_ASSET_CHUNK_BYTES = 8 * 1024
 
 
 def _lampgo_home() -> Path:
@@ -797,19 +798,25 @@ class Esp32DeviceManager:
                             },
                             timeout=upload_timeout_s,
                         )
-                        response_type = response.headers.get("content-type", "application/json")
                         try:
-                            response_body = response.json()
-                        except Exception:
-                            response_body = {"ok": response.status_code < 400, "raw": response.text}
-                        return response.status_code, response_body, response_type
+                            response_type = response.headers.get("content-type", "application/json")
+                            try:
+                                response_body = response.json()
+                            except Exception:
+                                response_body = {"ok": response.status_code < 400, "raw": response.text}
+                            return response.status_code, response_body, response_type
+                        finally:
+                            await response.aclose()
 
                     status, body, response_content_type = await post_chunk_phase("start")
                     if status >= 400 or (isinstance(body, dict) and body.get("ok") is False):
                         return status, body, response_content_type
-                    for offset in range(0, len(payload), 1024):
+                    # ESP-Hosted currently leaves short-lived TCP sessions in
+                    # its pool briefly.  Fewer, still bounded requests avoid
+                    # exhausting that pool during a complete LCD asset upload.
+                    for offset in range(0, len(payload), P4_ASSET_CHUNK_BYTES):
                         status, body, response_content_type = await post_chunk_phase(
-                            "chunk", payload[offset : offset + 1024]
+                            "chunk", payload[offset : offset + P4_ASSET_CHUNK_BYTES]
                         )
                         if status >= 400 or (isinstance(body, dict) and body.get("ok") is False):
                             return status, body, response_content_type
