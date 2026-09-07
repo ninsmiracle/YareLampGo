@@ -25,11 +25,17 @@ def install_livekit_agent_sdk_mimo_patch() -> None:
 
     from lampgo_livekit_agent import config as sdk_config
     from lampgo_livekit_agent import speech as sdk_speech
+    from lampgo_livekit_agent import worker as sdk_worker
 
     sdk_config._SUPPORTED_COMPONENT_TYPES["stt"].add("openai")
     sdk_config._SUPPORTED_COMPONENT_TYPES["tts"].add("openai")
     sdk_speech.create_stt = create_stt
     sdk_speech.create_tts = create_tts
+    # ``worker.py`` imports these functions by name during module import, so
+    # changing only ``speech.create_*`` leaves an already-imported worker bound
+    # to the SDK's Volcengine-only factories. Patch both module references.
+    sdk_worker.create_stt = create_stt
+    sdk_worker.create_tts = create_tts
 
 
 def create_stt(*, config, runtime) -> Any:

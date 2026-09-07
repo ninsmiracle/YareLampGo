@@ -180,6 +180,12 @@ async def transcribe_mimo_wav(
         "asr_options": {"language": language or "auto"},
     }
     timeout = httpx.Timeout(connect=10.0, read=90.0, write=30.0, pool=10.0)
+    logger.info(
+        "voice.mimo_asr_started",
+        model=body["model"],
+        request_id=request_id,
+        audio_b64_len=len(wav_b64),
+    )
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
@@ -241,6 +247,13 @@ async def stream_mimo_tts_pcm(
     request_id = uuid.uuid4().hex
     timeout = httpx.Timeout(connect=10.0, read=90.0, write=30.0, pool=10.0)
     audio_bytes = 0
+    logger.info(
+        "voice.mimo_tts_started",
+        model=body["model"],
+        voice=body["audio"]["voice"],
+        request_id=request_id,
+        chars=len(content),
+    )
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
@@ -340,11 +353,19 @@ def _extract_tts_pcm(event: object) -> bytes:
 
 
 def _response_error(prefix: str, response: httpx.Response, request_id: str) -> MiMoAPIError:
+    body = _safe_response_body(response)
+    logger.warning(
+        "voice.mimo_provider_error",
+        operation=prefix,
+        status_code=response.status_code,
+        request_id=request_id,
+        provider_error=body,
+    )
     return MiMoAPIError(
         f"{prefix} request failed",
         status_code=response.status_code,
         request_id=request_id,
-        body=_safe_response_body(response),
+        body=body,
     )
 
 

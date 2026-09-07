@@ -78,6 +78,34 @@ def test_sitecustomize_installs_mimo_factories_before_sdk_worker_import() -> Non
     assert "installed MiMo ASR/TTS adapter" in _SITECUSTOMIZE_CODE
 
 
+def test_mimo_patch_replaces_worker_bound_factory_references() -> None:
+    from lampgo_livekit_agent import config, speech, worker
+    from lampgo.voice.mimo_livekit import create_stt, create_tts, install_livekit_agent_sdk_mimo_patch
+
+    original = {
+        "speech_stt": speech.create_stt,
+        "speech_tts": speech.create_tts,
+        "worker_stt": worker.create_stt,
+        "worker_tts": worker.create_tts,
+        "stt_types": set(config._SUPPORTED_COMPONENT_TYPES["stt"]),
+        "tts_types": set(config._SUPPORTED_COMPONENT_TYPES["tts"]),
+    }
+    try:
+        install_livekit_agent_sdk_mimo_patch()
+
+        assert speech.create_stt is create_stt
+        assert speech.create_tts is create_tts
+        assert worker.create_stt is create_stt
+        assert worker.create_tts is create_tts
+    finally:
+        speech.create_stt = original["speech_stt"]
+        speech.create_tts = original["speech_tts"]
+        worker.create_stt = original["worker_stt"]
+        worker.create_tts = original["worker_tts"]
+        config._SUPPORTED_COMPONENT_TYPES["stt"] = original["stt_types"]
+        config._SUPPORTED_COMPONENT_TYPES["tts"] = original["tts_types"]
+
+
 def _mimo_llm() -> LLMConfig:
     return LLMConfig(
         provider="mimo",
