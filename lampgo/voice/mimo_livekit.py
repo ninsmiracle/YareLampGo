@@ -8,6 +8,7 @@ LampGo's configured MiMo endpoint.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -18,6 +19,9 @@ from lampgo.voice.mimo import (
     stream_mimo_tts_pcm,
     transcribe_mimo_wav,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def install_livekit_agent_sdk_mimo_patch() -> None:
@@ -41,8 +45,14 @@ def install_livekit_agent_sdk_mimo_patch() -> None:
 def create_stt(*, config, runtime) -> Any:
     component = _require_component(runtime.voice_agent.stt, "stt")
     provider = config.provider_for(component, path=f"voice_agents.{runtime.voice_agent.name}.stt")
+    settings = _speech_settings(provider, component.options)
+    logger.info(
+        "voice.mimo_livekit_stt_created model=%s agent=%s",
+        settings.asr_model,
+        runtime.voice_agent.name,
+    )
     return MiMoLiveKitSTT(
-        settings=_speech_settings(provider, component.options),
+        settings=settings,
         language=str(component.options.get("language") or "auto"),
     )
 
@@ -50,7 +60,14 @@ def create_stt(*, config, runtime) -> Any:
 def create_tts(*, config, runtime) -> Any:
     component = _require_component(runtime.voice_agent.tts, "tts")
     provider = config.provider_for(component, path=f"voice_agents.{runtime.voice_agent.name}.tts")
-    return MiMoLiveKitTTS(settings=_speech_settings(provider, component.options))
+    settings = _speech_settings(provider, component.options)
+    logger.info(
+        "voice.mimo_livekit_tts_created model=%s voice=%s agent=%s",
+        settings.tts_model,
+        settings.tts_voice,
+        runtime.voice_agent.name,
+    )
+    return MiMoLiveKitTTS(settings=settings)
 
 
 def _require_component(component, name: str):
@@ -102,9 +119,13 @@ class MiMoLiveKitSTT:
                 requested_language = self._language
                 if language is not NOT_GIVEN and language:
                     requested_language = str(language)
-                wav_b64 = __import__("base64").b64encode(
-                    rtc.combine_audio_frames(buffer).to_wav_bytes()
-                ).decode("ascii")
+                wav_bytes = rtc.combine_audio_frames(buffer).to_wav_bytes()
+                wav_b64 = __import__("base64").b64encode(wav_bytes).decode("ascii")
+                logger.info(
+                    "voice.mimo_livekit_asr_dispatch wav_bytes=%s language=%s",
+                    len(wav_bytes),
+                    requested_language,
+                )
                 try:
                     result = await transcribe_mimo_wav(
                         self._settings,
@@ -120,6 +141,11 @@ class MiMoLiveKitSTT:
                         request_id=exc.request_id or None,
                         body=exc.body,
                     ) from exc
+                logger.info(
+                    "voice.mimo_livekit_asr_result request_id=%s transcript_chars=%s",
+                    result.request_id,
+                    len(result.text),
+                )
                 return stt.SpeechEvent(
                     type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                     request_id=result.request_id,
@@ -140,6 +166,7 @@ class MiMoLiveKitTTS:
             async def _run(self, output_emitter) -> None:
                 initialized = False
                 request_id = uuid.uuid4().hex
+                audio_bytes = 0
                 try:
                     async for pcm in stream_mimo_tts_pcm(settings, self.input_text):
                         if not initialized:
@@ -150,6 +177,12 @@ class MiMoLiveKitTTS:
                                 mime_type="audio/pcm",
                             )
                             initialized = True
+                            logger.info(
+                                "voice.mimo_livekit_tts_first_audio request_id=%s text_chars=%s",
+                                request_id,
+                                len(self.input_text),
+                            )
+                        audio_bytes += len(pcm)
                         output_emitter.push(pcm)
                 except MiMoAPIError as exc:
                     from livekit.agents import APIStatusError
@@ -162,6 +195,11 @@ class MiMoLiveKitTTS:
                     ) from exc
                 if initialized:
                     output_emitter.flush()
+                    logger.info(
+                        "voice.mimo_livekit_tts_flushed request_id=%s pcm_bytes=%s",
+                        request_id,
+                        audio_bytes,
+                    )
 
         class _MiMoLiveKitTTS(tts.TTS):
             def __init__(self) -> None:

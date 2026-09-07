@@ -106,6 +106,15 @@ def test_mimo_patch_replaces_worker_bound_factory_references() -> None:
         config._SUPPORTED_COMPONENT_TYPES["tts"] = original["tts_types"]
 
 
+def test_mimo_adapter_emits_lifecycle_markers() -> None:
+    source = __import__("inspect").getsource(__import__("lampgo.voice.mimo_livekit", fromlist=["*"]))
+
+    assert "voice.mimo_livekit_asr_dispatch" in source
+    assert "voice.mimo_livekit_asr_result" in source
+    assert "voice.mimo_livekit_tts_first_audio" in source
+    assert "voice.mimo_livekit_tts_flushed" in source
+
+
 def _mimo_llm() -> LLMConfig:
     return LLMConfig(
         provider="mimo",
