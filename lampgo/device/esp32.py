@@ -356,6 +356,7 @@ class Esp32DeviceManager:
             "hostname",
             "platform",
             "motion_port",
+            "asset_upload_port",
             "paired",
             "paired_owner_id",
             "paired_owner_label",
@@ -767,8 +768,18 @@ class Esp32DeviceManager:
                     "X-Lampgo-Effect-Id": request_params.get("effect_id"),
                 }
                 headers.update({key: str(value) for key, value in header_fields.items() if value})
+                upload_port = dev.port
+                if str(dev.extras.get("platform") or "") == "esp32-p4":
+                    try:
+                        upload_port = int(dev.extras.get("asset_upload_port") or 83)
+                    except (TypeError, ValueError):
+                        upload_port = 83
+                upload_base_url = dev.base_url
+                if upload_port != dev.port:
+                    upload_host = dev.ip or dev.host
+                    upload_base_url = f"http://{upload_host}:{upload_port}"
                 resp = await self._http.post(
-                    f"{dev.base_url}{path}",
+                    f"{upload_base_url}{path}",
                     params=request_params,
                     content=payload,
                     headers=headers,
