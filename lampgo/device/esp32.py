@@ -778,23 +778,51 @@ class Esp32DeviceManager:
                 if upload_port != dev.port:
                     upload_host = dev.ip or dev.host
                     upload_base_url = f"http://{upload_host}:{upload_port}"
-                resp = await self._http.post(
-                    f"{upload_base_url}{path}",
-                    params=request_params,
-                    content=payload,
-                    headers=headers,
-                    timeout=upload_timeout_s,
-                )
-                if resp.status_code < 400:
+                if str(dev.extras.get("platform") or "") == "esp32-p4":
+                    async def post_chunk_phase(phase: str, content: bytes = b"") -> tuple[int, dict[str, Any], str]:
+                        response = await self._http.post(
+                            f"{upload_base_url}{path}",
+                            params=request_params,
+                            content=content,
+                            headers={**headers, "X-Lampgo-Upload-Phase": phase},
+                            timeout=upload_timeout_s,
+                        )
+                        response_type = response.headers.get("content-type", "application/json")
+                        try:
+                            response_body = response.json()
+                        except Exception:
+                            response_body = {"ok": response.status_code < 400, "raw": response.text}
+                        return response.status_code, response_body, response_type
+
+                    status, body, response_content_type = await post_chunk_phase("start")
+                    if status >= 400 or (isinstance(body, dict) and body.get("ok") is False):
+                        return status, body, response_content_type
+                    for offset in range(0, len(payload), 1024):
+                        status, body, response_content_type = await post_chunk_phase(
+                            "chunk", payload[offset : offset + 1024]
+                        )
+                        if status >= 400 or (isinstance(body, dict) and body.get("ok") is False):
+                            return status, body, response_content_type
+                    status, body, response_content_type = await post_chunk_phase("finish")
+                else:
+                    response = await self._http.post(
+                        f"{upload_base_url}{path}",
+                        params=request_params,
+                        content=payload,
+                        headers=headers,
+                        timeout=upload_timeout_s,
+                    )
+                    status = response.status_code
+                    response_content_type = response.headers.get("content-type", "application/json")
+                    try:
+                        body = response.json()
+                    except Exception:
+                        body = {"ok": response.status_code < 400, "raw": response.text}
+                if status < 400:
                     dev.last_health_ok = True
                     dev.last_health_ok_at = time.monotonic()
                     self.mark_active_healthy()
-                response_content_type = resp.headers.get("content-type", "application/json")
-                try:
-                    body = resp.json()
-                except Exception:
-                    body = {"ok": resp.status_code < 400, "raw": resp.text}
-                return resp.status_code, body, response_content_type
+                return status, body, response_content_type
             except httpx.HTTPError as exc:
                 return 502, {"ok": False, "error": f"proxy_failed: {exc}"}, "application/json"
             finally:
