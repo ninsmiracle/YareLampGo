@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import structlog
 
 from lampgo.core.config import LEDConfig
@@ -376,16 +377,23 @@ class LEDController:
 
         try:
             body = manager.with_owner_auth(payload, reason=reason) if hasattr(manager, "with_owner_auth") else payload
-            import httpx
-
-            resp = httpx.post(f"{base_url}{path}", json=body, timeout=5.0, trust_env=False)
-            ok = resp.status_code < 400
-            if ok:
-                try:
-                    data = resp.json()
-                    ok = bool(data.get("ok", True))
-                except Exception:
-                    ok = True
+            post_sync = getattr(manager, "proxy_post_sync", None)
+            if callable(post_sync):
+                status, data, _ = post_sync(path, body)
+                ok = status < 400 and (not isinstance(data, dict) or bool(data.get("ok", True)))
+            else:
+                # Compatibility for small test doubles and third-party legacy
+                # device managers. The built-in manager always uses the branch
+                # above, which applies P4 nonce authentication when required.
+                resp = httpx.post(f"{base_url}{path}", json=body, timeout=5.0, trust_env=False)
+                status = resp.status_code
+                ok = status < 400
+                if ok:
+                    try:
+                        data = resp.json()
+                        ok = bool(data.get("ok", True))
+                    except Exception:
+                        data = {"ok": True}
             self._remote_last_ok = ok
             if ok:
                 mark_healthy = getattr(manager, "mark_active_healthy", None)
@@ -398,8 +406,8 @@ class LEDController:
                     payload=payload,
                     path=path,
                     base_url=base_url,
-                    status=resp.status_code,
-                    body=resp.text[:200],
+                    status=status,
+                    body=str(data)[:200],
             )
             return ok
         except httpx.ReadTimeout as exc:

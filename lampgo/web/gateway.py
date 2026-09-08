@@ -60,9 +60,12 @@ from lampgo.expression_library import (
 )
 from lampgo.led_effects import (
     LedEffectError,
+    compile_led_program,
+    inspect_led_package,
     load_pixel_led_effect,
     load_pixel_led_package,
     load_pixel_led_source,
+    p4_program,
     update_pixel_led_sync,
 )
 from lampgo.perception.camera import CameraCapture
@@ -1052,8 +1055,16 @@ class WebGateway:
             return 503, {"ok": False, "error": "no_device"}, {}
         manifest = load_pixel_led_effect(effect_id)
         package = load_pixel_led_package(effect_id)
-        package_info = manifest.get("package") or {}
-        expected_sha = str(package_info.get("sha256") or "")
+        device = self.server.esp32.get_status().get("device")
+        if isinstance(device, dict) and device.get("platform") == "esp32-p4":
+            # Legacy user drawings remain stored as 51x9 source for old S3
+            # owners. Compile a separate native 54x9 LEF1 payload only at P4
+            # sync time, so the two hardware routes do not overwrite each
+            # other's on-disk asset format.
+            source = load_pixel_led_source(effect_id)
+            _, package = compile_led_program(p4_program(dict(source.get("program") or {})))
+        package_info = inspect_led_package(package)
+        expected_sha = str(package_info["sha256"])
         if not force:
             status, body, _ = await self.server.esp32.proxy_get("/device/led-effects")
             installed = ((body.get("result") or {}).get("led_effects") or []) if isinstance(body, dict) else []

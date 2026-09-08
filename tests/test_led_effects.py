@@ -15,11 +15,14 @@ from lampgo.expression_library import (
 from lampgo.led_effects import (
     LED_FRAME_BYTES,
     LEF_HEADER,
+    P4_LED_PIXEL_COUNT,
+    P4_LED_WIDTH,
     LedEffectError,
     compile_led_program,
     inspect_led_package,
     load_pixel_led_package,
     load_pixel_led_source,
+    p4_program,
 )
 
 
@@ -77,6 +80,19 @@ def test_lef1_rejects_unsafe_or_incomplete_programs():
     bad["frames"] = [{"rows": _rows(), "ticks": 29}]
     with pytest.raises(LedEffectError, match="exactly 30"):
         compile_led_program(bad)
+
+
+def test_p4_variant_centres_legacy_hand_drawing_on_native_rectangular_payload():
+    program = p4_program(_effect()["program"])
+    normalized, package = compile_led_program(program)
+    info = inspect_led_package(package)
+
+    assert normalized["topology"] == "p4-54x9"
+    assert len(normalized["frames"][0]["rows"][0]) == P4_LED_WIDTH
+    assert normalized["frames"][0]["rows"][0].startswith(".")
+    assert info["topology"] == "p4-54x9"
+    assert info["width"] == P4_LED_WIDTH
+    assert info["bytes"] == LEF_HEADER.size + 3 * 3 + 30 + 2 * ((P4_LED_PIXEL_COUNT + 1) // 2)
 
 
 def test_pixel_effect_storage_capacity_and_llm_catalog(monkeypatch, tmp_path):

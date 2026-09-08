@@ -53,6 +53,19 @@ def test_foreign_paired_devices_are_hidden_and_not_active(monkeypatch, tmp_path)
     assert status["blocked_devices_count"] == 1
 
 
+def test_active_host_prefers_discovered_ipv4_for_p4_websockets(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    manager = Esp32DeviceManager(DeviceEsp32Config(enabled=True))
+    device = _device("lampgo-p4.local", owner_id=manager.owner_id, paired=True)
+    device.ip = "192.168.31.50"
+    manager._devices = {"p4": device}
+
+    assert manager.get_active_host() == "192.168.31.50"
+
+    device.ip = ""
+    assert manager.get_active_host() == "lampgo-p4.local"
+
+
 def test_preferred_fallback_keeps_pairing_probe_status(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     manager = Esp32DeviceManager(DeviceEsp32Config(enabled=True, preferred_host="lampgo-cam-0834.local"))

@@ -537,7 +537,12 @@ class Esp32DeviceManager:
 
     def get_active_host(self) -> str | None:
         dev = self._pick_active()
-        return dev.host if dev else None
+        # mDNS names are useful for display and manual configuration, but a
+        # discovered IPv4 address is the reliable endpoint for the P4 motion
+        # WebSocket.  In particular, some hosts resolve ``.local`` to an
+        # unusable IPv6 route while HTTP has already established the device's
+        # IPv4 address through Zeroconf.
+        return (dev.ip or dev.host) if dev else None
 
     def get_active_base_url(self) -> str | None:
         dev = self._pick_active()
@@ -705,6 +710,56 @@ class Esp32DeviceManager:
             except Exception:
                 body = {"ok": resp.status_code < 400, "raw": resp.text}
             return resp.status_code, body, content_type
+        except httpx.HTTPError as exc:
+            return 502, {"ok": False, "error": f"proxy_failed: {exc}"}, "application/json"
+
+    def proxy_post_sync(
+        self,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any], str]:
+        """Post from synchronous LED/clock callers using the P4 auth contract.
+
+        The legacy LED controller intentionally has synchronous public methods.
+        Keeping its device I/O behind this manager prevents those methods from
+        bypassing P4's nonce proof while preserving the old S3 HTTP path.
+        """
+        dev = self._pick_active()
+        if dev is None:
+            return 503, {"ok": False, "error": "no_device"}, "application/json"
+        try:
+            with httpx.Client(timeout=self._config.http_timeout_s, trust_env=False) as client:
+                body = dict(json_body or {})
+                if self._is_p4(dev) and path not in P4_BOOTSTRAP_PATHS:
+                    challenge = client.get(
+                        f"{dev.base_url}/device/auth/challenge",
+                        params={"purpose": f"http:POST:{path}"},
+                    )
+                    challenge.raise_for_status()
+                    challenge_body = challenge.json()
+                    nonce = str(challenge_body.get("nonce") or "") if isinstance(challenge_body, dict) else ""
+                    if not nonce:
+                        raise httpx.ProtocolError("P4 challenge response is missing a nonce")
+                    body.pop("pairing_secret", None)
+                    body.update(
+                        build_p4_auth_fields(
+                            owner_id=self._owner_id,
+                            pairing_secret=self._pairing_secret,
+                            purpose=f"http:POST:{path}",
+                            nonce=nonce,
+                        )
+                    )
+                response = client.post(f"{dev.base_url}{path}", json=body)
+                if response.status_code < 400:
+                    dev.last_health_ok = True
+                    dev.last_health_ok_at = time.monotonic()
+                    self.mark_active_healthy()
+                content_type = response.headers.get("content-type", "application/json")
+                try:
+                    response_body = response.json()
+                except Exception:
+                    response_body = {"ok": response.status_code < 400, "raw": response.text}
+                return response.status_code, response_body, content_type
         except httpx.HTTPError as exc:
             return 502, {"ok": False, "error": f"proxy_failed: {exc}"}, "application/json"
 

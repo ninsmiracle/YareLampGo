@@ -291,7 +291,8 @@
     violent: { sensitivity_percent: 125, tilt_percent: 135, impact_percent: 165, edge_highlight_percent: 95 },
   });
   const ledEffectSourceCache = new Map();
-  const LED_EDITOR_WIDTH = 51;
+  const LEGACY_LED_EDITOR_WIDTH = 51;
+  const P4_LED_EDITOR_WIDTH = 54;
   const LED_EDITOR_HEIGHT = 9;
   const LED_EDITOR_FRAMES = 30;
   const LED_EDITOR_SYMBOLS = "123456789ABCDEF".split("");
@@ -300,7 +301,9 @@
     "#8b5cf6", "#ff8a34", "#2878ff", "#f472b6", "#9aff32",
     "#00a6a6", "#ff1744", "#c8d0d8", "#7a4cff", "#f7ff00",
   ];
-  let ledEditorFrames = Array.from({ length: LED_EDITOR_FRAMES }, () => new Uint8Array(LED_EDITOR_WIDTH * LED_EDITOR_HEIGHT));
+  let ledEditorWidth = LEGACY_LED_EDITOR_WIDTH;
+  let ledEditorTopology = "legacy-s3-51x9";
+  let ledEditorFrames = Array.from({ length: LED_EDITOR_FRAMES }, () => new Uint8Array(ledEditorWidth * LED_EDITOR_HEIGHT));
   let ledEditorFrame = 0;
   let ledEditorSymbol = 1;
   let ledEditorTool = "paint";
@@ -3749,24 +3752,57 @@
     return `${(bytes / 1024).toFixed(bytes >= 102400 ? 0 : 1)} KiB`;
   }
 
+  function remapLedEditorFrame(frame, sourceWidth, targetWidth) {
+    const remapped = new Uint8Array(targetWidth * LED_EDITOR_HEIGHT);
+    const offset = Math.floor((targetWidth - sourceWidth) / 2);
+    for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
+      for (let col = 0; col < sourceWidth; col += 1) {
+        const targetCol = col + offset;
+        if (targetCol >= 0 && targetCol < targetWidth) {
+          remapped[row * targetWidth + targetCol] = frame[row * sourceWidth + col] || 0;
+        }
+      }
+    }
+    return remapped;
+  }
+
+  function setLedEditorTopology(topology) {
+    const nextTopology = topology === "p4-54x9" ? "p4-54x9" : "legacy-s3-51x9";
+    const nextWidth = nextTopology === "p4-54x9" ? P4_LED_EDITOR_WIDTH : LEGACY_LED_EDITOR_WIDTH;
+    if (nextWidth !== ledEditorWidth) {
+      ledEditorFrames = ledEditorFrames.map((frame) => remapLedEditorFrame(frame, ledEditorWidth, nextWidth));
+      if (ledEditorClipboard) {
+        ledEditorClipboard = remapLedEditorFrame(ledEditorClipboard, ledEditorWidth, nextWidth);
+      }
+      ledEditorWidth = nextWidth;
+    }
+    ledEditorTopology = nextTopology;
+    if (ledEditorCanvas) ledEditorCanvas.style.aspectRatio = `${ledEditorWidth} / ${LED_EDITOR_HEIGHT}`;
+    if (expressionLedPreview) {
+      expressionLedPreview.style.gridTemplateColumns = `repeat(${ledEditorWidth}, minmax(0, 1fr))`;
+      expressionLedPreview.style.aspectRatio = `${ledEditorWidth} / ${LED_EDITOR_HEIGHT}`;
+    }
+  }
+
   function ledEditorCellExists(row, col) {
+    if (ledEditorTopology === "p4-54x9") return row >= 0 && row < LED_EDITOR_HEIGHT && col >= 0 && col < ledEditorWidth;
     const lengths = [47, 49, 51, 51, 51, 51, 51, 49, 47];
-    const pad = Math.floor((LED_EDITOR_WIDTH - lengths[row]) / 2);
+    const pad = Math.floor((ledEditorWidth - lengths[row]) / 2);
     return col >= pad && col < pad + lengths[row];
   }
 
   function drawLedEditor() {
     if (!ledEditorCanvas) return;
     const context = ledEditorCanvas.getContext("2d");
-    const cellWidth = ledEditorCanvas.width / LED_EDITOR_WIDTH;
+    const cellWidth = ledEditorCanvas.width / ledEditorWidth;
     const cellHeight = ledEditorCanvas.height / LED_EDITOR_HEIGHT;
     context.fillStyle = "#15191c";
     context.fillRect(0, 0, ledEditorCanvas.width, ledEditorCanvas.height);
     const frame = ledEditorFrames[ledEditorFrame];
     for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
-      for (let col = 0; col < LED_EDITOR_WIDTH; col += 1) {
+      for (let col = 0; col < ledEditorWidth; col += 1) {
         const exists = ledEditorCellExists(row, col);
-        const value = frame[row * LED_EDITOR_WIDTH + col];
+        const value = frame[row * ledEditorWidth + col];
         const x = col * cellWidth + cellWidth / 2;
         const y = row * cellHeight + cellHeight / 2;
         const radius = Math.max(2, Math.min(cellWidth, cellHeight) * 0.31);
@@ -3845,9 +3881,9 @@
 
   function ledEditorPointerCell(event) {
     const rect = ledEditorCanvas.getBoundingClientRect();
-    const col = Math.floor(((event.clientX - rect.left) / rect.width) * LED_EDITOR_WIDTH);
+    const col = Math.floor(((event.clientX - rect.left) / rect.width) * ledEditorWidth);
     const row = Math.floor(((event.clientY - rect.top) / rect.height) * LED_EDITOR_HEIGHT);
-    if (row < 0 || row >= LED_EDITOR_HEIGHT || col < 0 || col >= LED_EDITOR_WIDTH || !ledEditorCellExists(row, col)) {
+    if (row < 0 || row >= LED_EDITOR_HEIGHT || col < 0 || col >= ledEditorWidth || !ledEditorCellExists(row, col)) {
       return null;
     }
     return { row, col };
@@ -3856,7 +3892,7 @@
   function paintLedEditorCell(event) {
     const cell = ledEditorPointerCell(event);
     if (!cell) return;
-    ledEditorFrames[ledEditorFrame][cell.row * LED_EDITOR_WIDTH + cell.col] =
+    ledEditorFrames[ledEditorFrame][cell.row * ledEditorWidth + cell.col] =
       ledEditorTool === "erase" ? 0 : ledEditorSymbol;
     ledEditorNotice = "";
     drawLedEditor();
@@ -3866,8 +3902,8 @@
     const source = ledEditorFrames[ledEditorFrame];
     const mirrored = new Uint8Array(source.length);
     for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
-      for (let col = 0; col < LED_EDITOR_WIDTH; col += 1) {
-        mirrored[row * LED_EDITOR_WIDTH + col] = source[row * LED_EDITOR_WIDTH + (LED_EDITOR_WIDTH - 1 - col)];
+      for (let col = 0; col < ledEditorWidth; col += 1) {
+        mirrored[row * ledEditorWidth + col] = source[row * ledEditorWidth + (ledEditorWidth - 1 - col)];
       }
     }
     ledEditorFrames[ledEditorFrame] = mirrored;
@@ -3923,8 +3959,8 @@
     const rows = [];
     for (let row = 0; row < LED_EDITOR_HEIGHT; row += 1) {
       let line = "";
-      for (let col = 0; col < LED_EDITOR_WIDTH; col += 1) {
-        const value = ledEditorCellExists(row, col) ? frame[row * LED_EDITOR_WIDTH + col] : 0;
+      for (let col = 0; col < ledEditorWidth; col += 1) {
+        const value = ledEditorCellExists(row, col) ? frame[row * ledEditorWidth + col] : 0;
         line += value ? LED_EDITOR_SYMBOLS[value - 1] : ".";
       }
       rows.push(line);
@@ -3950,6 +3986,7 @@
       program: {
         version: 2,
         type: "pixel_clip",
+        ...(ledEditorTopology === "p4-54x9" ? { topology: "p4-54x9" } : {}),
         fps: 10,
         palette,
         roles: { primary: "1", secondary: "2", accent: "3" },
@@ -3972,7 +4009,7 @@
         body: JSON.stringify(body),
       });
       if (sync) {
-        if (ledEditorStatus) ledEditorStatus.textContent = "正在同步 S3…";
+        if (ledEditorStatus) ledEditorStatus.textContent = "正在同步设备…";
         await fetchJson(`/api/led-effects/${encodeURIComponent(body.effect_id)}/sync`, { method: "POST" });
       }
       ledEffectSourceCache.set(body.effect_id, body);
@@ -3990,6 +4027,7 @@
   function loadLedEditorDocument(source) {
     const program = source && source.program;
     if (!program || program.type !== "pixel_clip") return;
+    if (program.topology === "p4-54x9") setLedEditorTopology("p4-54x9");
     if (ledEffectId) ledEffectId.value = source.effect_id || "";
     if (ledEffectLabel) ledEffectLabel.value = source.label || "";
     if (ledEffectRole) ledEffectRole.value = source.role || "mouth";
@@ -4002,11 +4040,16 @@
       for (let tick = 0; tick < Number(frame.ticks || 1); tick += 1) expanded.push(frame.rows || []);
     });
     ledEditorFrames = Array.from({ length: LED_EDITOR_FRAMES }, (_, frameIndex) => {
-      const values = new Uint8Array(LED_EDITOR_WIDTH * LED_EDITOR_HEIGHT);
+      const values = new Uint8Array(ledEditorWidth * LED_EDITOR_HEIGHT);
       const rows = expanded[frameIndex] || [];
+      const sourceWidth = program.topology === "p4-54x9" ? P4_LED_EDITOR_WIDTH : LEGACY_LED_EDITOR_WIDTH;
+      const columnOffset = Math.floor((ledEditorWidth - sourceWidth) / 2);
       rows.forEach((row, rowIndex) => {
         Array.from(String(row)).forEach((symbol, colIndex) => {
-          values[rowIndex * LED_EDITOR_WIDTH + colIndex] = Math.max(0, LED_EDITOR_SYMBOLS.indexOf(symbol) + 1);
+          const targetCol = colIndex + columnOffset;
+          if (rowIndex < LED_EDITOR_HEIGHT && targetCol >= 0 && targetCol < ledEditorWidth) {
+            values[rowIndex * ledEditorWidth + targetCol] = Math.max(0, LED_EDITOR_SYMBOLS.indexOf(symbol) + 1);
+          }
         });
       });
       return values;
@@ -4368,8 +4411,9 @@
       renderRecordings();
       const library = capacity.library;
       const device = capacity.device;
+      const isP4 = device && device.platform === "esp32-p4";
+      setLedEditorTopology(isP4 ? "p4-54x9" : "legacy-s3-51x9");
       if (expressionCapacityEl && library) {
-        const isP4 = device && device.platform === "esp32-p4";
         if (isP4) {
           const lcd = `${device.lcd_width || 320}×${device.lcd_height || 172}`;
           const led = `${device.led_width || 54}×${device.led_height || 9}`;
@@ -4475,9 +4519,12 @@
   }
 
   function ensureLedPreviewCells() {
-    if (!expressionLedPreview || expressionLedPreview.childElementCount === 459) return;
+    const cellCount = ledEditorWidth * LED_EDITOR_HEIGHT;
+    if (!expressionLedPreview || expressionLedPreview.childElementCount === cellCount) return;
     expressionLedPreview.innerHTML = "";
-    for (let index = 0; index < 459; index += 1) {
+    expressionLedPreview.style.gridTemplateColumns = `repeat(${ledEditorWidth}, minmax(0, 1fr))`;
+    expressionLedPreview.style.aspectRatio = `${ledEditorWidth} / ${LED_EDITOR_HEIGHT}`;
+    for (let index = 0; index < cellCount; index += 1) {
       const cell = document.createElement("span");
       cell.className = "expression-led-cell";
       expressionLedPreview.appendChild(cell);
@@ -4489,9 +4536,10 @@
     const program = effect.program || {};
     const template = program.template || (effect.role === "mouth" ? "mouth" : "");
     const effectId = effect.effect_id || "";
+    const centerX = (ledEditorWidth - 1) / 2;
     if (template === "arrow" || ["left", "right", "up", "down"].includes(effectId)) {
       const direction = effectId === "arrow" ? expressionDirection : effectId;
-      const x = col - 25;
+      const x = col - centerX;
       const y = row - 4;
       if (direction === "left" || direction === "right") {
         const signedX = direction === "left" ? -x : x;
@@ -4503,18 +4551,18 @@
         (signedY >= 0 && signedY <= 4 && Math.abs(x) === (4 - signedY) * 2);
     }
     if (template === "heart" || effectId === "heart") {
-      const x = (col - 25) / 2.4;
+      const x = (col - centerX) / 2.4;
       const y = (4 - row) * 1.6;
       const q = x * x + y * y - 30;
       return q * q * q - x * x * y * y * y < 0;
     }
     if (template === "pulse" || effect.role === "accent") {
       const radius = 5 + Math.sin(phase * Math.PI * 2) * 3;
-      const distance = Math.hypot((col - 25) / 3.2, row - 4);
+      const distance = Math.hypot((col - centerX) / 3.2, row - 4);
       return Math.abs(distance - radius) < 0.8;
     }
     const wave = 0.65 + 0.35 * Math.sin(phase * Math.PI * 2);
-    const dx = (col - 25) / (18 + wave * 6);
+    const dx = (col - centerX) / (18 + wave * 6);
     const dy = (row - 4) / (2.2 + wave * 1.5);
     return dx * dx + dy * dy <= 1 && dx * dx + dy * dy >= 0.42;
   }
@@ -4545,7 +4593,9 @@
         break;
       }
     }
-    const symbol = rows && rows[row] ? rows[row][col] : ".";
+    const sourceWidth = program.topology === "p4-54x9" ? P4_LED_EDITOR_WIDTH : LEGACY_LED_EDITOR_WIDTH;
+    const sourceCol = sourceWidth === ledEditorWidth ? col : col - Math.floor((ledEditorWidth - sourceWidth) / 2);
+    const symbol = rows && rows[row] && sourceCol >= 0 ? rows[row][sourceCol] : ".";
     if (!symbol || symbol === ".") return null;
     const primarySymbol = program.roles && program.roles.primary;
     if (composerColorOverride && composerColorOverride.checked && symbol === primarySymbol) {
@@ -4564,8 +4614,8 @@
     const brightness = Math.min(requestedBrightness, brightnessCeiling) / 96;
     const pixelClipReady = effect && effect.kind === "pixel_clip" && ledEffectSourceCache.has(effect.effect_id);
     Array.from(expressionLedPreview.children).forEach((cell, index) => {
-      const row = Math.floor(index / 51);
-      const col = index % 51;
+      const row = Math.floor(index / ledEditorWidth);
+      const col = index % ledEditorWidth;
       const pixelColor = pixelClipReady ? pixelClipCellColor(effect, row, col, phase) : null;
       const active = pixelClipReady ? Boolean(pixelColor) : ledCellActive(effect, row, col, phase);
       const activeColor = pixelColor || color;

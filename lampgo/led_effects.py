@@ -20,6 +20,11 @@ from lampgo import personastore
 LED_WIDTH = 51
 LED_HEIGHT = 9
 LED_PIXEL_COUNT = 447
+P4_LED_WIDTH = 54
+P4_LED_HEIGHT = 9
+P4_LED_PIXEL_COUNT = P4_LED_WIDTH * P4_LED_HEIGHT
+LED_TOPOLOGY_LEGACY = "legacy-s3-51x9"
+LED_TOPOLOGY_P4 = "p4-54x9"
 LED_FPS = 10
 LED_TICK_COUNT = 30
 LED_FRAME_BYTES = (LED_PIXEL_COUNT + 1) // 2
@@ -83,8 +88,11 @@ def _rgb_bytes(color: str) -> bytes:
     return bytes((int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)))
 
 
-def _physical_index(row: int, col: int) -> int | None:
+def _physical_index(row: int, col: int, *, topology: str) -> int | None:
     """Map the editor's front-facing 51x9 grid to the wired pixel order."""
+    if topology == LED_TOPOLOGY_P4:
+        physical_col = P4_LED_WIDTH - 1 - col if row & 1 else col
+        return row * P4_LED_WIDTH + physical_col
     wired_row = LED_HEIGHT - 1 - row
     wired_col = LED_WIDTH - 1 - col
     row_length = _ROW_LENGTHS[wired_row]
@@ -95,21 +103,38 @@ def _physical_index(row: int, col: int) -> int | None:
     return _ROW_STARTS[wired_row] + local_col
 
 
-def _pack_frame(rows: list[str], symbol_indexes: dict[str, int]) -> bytes:
-    if len(rows) != LED_HEIGHT:
-        raise LedEffectError(f"each LED frame must contain {LED_HEIGHT} rows")
-    pixels = bytearray(LED_PIXEL_COUNT)
+def _topology_dimensions(topology: str) -> tuple[int, int, int]:
+    if topology == LED_TOPOLOGY_LEGACY:
+        return LED_WIDTH, LED_HEIGHT, LED_PIXEL_COUNT
+    if topology == LED_TOPOLOGY_P4:
+        return P4_LED_WIDTH, P4_LED_HEIGHT, P4_LED_PIXEL_COUNT
+    raise LedEffectError(f"unsupported LED topology: {topology}")
+
+
+def _program_topology(program: dict[str, Any]) -> str:
+    topology = str(program.get("topology") or LED_TOPOLOGY_LEGACY).strip().lower()
+    if topology not in {LED_TOPOLOGY_LEGACY, LED_TOPOLOGY_P4}:
+        raise LedEffectError(f"unsupported LED topology: {topology}")
+    return topology
+
+
+def _pack_frame(
+    rows: list[str], symbol_indexes: dict[str, int], *, width: int, height: int, pixel_count: int, topology: str
+) -> bytes:
+    if len(rows) != height:
+        raise LedEffectError(f"each LED frame must contain {height} rows")
+    pixels = bytearray(pixel_count)
     for row_index, raw_row in enumerate(rows):
         row = str(raw_row)
-        if len(row) != LED_WIDTH:
-            raise LedEffectError(f"frame row {row_index} must contain exactly {LED_WIDTH} cells")
+        if len(row) != width:
+            raise LedEffectError(f"frame row {row_index} must contain exactly {width} cells")
         for col_index, symbol in enumerate(row):
             if symbol not in symbol_indexes:
                 raise LedEffectError(f"frame uses undefined palette symbol: {symbol}")
-            physical = _physical_index(row_index, col_index)
+            physical = _physical_index(row_index, col_index, topology=topology)
             if physical is not None:
                 pixels[physical] = symbol_indexes[symbol]
-    packed = bytearray(LED_FRAME_BYTES)
+    packed = bytearray((pixel_count + 1) // 2)
     for index, palette_index in enumerate(pixels):
         if index & 1:
             packed[index // 2] |= palette_index & 0x0F
@@ -124,6 +149,9 @@ def compile_led_program(program: dict[str, Any]) -> tuple[dict[str, Any], bytes]
         raise LedEffectError("program must be an object")
     if int(program.get("version") or 0) != 2 or program.get("type") != "pixel_clip":
         raise LedEffectError("program must use version=2 and type=pixel_clip")
+    topology = _program_topology(program)
+    width, height, pixel_count = _topology_dimensions(topology)
+    frame_bytes = (pixel_count + 1) // 2
     if int(program.get("fps") or LED_FPS) != LED_FPS:
         raise LedEffectError(f"pixel clips must use {LED_FPS} fps")
 
@@ -178,7 +206,14 @@ def compile_led_program(program: dict[str, Any]) -> tuple[dict[str, Any], bytes]
         ticks = int(raw_frame.get("ticks") or 1)
         if ticks < 1 or ticks > LED_TICK_COUNT:
             raise LedEffectError(f"program.frames[{frame_number}].ticks must be 1-{LED_TICK_COUNT}")
-        packed = _pack_frame(rows, symbol_indexes)
+        packed = _pack_frame(
+            rows,
+            symbol_indexes,
+            width=width,
+            height=height,
+            pixel_count=pixel_count,
+            topology=topology,
+        )
         unique_index = frame_indexes.get(packed)
         if unique_index is None:
             unique_index = len(unique_frames)
@@ -197,14 +232,14 @@ def compile_led_program(program: dict[str, Any]) -> tuple[dict[str, Any], bytes]
     header = LEF_HEADER.pack(
         LEF_MAGIC,
         LEF_VERSION,
-        LED_WIDTH,
-        LED_HEIGHT,
+        width,
+        height,
         LED_FPS,
         LED_TICK_COUNT,
         len(unique_frames),
         len(ordered_symbols),
         0,
-        LED_FRAME_BYTES,
+        frame_bytes,
         LEF_HEADER_BYTES,
         len(payload),
         crc32,
@@ -226,6 +261,8 @@ def compile_led_program(program: dict[str, Any]) -> tuple[dict[str, Any], bytes]
         "roles": roles,
         "frames": normalized_frames,
     }
+    if topology == LED_TOPOLOGY_P4:
+        normalized["topology"] = topology
     return normalized, package
 
 
@@ -240,12 +277,18 @@ def inspect_led_package(package: bytes) -> dict[str, Any]:
     primary, secondary, accent = unpacked[13:16]
     if magic != LEF_MAGIC or version != LEF_VERSION:
         raise LedEffectError("unsupported LED package")
-    if (width, height, fps, ticks, frame_bytes, header_bytes) != (
-        LED_WIDTH,
-        LED_HEIGHT,
+    if (width, height) == (LED_WIDTH, LED_HEIGHT):
+        topology = LED_TOPOLOGY_LEGACY
+        expected_frame_bytes = LED_FRAME_BYTES
+    elif (width, height) == (P4_LED_WIDTH, P4_LED_HEIGHT):
+        topology = LED_TOPOLOGY_P4
+        expected_frame_bytes = (P4_LED_PIXEL_COUNT + 1) // 2
+    else:
+        raise LedEffectError("LED package topology does not match this product")
+    if (fps, ticks, frame_bytes, header_bytes) != (
         LED_FPS,
         LED_TICK_COUNT,
-        LED_FRAME_BYTES,
+        expected_frame_bytes,
         LEF_HEADER_BYTES,
     ):
         raise LedEffectError("LED package topology does not match this product")
@@ -260,6 +303,7 @@ def inspect_led_package(package: bytes) -> dict[str, Any]:
     return {
         "width": width,
         "height": height,
+        "topology": topology,
         "fps": fps,
         "frame_count": ticks,
         "unique_frame_count": frames,
@@ -269,6 +313,37 @@ def inspect_led_package(package: bytes) -> dict[str, Any]:
         "sha256": hashlib.sha256(package).hexdigest(),
         "roles": {"primary": primary, "secondary": secondary, "accent": accent},
     }
+
+
+def p4_program(program: dict[str, Any]) -> dict[str, Any]:
+    """Return a native 54x9 P4 variant without mutating a legacy authoring file.
+
+    Existing hand-drawn S3 assets stay valid: their 51 visible columns are
+    centred on the new rectangular canvas (one left and two right padding
+    columns).  New P4 drawings already use all 54 columns and pass through.
+    """
+    if not isinstance(program, dict):
+        raise LedEffectError("program must be an object")
+    topology = _program_topology(program)
+    if topology == LED_TOPOLOGY_P4:
+        return dict(program)
+    converted = dict(program)
+    frames: list[dict[str, Any]] = []
+    for frame_number, raw_frame in enumerate(program.get("frames") or []):
+        if not isinstance(raw_frame, dict):
+            raise LedEffectError(f"program.frames[{frame_number}] must be an object")
+        rows = raw_frame.get("rows")
+        if not isinstance(rows, list):
+            raise LedEffectError(f"program.frames[{frame_number}].rows must be an array")
+        frames.append(
+            {
+                **raw_frame,
+                "rows": ["." + str(row) + ".." for row in rows],
+            }
+        )
+    converted["frames"] = frames
+    converted["topology"] = LED_TOPOLOGY_P4
+    return converted
 
 
 def list_pixel_led_effects() -> list[dict[str, Any]]:
