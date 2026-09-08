@@ -13,7 +13,7 @@ from pathlib import Path
 
 import structlog
 
-from lampgo.core.hal import HardwareAbstraction
+from lampgo.core.motor_hal import MotorHAL
 from lampgo.core.types import JOINT_NAMES
 
 logger = structlog.get_logger(__name__)
@@ -22,7 +22,7 @@ logger = structlog.get_logger(__name__)
 class TeachRecorder:
     """Records a teach session to a CSV file."""
 
-    def __init__(self, hal: HardwareAbstraction, recordings_dir: Path, fps: int = 30) -> None:
+    def __init__(self, hal: MotorHAL, recordings_dir: Path, fps: int = 30) -> None:
         self._hal = hal
         self._recordings_dir = recordings_dir
         self._fps = fps

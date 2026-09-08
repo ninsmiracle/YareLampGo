@@ -131,7 +131,7 @@
             <input id="esp32-volume-slider" class="volume-slider" type="range" min="0" max="100" value="70" step="1" />
             <span id="esp32-volume-value" class="volume-value">70%</span>
           </label>
-          <div id="esp32-led-brightness-control" class="volume-control led-brightness-control" role="group" aria-label="S3 LED 灯板亮度" title="立即调节当前及后续 S3 LED 效果的亮度上限">
+          <div id="esp32-led-brightness-control" class="volume-control led-brightness-control" role="group" aria-label="灯头 LED 灯板亮度" title="立即调节当前及后续灯头 LED 效果的亮度上限">
             <label class="volume-label" for="esp32-led-brightness-slider">灯板亮度</label>
             <input id="esp32-led-brightness-slider" class="volume-slider" type="range" min="1" max="96" value="32" step="1" aria-label="灯板亮度精确值" />
             <output id="esp32-led-brightness-value" class="volume-value" for="esp32-led-brightness-slider" aria-live="polite">32</output>
@@ -362,7 +362,7 @@
             <div class="skill-section-head">
               <div>
                 <div class="skill-section-title">表情工作台</div>
-                <div class="skill-section-desc">组合 C6 眼睛动画与 S3 LED 嘴巴、符号和方向效果。</div>
+                <div class="skill-section-desc">组合并同步播放灯头 P4 屏幕眼睛动画与 LED 嘴巴、符号和方向效果。</div>
               </div>
               <div class="skill-section-count" id="expression-count">0</div>
             </div>
@@ -462,11 +462,11 @@
                     <option value="once">单次</option>
                     <option value="loop" selected>循环</option>
                   </select>
-                  <span id="led-editor-status" class="led-editor-status">新动画</span>
+                  <span id="led-editor-status" class="led-editor-status">旧版 51×9 图案会自动映射到 P4 54×9 灯板</span>
                 </div>
                 <div class="led-editor-workspace">
                   <div class="led-editor-stage">
-                    <canvas id="led-editor-canvas" width="1020" height="180" aria-label="51 乘 9 LED 动画画布"></canvas>
+                    <canvas id="led-editor-canvas" width="1020" height="180" aria-label="旧版 51 乘 9 LED 动画画布，会自动映射到 P4 54 乘 9 灯板"></canvas>
                     <div id="led-frame-timeline" class="led-frame-timeline" aria-label="30 帧时间轴"></div>
                   </div>
                   <div class="led-editor-tools">
@@ -484,6 +484,7 @@
                       <button id="btn-led-clear-all-frames" class="is-danger" type="button" title="清空全部 30 帧">清空全部帧</button>
                     </div>
                     <div class="led-editor-command-row">
+                      <button id="btn-led-topology-test" class="ghost-button" type="button" title="P4 新灯板：显示物理走线标记，不会控制舵机">校准走线</button>
                       <button id="btn-led-editor-preview" class="ghost-button" type="button">播放预览</button>
                       <button id="btn-led-editor-save" class="ghost-button" type="button">仅保存</button>
                       <button id="btn-led-editor-sync" class="primary-button" type="submit">保存并同步</button>
@@ -519,7 +520,7 @@
                   </div>
                   <div class="expression-command-row">
                     <button id="btn-expression-preview" class="ghost-button" type="button" title="本地预览">▶ 预览</button>
-                    <button id="btn-expression-sync" class="ghost-button" type="button">同步所选资源</button>
+                    <button id="btn-expression-sync" class="ghost-button" type="button">同步到 P4</button>
                     <button id="btn-expression-set-default" class="ghost-button" type="button">设为默认搭配</button>
                     <button id="btn-expression-play" class="primary-button" type="button">▶ 播放</button>
                     <button id="btn-expression-stop" class="ghost-button" type="button" title="停止播放">■</button>
@@ -744,33 +745,18 @@
 
             <div class="settings-card">
               <div class="settings-card-title">声音和唤醒</div>
-              <div class="settings-card-desc">语音识别和火山播报共用火山引擎 App ID / Token；没有火山配置时会自动使用 Edge TTS 播放回复。</div>
+              <div class="settings-card-desc">语音识别与播报复用上方 LLM 设置中的 MiMo Base URL 和 API Key；无需另配语音服务商凭据。</div>
 
               <div class="settings-form" data-cfg-section="voice">
                 <label class="settings-field" data-cfg-field="voice.tts_provider">
                   <span class="settings-field-label">播报服务</span>
                   <select class="settings-input" data-cfg-input="voice.tts_provider">
-                    <option value="volcengine">火山引擎 TTS（App ID / Token）</option>
-                    <option value="edge-tts">Edge TTS（免费无 Key）</option>
+                    <option value="mimo">MiMo V2.5 TTS（复用 LLM 配置）</option>
                   </select>
                   <span class="settings-field-hint" data-cfg-tts-provider-hint>
-                    火山引擎使用下方 App ID / Token；未配置时会自动回退到 Edge TTS。
+                    ASR 使用 <code>mimo-v2.5-asr</code>，TTS 使用 <code>mimo-v2.5-tts</code>。
                   </span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_provider"></span>
-                </label>
-
-                <label class="settings-field" data-cfg-field="voice.volcengine_app_id">
-                  <span class="settings-field-label">火山引擎 App ID</span>
-                  <input class="settings-input" type="text" placeholder="your-app-id" data-cfg-input="voice.volcengine_app_id" autocomplete="off">
-                  <span class="settings-field-hint">火山 ASR 与火山 TTS 共用。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_app_id"></span>
-                </label>
-
-                <label class="settings-field" data-cfg-field="voice.volcengine_access_token">
-                  <span class="settings-field-label">火山引擎 Access Token</span>
-                  <input class="settings-input settings-secret-input" type="text" placeholder="your-access-token" data-cfg-input="voice.volcengine_access_token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
-                  <span class="settings-field-hint">留空时聊天播报会自动回退到 Edge TTS。</span>
-                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.volcengine_access_token"></span>
                 </label>
 
                 <label class="settings-field" data-cfg-field="voice.wake_word">
@@ -786,24 +772,22 @@
                 </label>
 
                 <details class="settings-disclosure">
-                  <summary>高级：火山 TTS 音色和模型</summary>
+                  <summary>高级：MiMo TTS 音色和模型</summary>
                   <div class="settings-form settings-form-nested">
                     <label class="settings-field" data-cfg-field="voice.tts_voice">
-                      <span class="settings-field-label">火山 TTS 音色</span>
+                      <span class="settings-field-label">MiMo TTS 音色</span>
                       <select class="settings-input" data-cfg-input="voice.tts_voice" data-cfg-tts-voice>
                       </select>
-                      <input class="settings-input hidden" type="text" placeholder="输入火山音色 ID" title="按 Esc 返回音色列表" data-cfg-tts-voice-custom autocomplete="off">
-                      <span class="settings-field-hint">默认 <code>zh_female_vv_uranus_bigtts</code>；选择“自定义”后填写火山音色 ID，选择 Edge TTS 时这里会切换为 Edge 声音列表。</span>
+                      <input class="settings-input hidden" type="text" placeholder="输入 MiMo 音色 ID" title="按 Esc 返回音色列表" data-cfg-tts-voice-custom autocomplete="off">
+                      <span class="settings-field-hint">默认 <code>mimo_default</code>；选择“自定义”后填写 MiMo 音色 ID。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_voice"></span>
                     </label>
                     <label class="settings-field" data-cfg-field="voice.tts_model">
-                      <span class="settings-field-label">火山 TTS Model</span>
+                      <span class="settings-field-label">MiMo TTS Model</span>
                       <select class="settings-input" data-cfg-input="voice.tts_model">
-                        <option value="">火山默认</option>
-                        <option value="seed-tts-2.0-standard">seed-tts-2.0-standard</option>
-                        <option value="seed-tts-2.0-expressive">seed-tts-2.0-expressive</option>
+                        <option value="mimo-v2.5-tts">mimo-v2.5-tts</option>
                       </select>
-                      <span class="settings-field-hint">仅火山引擎 TTS 使用，Edge TTS 会自动忽略。</span>
+                      <span class="settings-field-hint">与上方 MiMo Base URL/API Key 一起提交到 MiMo 语音接口。</span>
                       <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="voice.tts_model"></span>
                     </label>
                   </div>
@@ -1022,7 +1006,7 @@
                 <div class="esp32-inline-actions">
                   <button id="btn-esp32-setup-wifi" class="ghost-button" type="button" title="连接 ESP32 临时热点并配置 WiFi">配网</button>
                   <button id="btn-esp32-reboot" class="ghost-button" type="button">重启</button>
-                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除当前配对和设备 WiFi，重启后重新开启 Lampgo-Setup 热点">解绑设备</button>
+                  <button id="btn-esp32-forget" class="ghost-button is-danger" type="button" title="清除当前配对和设备 WiFi，重启后重新开启设备配网热点">解绑设备</button>
                   <span id="esp32-action-status" class="settings-status" aria-live="polite"></span>
                 </div>
               </div>
@@ -1066,17 +1050,32 @@
             </div>
 
             <div class="settings-card">
-              <div class="settings-card-title">本机硬件</div>
+              <div class="settings-card-title">舵机与本机输入</div>
               <div class="settings-card-desc">
-                选电机串口、摄像头和麦克风。标定和角度单位一般不用改，已收在高级里。
+                新 P4 选择无线舵机执行器；旧设备仍可选电脑串口。这里也保留本机摄像头和麦克风回退。
               </div>
 
               <div class="settings-form" data-cfg-section="hardware">
+                <label class="settings-field" data-cfg-field="device.motor_transport">
+                  <span class="settings-field-label">舵机连接方式</span>
+                  <select class="settings-input" data-cfg-input="device.motor_transport">
+                    <option value="p4">P4 无线执行器</option>
+                    <option value="serial">电脑本地串口（旧架构）</option>
+                  </select>
+                  <span class="settings-field-hint">P4 模式复用上方无线设备地址，动作指令不再经过电脑 USB。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.motor_transport"></span>
+                </label>
                 <label class="settings-field" data-cfg-field="device.motor_port">
                   <span class="settings-field-label">电机串口 (motor_port)</span>
                   <input class="settings-input" type="text" placeholder="/dev/tty.usbmodem..." data-cfg-input="device.motor_port" list="cfg-hw-serial-list">
                   <span class="settings-field-hint">为空时会自动检测并预填；保存后立即热重连电机。</span>
                   <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.motor_port"></span>
+                </label>
+                <label class="settings-field" data-cfg-field="device.p4_motion_port">
+                  <span class="settings-field-label">P4 运动端口</span>
+                  <input class="settings-input" type="number" min="1" max="65535" data-cfg-input="device.p4_motion_port">
+                  <span class="settings-field-hint">固件默认 82；设备地址复用无线 ESP32 的首选地址。</span>
+                  <span class="settings-field-hint settings-field-hint-override hidden" data-cfg-override-for="device.p4_motion_port"></span>
                 </label>
                 <label class="settings-field" data-cfg-field="camera.port">
                   <span class="settings-field-label">摄像头端口 (camera.port)</span>
@@ -1332,7 +1331,7 @@
       <label class="record-dialog-field">
         <span class="record-dialog-label">绑定组合表情（眼睛 + LED）</span>
         <select id="record-expression-select" class="record-dialog-input record-dialog-select"></select>
-        <span class="record-dialog-hint">组合表情会在整个动作期间循环播放 C6 眼睛与 S3 LED；也可在下拉框中选择仅 LED 效果。</span>
+        <span class="record-dialog-hint">组合表情会在整个动作期间循环播放 P4 本地屏幕与 LED；也可在下拉框中选择仅 LED 效果。</span>
       </label>
       <div id="record-name-error" class="record-dialog-error"></div>
       <div class="record-dialog-actions">
@@ -1469,15 +1468,15 @@
 
       <section class="esp32-setup-step hidden" data-step="1">
         <div class="esp32-setup-desc">
-          首次使用或重置网络后，ESP32 会开启一个临时 WiFi 热点，名字形如
-          <code>Lampgo-Setup-XXXX</code>（XXXX 为设备 MAC 末 4 位，印在卡片上或串口日志里），
-          默认密码 <code>lampgo123</code>。
+          首次使用或重置网络后，ESP32 会开启临时 WiFi 热点。P4 新板为
+          <code>Lampgo-P4-Setup-XXXX</code>，密码 <code>lampgo-p4-setup</code>；旧 S3 板为
+          <code>Lampgo-Setup-XXXX</code>，密码 <code>lampgo123</code>。XXXX 是设备 MAC 末 4 位。
           <ol class="esp32-setup-hint-list">
             <li>用手机 / 笔记本连上该热点。</li>
             <li>系统可能会弹出"无互联网连接"的提示，<b>保持连接</b>即可。</li>
             <li>连上后回到这个页面，点击下一步。一般不需要手动打开其它网页。</li>
           </ol>
-          <p class="esp32-setup-tip">找不到 <code>Lampgo-Setup-XXXX</code>？先在已连接电脑上点击「解绑设备」清除 WiFi；如果无法访问设备，请通过 USB 重新烧录或擦除。</p>
+          <p class="esp32-setup-tip">找不到设备配网热点？先在已连接电脑上点击「解绑设备」清除 WiFi；如果设备完全无法访问，再使用 USB 维护。</p>
         </div>
         <div class="esp32-setup-actions">
           <button id="btn-esp32-setup-next-1" class="send-button" type="button">我已连上设备热点 →</button>

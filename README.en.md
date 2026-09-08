@@ -16,6 +16,17 @@
 
 YareLampGo puts motors, screens, RGB LEDs, a camera, microphones, and LLM tooling into one desk lamp. Control it from the Web UI, talk to it directly, or let Codex guide setup, diagnose problems, and handle complex tasks.
 
+> **Choose a hardware route first.** The legacy S3/C6 hardware and the new P4 wireless head are both supported. P4 is opt-in; it does not overwrite legacy firmware, serial settings, or the S3-to-C6 expression flow.
+
+## Hardware routes: legacy S3/C6 and P4 in parallel
+
+| Hardware | Selection and entry point | Boundary |
+| --- | --- | --- |
+| **Legacy: S3 + standalone C6 display** | Keep `device.motor_transport = "serial"` (the default); follow [Manual V2.0 Setup](docs/getting-started/manual-hardware-setup.en.md) and the firmware repository root | The computer still drives the Feetech bus over USB; S3 forwards expression assets to C6. |
+| **New: ESP32-P4 head + C6 Wi-Fi** | Explicitly set `device.motor_transport = "p4"`; flash `ESP32_P4_HEAD/` in the firmware repository | The backend controls P4 over Wi-Fi; C6 is P4's network coprocessor, while P4 drives head motors, LED, and LCD directly. |
+
+See the [P4 wireless head guide](docs/hardware/p4-wireless-head.md) for configuration, flashing, asset transport, and rollback. Never flash the legacy C6 display firmware onto the C6 used by a P4 board, and never treat P4's native USB debug port as the legacy Feetech motor bus.
+
 ## What It Can Do
 
 - **Move and express itself.** A 5-DOF arm, animated eyes, and an RGB matrix respond together.
@@ -69,7 +80,7 @@ See [Codex Integration](docs/guides/codex-integration.md) for details.
 
 ## Prefer Manual Setup?
 
-Manual installation and flashing are still fully documented. The DIY sequence is: install software → assign servo IDs 1–5 → flash the S3/C6 → assemble and verify power while unpowered → scan motors → calibrate → provision and start.
+Manual installation and flashing are still fully documented. For legacy S3/C6 hardware, the DIY sequence is: install software → assign servo IDs 1–5 → flash the S3/C6 → assemble and verify power while unpowered → scan motors → calibrate → provision and start. P4 users should use the separate wireless-head route above.
 
 See [Manual V2.0 Setup, Flashing, and First Start](docs/getting-started/manual-hardware-setup.en.md) for commands, safety checks, and Windows/macOS/Linux notes. Windows x64 users can follow the [Windows x64 Hardware Flow](docs/getting-started/windows-hardware-flow.md) from installation through the first motion. Use the separate [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) repository as the source of truth for firmware flashing.
 
@@ -104,7 +115,7 @@ uv run lampgo clear                # Stop leftovers and release motor torque
 
 For command-specific options, run `uv run lampgo <command> --help`.
 
-## Build V2.0
+## Legacy S3/C6 build material
 
 V2.0 replaces V1.0. Do not mix structures, wiring, or calibration files across generations.
 
@@ -116,7 +127,8 @@ V2.0 replaces V1.0. Do not mix structures, wiring, or calibration files across g
 | Complete STEP assembly | [V2.0 Structure](assets/printable/README.en.md) |
 | GitHub-readable illustrated assembly guide | [Assembly guide Markdown (Chinese)](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.md) |
 | Original illustrated assembly guide | [Assembly DOCX download](docs/hardware/v2/YareLampGo_V2.0_assembly_manual.docx) |
-| S3/C6 firmware | [YareLampGo_esp32](https://github.com/shelly-tang/YareLampGo_esp32) |
+| S3/C6 firmware | [YareLampGo_esp32 repository root](https://github.com/shelly-tang/YareLampGo_esp32) |
+| P4 wireless head firmware and route selection | [P4 wireless head guide](docs/hardware/p4-wireless-head.md) · [firmware `ESP32_P4_HEAD/`](https://github.com/shelly-tang/YareLampGo_esp32/tree/main/ESP32_P4_HEAD) |
 
 The current release contains a complete STEP assembly, not pre-split STL/3MF files. The electrical PNGs are wiring and routing references, not a board-house-ready Gerber package.
 

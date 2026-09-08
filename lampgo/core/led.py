@@ -217,6 +217,20 @@ class LEDController:
 
         if self._serial is None:
             expression = LED_MODE_NAMES.get(mode, str(mode))
+            if self._active_device_is_p4():
+                # On the integrated head board a built-in expression belongs
+                # to both surfaces.  The P4 keeps the LED and LCD start time
+                # together; the legacy endpoint only changed the LED panel.
+                return self._send_remote_path(
+                    "/device/expressions/play",
+                    {
+                        "expression": expression,
+                        "led_mode": mode,
+                        "led_params": {"brightness": self._brightness_ceiling_value()},
+                        "playback": "loop",
+                    },
+                    reason="expression_play",
+                )
             payload: dict[str, Any] = {"mode": mode, "expression": expression}
             try:
                 from lampgo.expression_clips import clip_for_expression
@@ -235,6 +249,17 @@ class LEDController:
         if self._serial is None:
             return self._send_remote({"brightness": brightness})
         return self._send(f"b{brightness}\n")
+
+    def _active_device_is_p4(self) -> bool:
+        manager = self._esp32_manager
+        if manager is None:
+            return False
+        try:
+            status = manager.get_status()
+            device = status.get("device") if isinstance(status, dict) else None
+            return isinstance(device, dict) and device.get("platform") == "esp32-p4"
+        except Exception:
+            return False
 
     def off(self) -> bool:
         return self.set_mode(0)

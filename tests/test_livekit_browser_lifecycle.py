@@ -58,6 +58,17 @@ def test_livekit_start_can_be_cancelled_during_each_async_stage() -> None:
     assert 'cancelled ? "start_cancelled" : "start_failed"' in start
 
 
+def test_livekit_token_tags_the_selected_audio_source() -> None:
+    source = _source()
+    start = _section(
+        source,
+        "  async function startBrowserLiveKitCall(options = {}) {",
+        "  async function scheduleHangupAfterTtsPlayout() {",
+    )
+
+    assert 'audio_source: useEsp32 ? "esp32" : "browser"' in start
+
+
 def test_livekit_room_end_uses_awaitable_fetch_and_beacon_only_for_page_exit() -> None:
     source = _source()
     notify = _section(

@@ -26,6 +26,17 @@ uv run lampgo run --web --web-port 18790
 LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 ```
 
+## 先选择硬件路线：旧 S3/C6 或新 P4
+
+两条路线同时受支持，P4 不是对旧设备的覆盖升级：
+
+| 路线 | 后端选择 | 小屏与表情资产 | 舵机通道 |
+| --- | --- | --- | --- |
+| 旧 S3 + C6 显示屏 | `device.motor_transport = "serial"`（默认） | 后端 → S3 → C6 | 电脑 USB → Feetech 总线 |
+| P4 头部板 + C6 Wi-Fi | `device.motor_transport = "p4"` | 后端 → P4 LittleFS，P4 同步 LED/LCD | 后端 Wi-Fi → P4 → 灯头舵机 |
+
+后端仅在你显式设置 `motor_transport = "p4"` 时才连接 P4 运动 WebSocket；发现 ESP32 设备本身不会改变旧用户的串口路径。设备的 `platform` 能力标识会让表情上传自动使用 P4 直连或旧 S3→C6 协议。完整选择、烧录和回退规则见 [P4 无线头部板路线](../hardware/p4-wireless-head.md)。
+
 ## 文件位置
 
 ```text
@@ -36,7 +47,7 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 └── <persona>.md         # 当前人设文件
 ```
 
-`~/.lampgo/config.toml` 和 `~/.lampgo/credentials.json` 都是本机私有文件，不要提交到仓库。火山引擎 App ID / Access Token 目前由 Web 设置页写入本地配置文件，也应按敏感信息处理。
+`~/.lampgo/config.toml` 和 `~/.lampgo/credentials.json` 都是本机私有文件，不要提交到仓库。MiMo API Key 由 LLM 设置页写入本地凭据文件，也应按敏感信息处理。
 
 ## Web 端配置入口
 
@@ -47,7 +58,7 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 硬件页可以配置：
 
 - `无线接入`：ESP32 设备自动发现或指定 `lampgo-cam-XXXX.local` / IP，调整画面尺寸、JPEG 画质和 HTTP 超时。
-- `本机硬件`：电机串口 `device.motor_port`、本地摄像头 `camera.port`、本地麦克风 `voice.mic_device`。
+- `本机硬件`：选择 `device.motor_transport`（旧 USB 串口或 P4 无线）、电机串口 `device.motor_port`、本地摄像头 `camera.port`、本地麦克风 `voice.mic_device`。
 - `高级`：设备标识 `device.lamp_id`、角度单位 `device.use_degrees` 和堵转保护 `device.max_torque_pct`。
 - `运动 / 安全`：默认动作速度、动作风格、待机随机摆动、安全速度和安全加速度。
 
@@ -57,9 +68,9 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 模型页包含两类软件配置：
 
 - `LLM 模型`：Provider、Base URL、API Key、主模型、快速模型、消息格式、上下文窗口、输出 token、历史轮数、温度和超时。
-- `声音和唤醒`：火山引擎 TTS / ASR、Edge TTS 回退、火山 App ID / Access Token、唤醒词、通话模式和回声保护。
+- `声音和唤醒`：MiMo TTS / ASR（复用 LLM Base URL / API Key）、唤醒词、通话模式和回声保护。
 
-LLM 保存后下一条消息即可生效；火山引擎和语音相关字段保存后会重建语音链路。Web 端口这类服务监听配置保存后需要重启 `lampgo run --web`。
+LLM 保存后下一条消息即可生效；MiMo 语音和语音相关字段保存后会重建语音链路。Web 端口这类服务监听配置保存后需要重启 `lampgo run --web`。
 
 ## 配置 LLM
 
@@ -100,42 +111,29 @@ export LAMPGO_LLM_MODEL="mimo-v2.5"
 export LAMPGO_LLM_API_BASE="https://api.xiaomimimo.com/v1"
 ```
 
-## 配置火山引擎语音
+## 配置 MiMo 语音
 
-火山引擎用于语音识别和语音播报：
+MiMo 同时用于语音识别和语音播报，并复用 LLM 的 `api_base` 与 API Key：
 
-- `stt_provider = "volcengine"`：语音转文字，默认模型为 `bigmodel`。
-- `tts_provider = "volcengine"`：文字转语音，需要 App ID / Access Token。
-- 未配置火山凭证或改选 `edge-tts` 时，聊天播报会回退到 Edge TTS。
+- `stt_provider = "mimo"`，默认模型 `mimo-v2.5-asr`。
+- `tts_provider = "mimo"`，默认模型 `mimo-v2.5-tts`、音色 `mimo_default`。
+- 本地网页播报、设备侧唤醒语音循环与 LiveKit 通话 Agent 使用同一份 MiMo 语音设置。
 
-开通服务前先准备火山引擎账号。可参考 [豆包语音快速入门](https://www.volcengine.com/docs/6561/163043?lang=zh) 完成账号注册、实名认证、创建应用和服务开通；如果找不到 App ID / Access Token，可参考 [豆包语音控制台使用 FAQ](https://www.volcengine.com/docs/6561/196768?lang=zh) 查看参数位置。YareLampGo 当前需要填写的是旧版控制台兼容参数 `App ID` 和 `Access Token`。
+配置步骤：
 
-开通时建议确认应用已启用这些能力：
-
-- [大模型录音文件极速版识别](https://www.volcengine.com/docs/6561/1631584)：`volc.bigasr.auc_turbo`。用于 Web 录音、唤醒链路等短音频识别，接口会一次请求直接返回结果。
-- [大模型流式语音识别](https://www.volcengine.com/docs/6561/1354869?lang=zh)：`volc.bigasr.sauc.duration`。用于实时通话 / LiveKit 语音链路。
-- [豆包语音合成大模型 2.0](https://www.volcengine.com/docs/6561/1329505?lang=zh)：`seed-tts-2.0`。用于默认音色 `zh_female_vv_uranus_bigtts` 的台灯播报。
-
-Web 配置步骤：
-
-1. 打开 `设置 -> 模型 -> 声音和唤醒`。
-2. 将 `播报服务` 设为 `火山引擎 TTS（App ID / Token）`。
-3. 填写 `火山引擎 App ID` 和 `火山引擎 Access Token`。
-4. 首次使用可保持默认音色 `zh_female_vv_uranus_bigtts`。
-5. 如需调整音色或模型，展开 `高级：火山 TTS 音色和模型`。`TTS Model` 可选 `seed-tts-2.0-standard` / `seed-tts-2.0-expressive`；不确定时保持默认空值。
-6. 点击 `保存`，然后在聊天或通话里测试语音播报。
+1. 在 Web UI 的 `设置 → 大模型` 选择 MiMo 并保存 Base URL、API Key。
+2. 在 `设置 → 声音和唤醒` 保持 `MiMo V2.5 TTS（复用 LLM 配置）`。
+3. 保存任一 LLM 或声音设置后，后台会停止旧的语音 Agent；下一次通话会以新配置启动。
 
 对应配置大致如下：
 
 ```toml
 [voice]
-stt_provider = "volcengine"
-stt_model = "bigmodel"
-tts_provider = "volcengine"
-tts_model = ""
-tts_voice = "zh_female_vv_uranus_bigtts"
-volcengine_app_id = ""
-volcengine_access_token = ""
+stt_provider = "mimo"
+stt_model = "mimo-v2.5-asr"
+tts_provider = "mimo"
+tts_model = "mimo-v2.5-tts"
+tts_voice = "mimo_default"
 wake_word = ""
 call_mode = "stable"
 echo_gate_hangover_ms = 1000
@@ -151,7 +149,11 @@ silence_timeout_s = 60
 
 ```toml
 [device]
+motor_transport = "p4"
 motor_port = "/dev/ttyUSB0"
+p4_motion_port = 82
+p4_connect_timeout_s = 8.0
+p4_feedback_timeout_s = 1.0
 lamp_id = "AL02"
 use_degrees = true
 max_torque_pct = 80
@@ -167,11 +169,33 @@ jpeg_quality = 10
 http_timeout_s = 5.0
 ```
 
-- `motor_port`：Feetech 电机总线串口，可在 Web 硬件页保存后热重连。
+- `motor_transport`：`serial` 保留旧 USB 舵机总线路径；`p4` 通过已配对 P4 的 WebSocket 控制头部舵机，不再要求电脑接舵机线。
+- `motor_port`：仅 `serial` 使用的 Feetech 电机总线串口，可在 Web 硬件页保存后热重连。
+- `p4_motion_port`：P4 运动通道端口，固件默认 `82`；设备地址复用 `device_esp32` 的发现/首选地址。
+- `p4_feedback_timeout_s`：舵机遥测超时门限；超时后后端把运动链路降级，不积压旧轨迹。
 - `lamp_id`：用于匹配 `assets/calibration/` 下的校准文件。
 - `max_torque_pct`：电机 Torque_Limit 百分比，默认 `80`；降低堵转电流和转接板发热，不改变正常空载速度。
 - `camera.port`：本地 USB 摄像头索引，如 `0` 或 `1`；使用 ESP32 摄像头时通常留空。
-- `device_esp32.preferred_host`：留空表示自动发现，也可指定 `lampgo-cam-XXXX.local` 或设备 IP。
+- `device_esp32.preferred_host`：留空表示自动发现，也可指定 `lampgo-p4-XXXX.local`、旧 `lampgo-cam-XXXX.local` 或设备 IP。P4 电机模式要求 `device_esp32.enabled = true`。
+
+P4 无线配置示例：
+
+```toml
+[device]
+motor_transport = "p4"
+lamp_id = "AL02"
+p4_motion_port = 82
+
+[device_esp32]
+enabled = true
+preferred_host = "lampgo-p4-ABCD.local"
+mic_enabled = true
+
+[voice]
+call_mode = "esp32_aec"
+```
+
+后端继续使用原有角度制动作与校准文件；原始舵机位置映射、总线串口、限位复核和掉线释放由 P4 执行。切换到 P4 前必须保证该 `lamp_id` 的五个关节校准完整，并先完成无负载/低扭矩物理验收。
 
 ### 运动与安全
 
@@ -221,6 +245,6 @@ sed -n '1,200p' lampgo.toml.example
 
 ## 开源发布注意事项
 
-- 不要提交 `~/.lampgo/config.toml`、`~/.lampgo/credentials.json`、`.env`、API key、火山引擎 token 或插件 token。
+- 不要提交 `~/.lampgo/config.toml`、`~/.lampgo/credentials.json`、`.env`、API key 或插件 token。
 - 公开 README 中尽量使用通用 provider 描述，例如 OpenAI-compatible、Anthropic-compatible、local。
 - 如果项目依赖私有包源，请在发布前提供公开安装路径或将相关能力标记为可选。

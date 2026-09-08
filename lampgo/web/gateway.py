@@ -257,6 +257,7 @@ class WebGateway:
             Route("/api/expressions/preview", self.api_expression_preview, methods=["POST"]),
             Route("/api/expressions/play", self.api_expression_play, methods=["POST"]),
             Route("/api/expressions/stop", self.api_expression_stop, methods=["POST"]),
+            Route("/api/device/led-topology-test", self.api_led_topology_test, methods=["POST"]),
             Route("/api/device/expression-capabilities", self.api_expression_capabilities, methods=["GET"]),
             Route("/api/clock", self.api_clock, methods=["GET"]),
             Route("/api/clock/show", self.api_clock_show, methods=["POST"]),
@@ -1160,6 +1161,14 @@ class WebGateway:
             return 503, {"ok": False, "error": "no_device"}
         self.server.clock.deactivate()
         self.server.electronic_ocean.deactivate()
+        eye_clip_id = composition.get("eye_storage_clip_id")
+        if eye_clip_id:
+            # An eye clip is a P4-local LittleFS asset, not a C6 relay.  Do
+            # the upload in the same user action so Play cannot silently fall
+            # back to the firmware's generic circular eyes.
+            sync_status, sync_body = await self._sync_eye_to_device(str(eye_clip_id))
+            if sync_status >= 400 or sync_body.get("ok") is False:
+                return sync_status, sync_body
         effect = composition.get("led_effect") or {}
         if effect.get("kind") == "pixel_clip" and composition.get("led_effect_id"):
             sync_status, sync_body, _ = await self._sync_led_effect_to_device(
@@ -1212,6 +1221,21 @@ class WebGateway:
             return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
         payload = self.server.esp32.with_owner_auth({}, reason="expression_stop")
         status, body, _ = await self.server.esp32.proxy_post("/device/expressions/stop", payload)
+        return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
+
+    async def api_led_topology_test(self, request: Request) -> JSONResponse:
+        """Show P4 physical LED-index markers without enabling motion."""
+        if not self.server.esp32:
+            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+        device = self.server.esp32.get_status().get("device")
+        if not isinstance(device, dict) or device.get("platform") != "esp32-p4":
+            return JSONResponse(
+                {"ok": False, "error": "p4_led_topology_test_requires_active_p4"}, status_code=409
+            )
+        payload = self.server.esp32.with_owner_auth(
+            {"diagnostic": "topology", "brightness": 8}, reason="led_topology_test"
+        )
+        status, body, _ = await self.server.esp32.proxy_post("/device/led", payload)
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def api_clock(self, request: Request) -> JSONResponse:
@@ -1275,6 +1299,14 @@ class WebGateway:
                     device = body.get("result") or body
             except Exception:
                 logger.exception("expression_capabilities.device_failed")
+            # ESP32-P4 keeps expression assets directly on the head board and
+            # reports its geometry from /device/status rather than emulating
+            # the legacy S3/C6 capacity endpoint.
+            if device is None:
+                status_snapshot = self.server.esp32.get_status()
+                candidate = status_snapshot.get("device") if isinstance(status_snapshot, dict) else None
+                if isinstance(candidate, dict) and candidate.get("platform") == "esp32-p4":
+                    device = candidate
         return JSONResponse({"ok": True, "result": {"library": local, "device": device}})
 
     async def api_expression_clips(self, request: Request) -> JSONResponse:
@@ -1467,12 +1499,16 @@ class WebGateway:
             )
         client_call_id = str(body.get("client_call_id"))
         reason = str(body.get("reason") or "")
+        audio_source = str(body.get("audio_source") or "browser").lower()
+        if audio_source not in {"browser", "esp32"}:
+            audio_source = "browser"
         logger.info(
             "web.livekit_token_requested",
             user_identity=user_identity,
             voice_agent=voice_agent,
             client_call_id=client_call_id,
             reason=reason,
+            audio_source=audio_source,
         )
         async with self._livekit_token_lock:
             now = time.monotonic()
@@ -1492,6 +1528,7 @@ class WebGateway:
                     voice_agent=voice_agent,
                     client_call_id=client_call_id,
                     reason=reason,
+                    audio_source=audio_source,
                 )
         except Exception as exc:
             async with self._livekit_token_lock:
@@ -1508,6 +1545,7 @@ class WebGateway:
         voice_agent: str,
         client_call_id: str,
         reason: str,
+        audio_source: str,
     ) -> JSONResponse:
         from lampgo.voice.agent_sdk import AGENT_SDK_PORT
 
@@ -1578,6 +1616,7 @@ class WebGateway:
             room_name: {
                 "client_call_id": client_call_id,
                 "reason": reason,
+                "audio_source": audio_source,
                 "user_identity": user_identity,
                 "created_at": time.monotonic(),
             }
@@ -1587,6 +1626,7 @@ class WebGateway:
             room=room_name,
             client_call_id=client_call_id,
             reason=reason,
+            audio_source=audio_source,
         )
         return JSONResponse({"ok": True, "result": result})
 
@@ -1804,7 +1844,8 @@ class WebGateway:
     # Fields that require a daemon restart to take effect.
     #
     # Deliberately NOT listed here:
-    #   - device.motor_port → hot-reconnected by `server.reload_motor_runtime`.
+    #   - device.motor_transport / motor_port → hot-reconnected by
+    #     `server.reload_motor_runtime`.
     #   - camera.port      → hot-swapped via the set_camera WS command in
     #                        `server._handle_set_camera`; the Web UI also
     #                        rebroadcasts this on save.
@@ -1823,6 +1864,8 @@ class WebGateway:
     _VOICE_HOT_RELOAD_FIELDS: frozenset[str] = frozenset(
         {
             "voice.wake_word",
+            "voice.stt_provider",
+            "voice.stt_model",
             "voice.tts_provider",
             "voice.tts_model",
             "voice.tts_voice",
@@ -1830,8 +1873,6 @@ class WebGateway:
             "voice.livekit_allow_interruptions",
             "voice.echo_gate_hangover_ms",
             "voice.echo_text_filter_enabled",
-            "voice.volcengine_app_id",
-            "voice.volcengine_access_token",
         }
     )
 
@@ -1839,7 +1880,11 @@ class WebGateway:
     # Each path uses the same dotted notation as the provenance map.
     _SECTION_FIELDS: dict[str, tuple[str, ...]] = {
         "device": (
+            "device.motor_transport",
             "device.motor_port",
+            "device.p4_motion_port",
+            "device.p4_connect_timeout_s",
+            "device.p4_feedback_timeout_s",
             "device.lamp_id",
             "device.use_degrees",
         ),
@@ -1857,8 +1902,6 @@ class WebGateway:
             "voice.echo_gate_hangover_ms",
             "voice.echo_text_filter_enabled",
             "voice.silence_timeout_s",
-            "voice.volcengine_app_id",
-            "voice.volcengine_access_token",
         ),
         "motion": (
             "motion.tick_rate_hz",
@@ -2112,9 +2155,9 @@ class WebGateway:
             current = getattr(obj, tail, None)
             coerced = _coerce_value(current, value)
             if head == "voice" and tail == "tts_voice":
-                from lampgo.voice.tts import _volcengine_voice_or_default
+                from lampgo.voice.mimo import mimo_tts_voice_or_default
 
-                coerced = _volcengine_voice_or_default(str(coerced or ""))
+                coerced = mimo_tts_voice_or_default(str(coerced or ""))
             setattr(obj, tail, coerced)
 
     async def api_config_device(self, request: Request) -> JSONResponse:
@@ -2126,16 +2169,29 @@ class WebGateway:
         except Exception:
             return response
         saved = set((payload.get("result") or {}).get("saved") or [])
-        if "device.motor_port" in saved:
+        reconnect_fields = {
+            "device.motor_transport",
+            "device.motor_port",
+            "device.p4_motion_port",
+            "device.p4_connect_timeout_s",
+            "device.p4_feedback_timeout_s",
+        }
+        reconnect_saved = reconnect_fields & saved
+        if reconnect_saved:
             reload_result = await self.server.reload_motor_runtime()
-            payload.setdefault("result", {}).setdefault("hot_reload", {})["device.motor_port"] = reload_result
+            hot_reload = payload.setdefault("result", {}).setdefault("hot_reload", {})
+            for field in reconnect_saved:
+                hot_reload[field] = reload_result
         return JSONResponse(payload, status_code=response.status_code)
 
     async def api_config_voice(self, request: Request) -> JSONResponse:
         result = await self._save_section(request, "voice")
+        if result.status_code != 200:
+            return result
         try:
             from lampgo.voice.stt import build_stt
             self.server._stt = build_stt(self.server.config)
+            await self.server.restart_agent_sdk()
         except Exception:
             logger.exception("web.stt_rebuild_failed")
         return result
@@ -2527,6 +2583,7 @@ class WebGateway:
 
         try:
             self.server.reload_llm_client()
+            await self.server.restart_agent_sdk()
         except Exception:
             logger.exception("web.reload_llm_failed")
 
@@ -2730,7 +2787,7 @@ class WebGateway:
                     timeout=1.5,
                 )
                 if device_status_code == 200 and isinstance(device_body, dict):
-                    mic_streaming = bool(device_body.get("mic_streaming") and device_body.get("wake_ready"))
+                    mic_streaming = bool(device_body.get("mic_streaming"))
                     wake_event_clients = int(device_body.get("wake_event_clients") or 0)
                     wake_ready = bool(device_body.get("wake_ready"))
                     wake_model = str(device_body.get("wake_model") or "")
@@ -2890,17 +2947,22 @@ class WebGateway:
         return await self._sync_eye_response(clip_id)
 
     async def _sync_eye_response(self, eye_id: str) -> JSONResponse:
+        status, body = await self._sync_eye_to_device(eye_id)
+        return JSONResponse(body, status_code=status)
+
+    async def _sync_eye_to_device(self, eye_id: str) -> tuple[int, dict[str, Any]]:
+        """Copy one LCD clip to the paired P4 and return an API-safe result."""
         if not self.server.esp32:
-            return JSONResponse({"ok": False, "error": "no_device"}, status_code=503)
+            return 503, {"ok": False, "error": "no_device"}
         try:
             clip_id = eye_storage_id(eye_id)
             manifest = load_expression_clip(clip_id)
             payload = load_expression_clip_lcd_payload(clip_id)
         except (ExpressionClipError, ExpressionLibraryError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return 404, {"ok": False, "error": str(exc)}
         except Exception as exc:
             logger.exception("expression_clip.sync_prepare_failed", clip_id=clip_id)
-            return JSONResponse({"ok": False, "error": f"sync prepare failed: {exc}"}, status_code=500)
+            return 500, {"ok": False, "error": f"sync prepare failed: {exc}"}
 
         lcd_meta = manifest.get("lcd") or {}
         query = {
@@ -2919,8 +2981,22 @@ class WebGateway:
             payload,
             params=query,
         )
-        c6_confirmed = isinstance(last_body, dict) and last_body.get("c6_confirmed") is True
-        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not c6_confirmed:
+        display_confirmed = isinstance(last_body, dict) and (
+            last_body.get("display_confirmed") is True or last_body.get("c6_confirmed") is True
+        )
+        log_fields = {
+            "clip_id": clip_id,
+            "device_status": status,
+            "device_ok": last_body.get("ok") if isinstance(last_body, dict) else None,
+            "display_confirmed": display_confirmed,
+            "device_error": (
+                str(last_body.get("error") or "").strip()
+                if isinstance(last_body, dict)
+                else ""
+            ),
+        }
+        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not display_confirmed:
+            logger.warning("expression_clip.p4_upload_failed", **log_fields)
             device = self.server.esp32.get_status().get("device")
             update_expression_clip_sync(clip_id, status="sync_failed", device=device)
             device_error = (
@@ -2933,35 +3009,31 @@ class WebGateway:
                 if device_error:
                     error = f"{error}: {device_error}"
             else:
-                error = "C6 did not confirm clip sync"
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": error,
-                    "result": {
-                        "transfer_mode": "bulk",
-                        "sent_chunks": 1,
-                        "device_status": status,
-                        "device_body": last_body,
-                    },
-                },
-                status_code=status if status >= 400 else 502,
-            )
-
-        device = self.server.esp32.get_status().get("device")
-        manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
-        return JSONResponse(
-            {
-                "ok": True,
+                error = "device display did not confirm clip sync"
+            return status if status >= 400 else 502, {
+                "ok": False,
+                "error": error,
                 "result": {
-                    "clip": manifest,
                     "transfer_mode": "bulk",
                     "sent_chunks": 1,
                     "device_status": status,
                     "device_body": last_body,
                 },
             }
-        )
+
+        logger.info("expression_clip.p4_upload_succeeded", **log_fields)
+        device = self.server.esp32.get_status().get("device")
+        manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
+        return 200, {
+            "ok": True,
+            "result": {
+                "clip": manifest,
+                "transfer_mode": "bulk",
+                "sent_chunks": 1,
+                "device_status": status,
+                "device_body": last_body,
+            },
+        }
 
     async def api_esp32_pair(self, request: Request) -> JSONResponse:
         if not self.server.esp32:
@@ -3063,10 +3135,7 @@ class WebGateway:
         stream_base = re.sub(r":(\d+)$", lambda m: f":{int(m.group(1)) + 1}", base_url)
         if stream_base == base_url:
             stream_base = base_url.rstrip("/") + ":81"
-        owner_query = ""
-        if self.server.esp32 and hasattr(self.server.esp32, "ws_owner_query"):
-            owner_query = f"?{self.server.esp32.ws_owner_query()}"
-        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + f"/ws/speaker{owner_query}"
+        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + "/ws/speaker"
         safe_esp32_ws_url = redact_ws_owner_token(esp32_ws_url)
         try:
             import websockets
@@ -3111,6 +3180,9 @@ class WebGateway:
                     max_size=None,
                     proxy=None,
                 )
+                from lampgo.device.p4_auth import authenticate_p4_websocket
+
+                await authenticate_p4_websocket(esp32_ws, self.server.esp32, purpose="ws:speaker")
             except Exception as exc:
                 next_connect_at = now + 0.5
                 logger.warning("web.esp32_speaker_proxy_connect_failed", url=safe_esp32_ws_url, error=str(exc))
@@ -3201,8 +3273,10 @@ class WebGateway:
             logger.info("web.esp32_speaker_proxy_closed", frames=frames, bytes=bytes_sent, dropped_frames=dropped_frames)
 
     async def api_esp32_reboot(self, request: Request) -> JSONResponse:
-        status, body, _ = await self.server.esp32.proxy_post("/device/reboot", {})
-        self.server.esp32.reset_session()
+        payload = self.server.esp32.owner_auth_payload(reason="reboot")
+        status, body, _ = await self.server.esp32.proxy_post("/device/reboot", payload)
+        if 200 <= status < 300:
+            self.server.esp32.reset_session()
         return JSONResponse(body if isinstance(body, dict) else {"ok": False, "raw": str(body)}, status_code=status)
 
     async def api_esp32_forget_wifi(self, request: Request) -> JSONResponse:
@@ -3211,12 +3285,16 @@ class WebGateway:
         Also sets enabled/mic_enabled to false so the backend stops mDNS
         discovery until the next provisioning cycle re-enables them.
         """
-        try:
-            await self.server.esp32.unpair_device(reason="forget_wifi")
-        except Exception:
-            logger.debug("web.forget_wifi_unpair_failed", exc_info=True)
+        # The P4 endpoint clears WiFi and pairing atomically. Sending a
+        # separate unpair first would invalidate the credential needed by the
+        # following reset request.
         payload = self.server.esp32.owner_auth_payload(reason="forget_wifi") if hasattr(self.server.esp32, "owner_auth_payload") else {}
         status, body, _ = await self.server.esp32.proxy_post("/device/forget-wifi", payload)
+        if not 200 <= status < 300:
+            return JSONResponse(
+                body if isinstance(body, dict) else {"ok": False, "raw": str(body)},
+                status_code=status,
+            )
         try:
             await self.server.esp32.shutdown()
             self.server.esp32.reset_session()
@@ -4262,7 +4340,7 @@ class WebGateway:
 
     async def _relay_esp32_audio_to_browser(self, ws: WebSocket) -> None:
         """Forward ESP32 PCM16 frames directly to one browser WebSocket client."""
-        from lampgo.device.audio_stream import build_ws_audio_url
+        from lampgo.device.audio_stream import build_ws_audio_url, send_stream_auth
 
         claim_owner = getattr(self.server.esp32, "claim_owner", None) if self.server.esp32 else None
         if callable(claim_owner):
@@ -4309,6 +4387,9 @@ class WebGateway:
         frames = 0
         bytes_sent = 0
         idle_timeouts = 0
+        last_report_at = time.monotonic()
+        last_report_frames = 0
+        last_report_bytes = 0
         idle_timeout_s = 5.0
         reconnect_delay_s = 1.0
         safe_url = redact_ws_owner_token(url)
@@ -4331,9 +4412,10 @@ class WebGateway:
                         max_size=None,
                         proxy=None,
                     ) as esp32_ws:
+                        await send_stream_auth(esp32_ws, url)
                         self.server.esp32.mark_active_healthy()
                         safe_url = redact_ws_owner_token(url)
-                        logger.info("web.esp32_audio_relay_connected", url=safe_url)
+                        logger.info("web.esp32_audio_relay_authenticated", url=safe_url)
                         try:
                             await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus", "data": {"state": "connected", "url": safe_url}})
                         except Exception:
@@ -4342,7 +4424,7 @@ class WebGateway:
                         while True:
                             try:
                                 data = await asyncio.wait_for(esp32_ws.recv(), timeout=idle_timeout_s)
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 idle_timeouts += 1
                                 if idle_timeouts == 1 or idle_timeouts % 6 == 0:
                                     logger.warning(
@@ -4360,8 +4442,24 @@ class WebGateway:
                             await ws.send_bytes(data)
                             frames += 1
                             bytes_sent += len(data)
-                            if frames == 1 or frames % 100 == 0:
-                                logger.info("web.esp32_audio_relay_forwarded", frames=frames, bytes=bytes_sent)
+                            if frames == 1:
+                                logger.info(
+                                    "web.esp32_audio_relay_first_pcm",
+                                    frame_bytes=len(data),
+                                    sample_rate=16000,
+                                )
+                            now = time.monotonic()
+                            if now - last_report_at >= 1.0:
+                                logger.info(
+                                    "web.esp32_audio_relay_rate",
+                                    frames=frames,
+                                    bytes=bytes_sent,
+                                    frames_per_s=frames - last_report_frames,
+                                    bytes_per_s=bytes_sent - last_report_bytes,
+                                )
+                                last_report_at = now
+                                last_report_frames = frames
+                                last_report_bytes = bytes_sent
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

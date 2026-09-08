@@ -10,7 +10,11 @@
 # 首次安装/迁移旧配置：`uv run lampgo onboard`
 
 [device]
-motor_port = "/dev/ttyUSB0"    # Feetech 电机总线串口 (必填，你的设备可能不同)
+motor_transport = "serial"     # 默认/旧方案：S3 + C6 + USB 舵机总线；仅 P4 头部板设为 p4
+motor_port = "/dev/ttyUSB0"    # 仅 serial 使用；p4 模式无需电脑连接舵机线
+p4_motion_port = 82             # P4 运动 WebSocket 端口
+p4_connect_timeout_s = 8.0
+p4_feedback_timeout_s = 1.0
 lamp_id = "AL02"               # 设备标识，用于校准文件查找
 use_degrees = true             # true = 角度模式, false = 归一化 -100~100
 max_torque_pct = 80            # 电机 Torque_Limit 百分比 (10-100)，降低堵转电流和转接板发热
@@ -67,21 +71,19 @@ web_search_city = ""
 port = ""                      # USB 摄像头索引（0 / 1）；使用 ESP32 摄像头时通常留空
 
 [device_esp32]
-enabled = false                # 是否优先使用 ESP32 摄像头/麦克风/LED Wi-Fi 设备
-preferred_host = ""            # 留空自动发现；也可填 lampgo-cam-XXXX.local 或设备 IP
+enabled = false                # S3 或 P4 无线设备均可启用；P4 模式必须为 true
+preferred_host = ""            # 留空自动发现；可填 lampgo-cam-XXXX.local、lampgo-p4-XXXX.local 或 IP
 jpeg_quality = 10              # ESP32 JPEG 画质，4=最高，63=最低
 framesize = 8                  # ESP32 分辨率枚举；8 = SVGA 800x600
 mic_enabled = false            # 是否启用 ESP32 麦克风音频流
 http_timeout_s = 5.0
 
 [voice]
-stt_provider = "volcengine"    # 语音转文字: volcengine
-stt_model = "bigmodel"
-tts_provider = "volcengine"    # 文字转语音: volcengine, edge-tts
-tts_model = ""                 # 火山 TTS 可选模型；留空使用服务默认
-tts_voice = "zh_female_vv_uranus_bigtts"
-volcengine_app_id = ""         # 火山引擎 App ID；TTS 未配置时自动回退 edge-tts
-volcengine_access_token = ""   # 火山引擎 Access Token
+stt_provider = "mimo"          # 语音转文字：复用 [llm] 的 MiMo Base URL / API Key
+stt_model = "mimo-v2.5-asr"
+tts_provider = "mimo"          # 文字转语音：复用 [llm] 的 MiMo Base URL / API Key
+tts_model = "mimo-v2.5-tts"
+tts_voice = "mimo_default"
 livekit_url = "https://rtc.yhaox.top" # 云端 LiveKit；SDK 内部会用云端鉴权取 token
 wake_word = ""                 # 唤醒词 (留空 = 禁用)
 call_mode = "stable"           # stable / interruptible / esp32_aec

@@ -5,12 +5,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from lampgo.core.config import VoiceConfig
+from lampgo.core.config import LLMConfig, VoiceConfig
 from lampgo.voice import agent_sdk
 
 
 def _manager() -> agent_sdk.AgentSDKManager:
-    return agent_sdk.AgentSDKManager(VoiceConfig())
+    return agent_sdk.AgentSDKManager(VoiceConfig(), _mimo_llm())
+
+
+def _mimo_llm() -> LLMConfig:
+    return LLMConfig(
+        provider="mimo",
+        api_base="https://api.xiaomimimo.com/v1",
+        api_key="mimo-key",
+    )
 
 
 def test_command_runs_agent_sdk_matches_exact_executable() -> None:

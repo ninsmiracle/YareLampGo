@@ -252,6 +252,13 @@ class CatTeaserFrameSource:
         return None
 
     def _local_camera_port(self) -> str:
+        # Selecting the lamp-head camera is exclusive.  In particular,
+        # --no-hw may enable a desktop-camera fallback for local development,
+        # but it must never substitute that camera after the user selected the
+        # ESP32/P4 feed.  Mixing sources can also change frame dimensions
+        # mid-session and make OpenCV motion detection fail with a size error.
+        if self._device_cfg is not None and self._device_cfg.enabled:
+            return ""
         configured = self._config.port.strip()
         if configured:
             return configured if is_supported_local_camera_port(configured) else ""

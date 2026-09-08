@@ -4,6 +4,15 @@
 
 V2.0 是 YareLampGo 当前唯一维护的公开硬件和机械结构版本。V1.0 接线图、结构件与校准数据不再作为主线，也不能和 V2.0 混用。
 
+## 先选硬件路线
+
+| 路线 | 适用固件 | 关键边界 |
+| --- | --- | --- |
+| 旧 S3 + 独立 C6 小屏 | 固件仓库根目录与 `ESP32_C6_LCD_1_47_UART/` | C6 是小屏，S3 经 UART 同步表情；后端保持 `motor_transport = "serial"`。 |
+| P4 头部板 + C6 Wi-Fi | 固件仓库 `ESP32_P4_HEAD/` | C6 是 P4 的网络协处理器，不烧录小屏固件；后端显式设为 `motor_transport = "p4"`。 |
+
+两条路径并存，不能混刷或混用接线。完整运行时边界见 [P4 无线头部板路线](p4-wireless-head.md)。
+
 ## 当前入口
 
 | 文件 | 说明 |
@@ -15,6 +24,7 @@ V2.0 是 YareLampGo 当前唯一维护的公开硬件和机械结构版本。V1.
 | [V2.0 STEP 结构件](../../assets/printable/README.md) | 完整 STEP AP214 总成、预览和使用边界。 |
 | [源文件清单](v2/SOURCE_MANIFEST.md) | 原始文件名、SHA-256、文件检查结果和公开资料限制。 |
 | [硬件与资产范围](../hardware-and-assets-scope.md) | 许可和发布边界。 |
+| [P4 无线头部板路线](p4-wireless-head.md) | P4 选择、配网、无线运动与旧 S3/C6 回退规则。 |
 
 ## 重要边界
 

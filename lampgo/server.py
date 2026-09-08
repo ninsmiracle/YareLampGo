@@ -40,6 +40,7 @@ from lampgo.core.events import (
 from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
+from lampgo.core.motor_hal import MotorHAL
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.types import InvokeResult
 from lampgo.core.virtual_motion import VirtualMotionRuntime
@@ -91,7 +92,7 @@ from lampgo.skills.loader import (
 from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.registry import SkillRegistry
 from lampgo.voice.echo_filter import likely_recent_tts_echo, remember_tts_text
-from lampgo.voice.stt import VolcengineASR, build_stt
+from lampgo.voice.stt import MiMoASR, build_stt
 
 logger = structlog.get_logger(__name__)
 RECORDING_ALIASES_FILE = "aliases.json"
@@ -153,10 +154,10 @@ class LampgoServer:
     def __init__(self, config: LampgoConfig) -> None:
         self.config = config
         self.events = EventBus()
-        self.hal = HardwareAbstraction(config.device)
+        self.esp32 = Esp32DeviceManager(config.device_esp32)
+        self.hal = self._new_motor_hal()
         self.safety = SafetyKernel(config.safety)
         self.motion = MotionRuntime(self.hal, self.safety, config.motion)
-        self.esp32 = Esp32DeviceManager(config.device_esp32)
         # LED expressions now go through the paired ESP32 Wi-Fi endpoint. Keep
         # the old serial config fields readable for legacy files, but do not
         # open a local LED serial port from the web runtime.
@@ -196,7 +197,7 @@ class LampgoServer:
         )
         self._agent_indicator = AgentLedIndicator(self.events, self._set_agent_indicator_led)
         self.router = IntentRouter()
-        self._stt: VolcengineASR = build_stt(config)
+        self._stt: MiMoASR = build_stt(config)
         self._ipc = IPCServer(self.handle_request, socket_path=config.socket_path)
         self._voice_task: asyncio.Task | None = None
         self._voice = None
@@ -226,6 +227,13 @@ class LampgoServer:
         self._hal_startup_error: str | None = None
         self._started = False
         self.events.subscribe(SkillStarted, self._on_skill_started)
+
+    def _new_motor_hal(self) -> MotorHAL:
+        if self.config.device.motor_transport == "p4":
+            from lampgo.core.p4_hal import P4HardwareAbstraction
+
+            return P4HardwareAbstraction(self.config.device, self.esp32)
+        return HardwareAbstraction(self.config.device)
 
     def _use_virtual_motion(self) -> None:
         """Switch motion to the no-hardware in-memory runtime."""
@@ -769,9 +777,14 @@ class LampgoServer:
             if self.config.no_hw or not self.hal.is_connected:
                 return {"ok": False, "error": "hardware not connected"}
             if self.hal.recovery_required:
+                recovery_hint = (
+                    "run return_safe before recording"
+                    if self.hal.supports_remote_recovery
+                    else "manually return all joints inside calibrated limits, then reconnect"
+                )
                 return {
                     "ok": False,
-                    "error": "motor recovery required; run return_safe before recording",
+                    "error": f"motor recovery required; {recovery_hint}",
                 }
             if self._record_recorder is not None:
                 return {"ok": False, "error": "recording session already active"}
@@ -1586,7 +1599,7 @@ class LampgoServer:
     async def _tts_for_web(self, text: str, request_id: str) -> None:
         """Synthesize TTS and publish audio event for web playback.
 
-        During an active LiveKit voice call the Agent SDK plays Volcengine TTS
+        During an active LiveKit voice call the Agent SDK plays MiMo TTS
         directly into the room, so the local web TTS stream would only be
         wasted bandwidth (and may double-up with the call audio if the Web UI
         is also open). Skip the synthesis but keep the call signature so agent
@@ -1613,11 +1626,9 @@ class LampgoServer:
             published = False
             async for audio_b64, fmt, sample_rate in iter_synthesize_for_web(
                 text,
-                app_id=self.config.voice.volcengine_app_id,
-                access_token=self.config.voice.volcengine_access_token,
+                llm=self.config.llm,
+                voice_config=self.config.voice,
                 voice=self.config.voice.tts_voice,
-                provider=self.config.voice.tts_provider,
-                model=self.config.voice.tts_model,
             ):
                 published = True
                 await self.events.publish(
@@ -1753,6 +1764,12 @@ class LampgoServer:
             and self.hal.startup_state is not MotorStartupState.READY
         ) or self._hal_startup_error or recovery_error:
             health = "degraded"
+        motor_transport_status = None
+        if hasattr(self.hal, "transport_status"):
+            try:
+                motor_transport_status = self.hal.transport_status()
+            except Exception:
+                logger.debug("server.motor_transport_status_failed", exc_info=True)
         cat_teaser_camera = self._cat_teaser_camera_status()
         camera_ready = self._cat_teaser_camera_ready(cat_teaser_camera)
         return {
@@ -1769,6 +1786,8 @@ class LampgoServer:
                 "recording": self._record_status(),
                 "hal_connected": bool(self.hal.is_connected),
                 "motor_startup_state": motor_startup_state,
+                "motor_transport": self.config.device.motor_transport,
+                "motor_transport_status": motor_transport_status,
                 "hardware_error": self._hal_startup_error or recovery_error,
                 "led_ready": bool(self.led.is_connected),
                 "lighting_mode": self.lighting_mode.snapshot(),
@@ -1819,6 +1838,7 @@ class LampgoServer:
             esp32 = self._esp32_camera_info()
             return (
                 bool(esp32.get("online"))
+                and bool(esp32.get("camera_ready"))
                 and not bool(esp32.get("hidden"))
                 and not bool(esp32.get("needs_firmware_update"))
             )
@@ -1897,6 +1917,9 @@ class LampgoServer:
         return {
             "enabled": True,
             "online": online,
+            # A reachable P4 can still have failed its OV5640 probe.  Surface
+            # that state instead of treating an HTTP connection as a camera.
+            "camera_ready": bool(device.get("camera_ready")) if isinstance(device, dict) else False,
             "host": host or cfg.preferred_host or "",
             "ip": device.get("ip", "") if isinstance(device, dict) else "",
             "port": device.get("port", 80) if isinstance(device, dict) else 80,
@@ -2210,6 +2233,11 @@ class LampgoServer:
 
     async def start(self) -> None:
         logger.info("server.starting")
+        if self.config.device.motor_transport == "p4" and self.config.device_esp32.enabled:
+            try:
+                await self.esp32.start()
+            except Exception:
+                logger.exception("server.esp32_start_failed")
         if self.config.no_hw:
             logger.info("server.no_hw_mode", msg="Skipping motor and LED connections")
             self._use_virtual_motion()
@@ -2218,19 +2246,27 @@ class LampgoServer:
             # Degrade to no_hw instead of crashing so the Web UI still comes up and
             # the user can fix the port in the settings page.
             try:
-                self.hal.connect()
+                if self.config.device.motor_transport == "p4":
+                    await asyncio.to_thread(self.hal.connect)
+                else:
+                    self.hal.connect()
             except Exception as exc:  # noqa: BLE001
                 self._hal_startup_error = str(exc)
                 self.executor.set_motion_block_reason(self._hal_startup_error)
                 logger.warning(
                     "server.hal_connect_failed_degrading_to_no_hw",
-                    motor_port=self.config.device.motor_port,
+                    motor_transport=self.config.device.motor_transport,
+                    motor_endpoint=(
+                        self.config.device_esp32.preferred_host
+                        if self.config.device.motor_transport == "p4"
+                        else self.config.device.motor_port
+                    ),
                     error=str(exc),
                 )
                 print(
-                    f"[warn] failed to open motor_port={self.config.device.motor_port!r}: {exc}\n"
-                    "       falling back to --no-hw; fix the port in the Web UI (硬件 tab) "
-                    "or via `lampgo onboard`, then restart.",
+                    f"[warn] failed to connect motor_transport={self.config.device.motor_transport!r}: {exc}\n"
+                    "       falling back to --no-hw; fix the hardware connection in the Web UI (硬件 tab) "
+                    "and retry.",
                     flush=True,
                 )
                 self.config.no_hw = True
@@ -2238,18 +2274,20 @@ class LampgoServer:
                 self._use_virtual_motion()
             else:
                 self._hal_startup_error = None
-                if self.hal.recovery_required:
-                    self.executor.set_motion_block_reason(
-                        self.hal.recovery_reason or "Motor recovery is required.",
-                        allow_return_safe_recovery=True,
-                    )
-                else:
+                if self.hal.startup_state is MotorStartupState.READY:
                     self.executor.set_motion_block_reason(None)
+                else:
+                    self.executor.set_motion_block_reason(
+                        self.hal.recovery_reason or f"Motor startup state is {self.hal.startup_state.value}.",
+                        allow_return_safe_recovery=(
+                            self.hal.recovery_required and self.hal.supports_remote_recovery
+                        ),
+                    )
                 try:
                     self.led.connect()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("server.led_connect_failed", error=str(exc))
-                if not self.hal.recovery_required:
+                if self.hal.startup_state is MotorStartupState.READY:
                     self.motion.start()
                 home = self.hal.get_calibration_home()
                 if home is not None:
@@ -2274,7 +2312,12 @@ class LampgoServer:
         logger.info(
             "server.ready",
             skills=self.registry.list_ids(),
-            motor_port="(disabled)" if self.config.no_hw else self.config.device.motor_port,
+            motor_transport="(disabled)" if self.config.no_hw else self.config.device.motor_transport,
+            motor_endpoint=(
+                self.config.device_esp32.preferred_host
+                if self.config.device.motor_transport == "p4"
+                else self.config.device.motor_port
+            ),
             socket=self._ipc.socket_path,
         )
         self._started = True
@@ -2285,8 +2328,9 @@ class LampgoServer:
             return {"ok": True, "skipped": True, "reason": "server_not_started"}
 
         async with self._motor_reload_lock:
+            transport = self.config.device.motor_transport
             port = str(self.config.device.motor_port or "").strip()
-            logger.info("server.motor_runtime_reload_starting", motor_port=port or "<disabled>")
+            logger.info("server.motor_runtime_reload_starting", motor_transport=transport, motor_port=port)
 
             if self.executor.current_skill_id:
                 await self.executor.cancel_current()
@@ -2304,8 +2348,8 @@ class LampgoServer:
             old_hal = self.hal
             await self._run_blocking_shutdown_step("hal.disconnect", old_hal.disconnect, timeout_s=3.0)
 
-            self.hal = HardwareAbstraction(self.config.device)
-            if not port:
+            self.hal = self._new_motor_hal()
+            if transport == "serial" and not port:
                 self._hal_startup_error = None
                 self.executor.set_motion_block_reason(None)
                 self.config.no_hw = True
@@ -2318,7 +2362,9 @@ class LampgoServer:
                     "reason": "empty_motor_port",
                 }
 
-            new_hal = HardwareAbstraction(self.config.device)
+            if transport == "p4" and self.config.device_esp32.enabled:
+                await self.esp32.start()
+            new_hal = self.hal
             try:
                 await asyncio.to_thread(new_hal.connect)
             except Exception as exc:  # noqa: BLE001
@@ -2326,13 +2372,14 @@ class LampgoServer:
                     await asyncio.to_thread(new_hal.disconnect)
                 except Exception:
                     pass
-                self.hal = HardwareAbstraction(self.config.device)
+                self.hal = self._new_motor_hal()
                 self._hal_startup_error = str(exc)
                 self.executor.set_motion_block_reason(self._hal_startup_error)
                 self.config.no_hw = True
                 self._use_virtual_motion()
                 logger.warning(
                     "server.motor_runtime_reload_failed_virtual",
+                    motor_transport=transport,
                     motor_port=port,
                     error=str(exc),
                 )
@@ -2340,7 +2387,8 @@ class LampgoServer:
                     "ok": False,
                     "connected": False,
                     "mode": "virtual",
-                    "port": port,
+                    "transport": transport,
+                    "port": port if transport == "serial" else None,
                     "error": str(exc),
                 }
 
@@ -2349,29 +2397,32 @@ class LampgoServer:
             self.motion = MotionRuntime(self.hal, self.safety, self.config.motion)
             self.lighting_mode.bind_runtime(self.motion, self.hal)
             self.config.no_hw = False
-            if self.hal.recovery_required:
-                self.executor.set_motion_block_reason(
-                    self.hal.recovery_reason or "Motor recovery is required.",
-                    allow_return_safe_recovery=True,
-                )
-            else:
+            if self.hal.startup_state is MotorStartupState.READY:
                 self.executor.set_motion_block_reason(None)
                 self.motion.start()
+            else:
+                self.executor.set_motion_block_reason(
+                    self.hal.recovery_reason or f"Motor startup state is {self.hal.startup_state.value}.",
+                    allow_return_safe_recovery=(
+                        self.hal.recovery_required and self.hal.supports_remote_recovery
+                    ),
+                )
             home = self.hal.get_calibration_home()
             if home is not None:
                 from lampgo.skills.builtin.motion_skills import set_calibration_home
 
                 set_calibration_home(home)
-            logger.info("server.motor_runtime_reloaded", motor_port=port)
+            logger.info("server.motor_runtime_reloaded", motor_transport=transport, motor_port=port)
             return {
                 "ok": True,
                 "connected": True,
+                "transport": transport,
                 "mode": (
                     "hardware_recovery"
                     if self.hal.startup_state is MotorStartupState.RECOVERY_REQUIRED
                     else "hardware"
                 ),
-                "port": port,
+                "port": port if transport == "serial" else None,
                 "motor_startup_state": self.hal.startup_state.value,
             }
 
@@ -2691,6 +2742,7 @@ class LampgoServer:
                 return
             self._agent_sdk = AgentSDKManager(
                 self.config.voice,
+                self.config.llm,
                 web_port=self.config.web.port,
             )
             started = await self._agent_sdk.start()
@@ -2708,6 +2760,19 @@ class LampgoServer:
             logger.exception("server.agent_sdk_start_failed")
             if self._agent_sdk is not None:
                 await self._agent_sdk.stop()
+
+    async def restart_agent_sdk(self) -> None:
+        """Discard the current SDK worker after MiMo speech inputs change.
+
+        The next voice call starts a fresh worker using the new generated roles
+        file.  This avoids a long-running process retaining an old MiMo key,
+        base URL, model, or voice setting.
+        """
+        if self._agent_sdk is None:
+            return
+        await self._agent_sdk.stop()
+        self._agent_sdk = None
+        logger.info("server.agent_sdk_restarted_for_voice_config")
 
     async def ensure_agent_sdk_ready(self, *, timeout_s: float = 10.0) -> tuple[bool, str]:
         """Ensure the LiveKit Agent SDK is running for a manual browser call."""

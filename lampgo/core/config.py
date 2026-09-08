@@ -65,9 +65,24 @@ DEFAULT_MOTORS: dict[str, MotorConfig] = {
 
 
 class DeviceConfig(BaseModel):
-    """Hardware connection settings."""
+    """Hardware connection settings for the legacy S3 path or opt-in P4 path."""
 
+    motor_transport: Literal["serial", "p4"] = Field(
+        default="serial",
+        description=(
+            "Motor transport. 'serial' preserves the legacy USB Feetech bus; "
+            "'p4' opts into the ESP32-P4 wireless head executor."
+        ),
+    )
     motor_port: str = Field(default="", description="Serial port for the Feetech motor bus, e.g. /dev/ttyUSB0")
+    p4_motion_port: int = Field(default=82, ge=1, le=65535, description="ESP32-P4 motion WebSocket port")
+    p4_connect_timeout_s: float = Field(default=8.0, gt=0, le=60, description="P4 motion handshake timeout")
+    p4_feedback_timeout_s: float = Field(
+        default=1.0,
+        gt=0.1,
+        le=10,
+        description="Maximum age of P4 servo telemetry before the transport is unhealthy.",
+    )
     led_port: str = Field(default="", description="Serial port for ESP32 LED controller (empty = disabled)")
     lamp_id: str = Field(default="AL02", description="Device identity used for calibration file lookup")
     motors: dict[str, MotorConfig] = Field(default_factory=lambda: dict(DEFAULT_MOTORS))
@@ -378,7 +393,7 @@ class CameraConfig(BaseModel):
 
 
 class DeviceEsp32Config(BaseModel):
-    """Wireless camera/mic device (XIAO ESP32S3 Sense running lampgo-cam firmware).
+    """Wireless head device (legacy ESP32-S3 or opt-in ESP32-P4).
 
     Semantics of ``enabled``: *prefer* ESP32 over local. When the device is
     discovered via mDNS and reachable, perception pulls frames/audio from it.
@@ -396,8 +411,8 @@ class DeviceEsp32Config(BaseModel):
     preferred_host: str = Field(
         default="",
         description=(
-            "Optional mDNS hostname to pin (e.g. 'lampgo-cam-AB12.local'). "
-            "Empty = auto-discover first reachable lampgo-cam device."
+            "Optional mDNS hostname to pin (e.g. 'lampgo-cam-AB12.local' or "
+            "'lampgo-p4-AB12.local'). Empty = auto-discover a reachable LampGo device."
         ),
     )
     jpeg_quality: int = Field(
@@ -420,7 +435,7 @@ class DeviceEsp32Config(BaseModel):
         default=32,
         ge=1,
         le=96,
-        description="Global S3 LED brightness ceiling. Expression brightness may be lower but never higher.",
+        description="Wireless LED brightness ceiling. Expression brightness may be lower but never higher.",
     )
     http_timeout_s: float = Field(
         default=5.0,
@@ -433,17 +448,14 @@ class DeviceEsp32Config(BaseModel):
 class VoiceConfig(BaseModel):
     """Voice / TTS / STT configuration."""
 
-    stt_provider: str = Field(default="volcengine", description="STT provider: volcengine")
-    stt_model: str = Field(default="bigmodel", description="Volcengine ASR model name")
-    tts_provider: str = Field(default="volcengine", description="TTS provider: volcengine, edge-tts")
+    stt_provider: str = Field(default="mimo", description="STT provider: MiMo (reuses LLM credential)")
+    stt_model: str = Field(default="mimo-v2.5-asr", description="MiMo ASR model name")
+    tts_provider: str = Field(default="mimo", description="TTS provider: MiMo (reuses LLM credential)")
     tts_model: str = Field(
-        default="",
-        description=(
-            "Optional Volcengine TTS model id (e.g. seed-tts-2.0-standard). "
-            "Ignored by edge-tts."
-        ),
+        default="mimo-v2.5-tts",
+        description="MiMo TTS model name.",
     )
-    tts_voice: str = Field(default="zh_female_vv_uranus_bigtts", description="TTS voice identifier")
+    tts_voice: str = Field(default="mimo_default", description="MiMo TTS voice identifier")
     tts_style_prompt: str = Field(default="", description="Reserved TTS style instruction")
     chat_model: str = Field(default="mimo-v2-pro", description="LLM model for voice chat streaming responses")
     mic_device: str = Field(default="", description="Microphone device index or name (empty = system default)")
@@ -487,10 +499,10 @@ class VoiceConfig(BaseModel):
         le=300,
         description="Seconds of silence before ending a conversation",
     )
-    volcengine_app_id: str = Field(default="", description="Volcengine app ID for ASR/TTS")
-    volcengine_access_token: str = Field(default="", description="Volcengine access token for ASR/TTS")
+    volcengine_app_id: str = Field(default="", description="Deprecated legacy voice field; ignored by MiMo")
+    volcengine_access_token: str = Field(default="", description="Deprecated legacy voice field; ignored by MiMo")
     livekit_tts_voice: str = Field(
-        default="zh_female_vv_uranus_bigtts",
+        default="mimo_default",
         description="Deprecated compatibility field; LiveKit conversations use tts_voice.",
     )
 
@@ -500,9 +512,11 @@ class VoiceConfig(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip().lower()
-        if s in {"mimo", "mimo-tts", "mimo-stt"}:
-            return "volcengine"
-        return s
+        # All active speech paths now use MiMo.  Normalize old provider names
+        # so persisted configs cannot route a new call back to legacy services.
+        if s in {"", "mimo", "mimo-tts", "mimo-stt", "volc", "volcano", "huoshan", "volcengine", "volcengine-tts", "edge-tts"}:
+            return "mimo"
+        return "mimo"
 
     @field_validator("call_mode", mode="before")
     @classmethod
@@ -539,9 +553,9 @@ class VoiceConfig(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip()
-        if s in {"mimo-v2.5", "mimo-v2-omni"}:
-            return "bigmodel"
-        return s
+        from lampgo.voice.mimo import mimo_asr_model_or_default
+
+        return mimo_asr_model_or_default(s)
 
     @field_validator("tts_model", mode="before")
     @classmethod
@@ -549,21 +563,18 @@ class VoiceConfig(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip()
-        if s in {"mimo-v2.5-tts", "mimo-v2-tts"}:
-            return ""
-        return s
+        from lampgo.voice.mimo import mimo_tts_model_or_default
+
+        return mimo_tts_model_or_default(s)
 
     @field_validator("tts_voice", "livekit_tts_voice", mode="before")
     @classmethod
     def _normalize_legacy_tts_voice(cls, v: Any) -> Any:
         if not isinstance(v, str):
             return v
-        from lampgo.voice.tts import _volcengine_voice_or_default
+        from lampgo.voice.mimo import mimo_tts_voice_or_default
 
-        s = v.strip()
-        if s == "BV700_streaming":
-            return "zh_female_vv_uranus_bigtts"
-        return _volcengine_voice_or_default(s)
+        return mimo_tts_voice_or_default(v)
 
     @field_validator(
         "livekit_url",
@@ -714,6 +725,10 @@ def load_config_with_provenance(
         for dotted in cli_fields:
             provenance[dotted] = "cli"
 
+    # Environment and CLI helpers assign nested model attributes directly.
+    # Reconstruct once afterwards so Literal/range constraints cannot be
+    # bypassed by a string-valued environment variable.
+    config = LampgoConfig.model_validate(config.model_dump())
     _resolve_default_asset_paths(config, provenance, project_root)
     return config, provenance
 
@@ -750,6 +765,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
     """
     changed: list[str] = []
     env_map = {
+        "LAMPGO_MOTOR_TRANSPORT": ("device", "motor_transport"),
         "LAMPGO_MOTOR_PORT": ("device", "motor_port"),
         "LAMPGO_LED_PORT": ("device", "led_port"),
         "LAMPGO_LAMP_ID": ("device", "lamp_id"),

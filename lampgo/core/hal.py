@@ -184,6 +184,10 @@ class HardwareAbstraction:
         return self._recovery_reason
 
     @property
+    def supports_remote_recovery(self) -> bool:
+        return True
+
+    @property
     def motor_names(self) -> list[str]:
         if self._bus is not None:
             return list(self._bus.motors)
