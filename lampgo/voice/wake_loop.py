@@ -236,6 +236,7 @@ class WakeLoop:
             return
 
         from lampgo.device.audio_stream import build_ws_events_url, redact_ws_owner_token
+        from lampgo.device.p4_auth import authenticate_p4_websocket
 
         delay = 1.0
         while self._running and self._capture_is_esp32:
@@ -271,6 +272,7 @@ class WakeLoop:
                     ping_interval=None,
                     proxy=None,
                 ) as ws:
+                    await authenticate_p4_websocket(ws, self._server.esp32, purpose="ws:events")
                     self._server.esp32.mark_active_healthy()
                     logger.info("wake_loop.device_wake_connected", url=safe_url)
                     delay = 1.0

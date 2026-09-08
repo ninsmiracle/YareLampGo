@@ -51,6 +51,10 @@ def test_mimo_settings_reuse_llm_base_url_and_key() -> None:
     assert settings.tts_voice == "mimo_default"
 
 
+def test_blank_mimo_base_url_uses_the_default_endpoint() -> None:
+    assert mimo.mimo_chat_completions_url(" ") == "https://api.xiaomimimo.com/v1/chat/completions"
+
+
 def test_mimo_settings_reject_non_mimo_llm_key() -> None:
     llm = _llm().model_copy(update={"provider": "openai"})
     with pytest.raises(ValueError, match="llm.provider"):

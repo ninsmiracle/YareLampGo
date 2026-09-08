@@ -23,6 +23,7 @@ import structlog
 from lampgo.core.config import DeviceConfig
 from lampgo.core.hal import MotorStartupState
 from lampgo.core.types import DeviceHealth, JointState
+from lampgo.device.p4_auth import build_p4_auth_fields
 
 if TYPE_CHECKING:
     from lampgo.device.esp32 import Esp32DeviceManager
@@ -313,6 +314,7 @@ class P4HardwareAbstraction:
             max_size=256 * 1024,
             proxy=None,
         ) as socket:
+            challenge = self._recv_challenge(socket, purpose="ws:motion", timeout_s=3.0)
             hello_id = uuid.uuid4().hex
             socket.send(
                 json.dumps(
@@ -320,8 +322,12 @@ class P4HardwareAbstraction:
                         "type": "hello",
                         "protocol": PROTOCOL_VERSION,
                         "request_id": hello_id,
-                        "owner_id": self._esp32.owner_id,
-                        "pairing_secret": self._esp32.pairing_secret,
+                        **build_p4_auth_fields(
+                            owner_id=self._esp32.owner_id,
+                            pairing_secret=self._esp32.pairing_secret,
+                            purpose="ws:motion",
+                            nonce=str(challenge["nonce"]),
+                        ),
                     },
                     separators=(",", ":"),
                 )
@@ -409,6 +415,19 @@ class P4HardwareAbstraction:
             if str(message.get("request_id") or "") == request_id:
                 return message
         raise RuntimeError("P4 handshake timed out")
+
+    def _recv_challenge(self, socket: Any, *, purpose: str, timeout_s: float) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            remaining = max(0.01, deadline - time.monotonic())
+            try:
+                message = self._decode_message(socket.recv(timeout=remaining))
+            except TimeoutError:
+                continue
+            if message.get("type") == "challenge" and message.get("purpose") == purpose and message.get("nonce"):
+                return message
+            self._apply_telemetry(message)
+        raise RuntimeError("P4 motion authentication challenge timed out")
 
     @staticmethod
     def _decode_message(raw: str | bytes) -> dict[str, Any]:

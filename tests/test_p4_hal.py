@@ -34,6 +34,7 @@ class _FakeSocket:
         self.sent: list[dict] = []
         self._responses: deque[str] = deque()
         self._condition = threading.Condition()
+        self._queue({"type": "challenge", "purpose": "ws:motion", "nonce": "test-nonce"})
 
     def __enter__(self):
         return self
@@ -132,6 +133,10 @@ def test_p4_hal_handshake_profiles_then_enables_torque(tmp_path) -> None:
         assert hal.read_health() is DeviceHealth.OK
         assert manager.healthy is True
         assert [message["type"] for message in socket.sent[:3]] == ["hello", "profile", "control"]
+        assert "pairing_secret" not in socket.sent[0]
+        assert socket.sent[0]["auth_purpose"] == "ws:motion"
+        assert socket.sent[0]["auth_nonce"] == "test-nonce"
+        assert len(socket.sent[0]["auth_proof"]) == 64
         assert socket.sent[2]["op"] == "torque"
         assert socket.sent[2]["enabled"] is True
 

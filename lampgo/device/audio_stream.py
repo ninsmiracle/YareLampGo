@@ -19,6 +19,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import structlog
 
+from lampgo.device.p4_auth import authenticate_p4_websocket
+
 if TYPE_CHECKING:
     from lampgo.device.esp32 import Esp32DeviceManager
 
@@ -49,18 +51,9 @@ def redact_ws_owner_token(url: str | None) -> str | None:
         return url.replace("token=", "token=<redacted>&")
 
 
-async def send_stream_auth(ws, url: str) -> None:
-    """Authenticate the post-handshake ESP32 audio session.
-
-    ESP-IDF's HTTP server can complete a WebSocket upgrade without invoking the
-    URI callback for the HTTP GET request.  Send the same URL-safe owner/token
-    pair as the first text frame so firmware can explicitly register the audio
-    client after the upgrade.
-    """
-    query = urlsplit(url).query
-    if not query:
-        raise ValueError("ESP32 audio WebSocket URL is missing owner authentication")
-    await ws.send(query)
+async def send_stream_auth(ws, manager: Esp32DeviceManager) -> None:
+    """Authenticate audio without placing a reusable secret on the LAN."""
+    await authenticate_p4_websocket(ws, manager, purpose="ws:audio")
 
 
 class Esp32AudioCapture:
@@ -172,7 +165,7 @@ class Esp32AudioCapture:
             ping_interval=None,
             proxy=None,
         ) as ws:
-            await send_stream_auth(ws, url)
+            await send_stream_auth(ws, self._esp32)
             logger.info("esp32_audio.connected", url=safe_url)
             self._connected = True
             self._last_frame_at = time.monotonic()
@@ -213,8 +206,7 @@ def build_ws_audio_url(esp32: Esp32DeviceManager) -> str | None:
         return None
     host = dev.ip or dev.host
     port = _stream_ws_port(dev.port or 80)
-    query = f"?{esp32.ws_owner_query()}" if hasattr(esp32, "ws_owner_query") else ""
-    return f"ws://{host}:{port}/ws/audio{query}"
+    return f"ws://{host}:{port}/ws/audio"
 
 
 def build_ws_events_url(esp32: Esp32DeviceManager) -> str | None:
@@ -224,8 +216,7 @@ def build_ws_events_url(esp32: Esp32DeviceManager) -> str | None:
         return None
     host = dev.ip or dev.host
     port = _stream_ws_port(dev.port or 80)
-    query = f"?{esp32.ws_owner_query()}" if hasattr(esp32, "ws_owner_query") else ""
-    return f"ws://{host}:{port}/ws/events{query}"
+    return f"ws://{host}:{port}/ws/events"
 
 
 class Esp32AudioSession:
@@ -304,7 +295,7 @@ class Esp32AudioSession:
                 ping_interval=None,
                 proxy=None,
             ) as ws:
-                await send_stream_auth(ws, url)
+                await send_stream_auth(ws, self._esp32)
                 self._esp32.mark_active_healthy()
                 frames = 0
                 while not self._stop_event.is_set():

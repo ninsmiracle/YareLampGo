@@ -23,12 +23,12 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import structlog
 
 from lampgo.core.config import DeviceEsp32Config
+from lampgo.device.p4_auth import build_p4_auth_fields
 from lampgo.personastore import lampgo_home
 
 logger = structlog.get_logger(__name__)
@@ -37,6 +37,7 @@ MDNS_SERVICE_TYPE = "_lampgo-cam._tcp.local."
 HEALTH_TTL_S = 5.0
 OWNER_LEASE_TTL_MS = 120_000
 P4_ASSET_CHUNK_BYTES = 8 * 1024
+P4_BOOTSTRAP_PATHS = frozenset({"/api/wifi", "/connect", "/device/pair"})
 
 
 def _lampgo_home() -> Path:
@@ -554,9 +555,6 @@ class Esp32DeviceManager:
     def pairing_secret(self) -> str:
         return self._pairing_secret
 
-    def ws_owner_query(self) -> str:
-        return f"owner={quote(self._owner_id)}&token={quote(self._pairing_secret)}"
-
     def pairing_payload(self) -> dict[str, Any]:
         return {
             "owner_id": self._owner_id,
@@ -692,7 +690,11 @@ class Esp32DeviceManager:
         if self._http is None:
             return 503, {"ok": False, "error": "no_http_client"}, "application/json"
         try:
-            resp = await self._http.post(f"{dev.base_url}{path}", json=json_body or {})
+            body = dict(json_body or {})
+            if self._is_p4(dev) and path not in P4_BOOTSTRAP_PATHS:
+                body.pop("pairing_secret", None)
+                body.update(await self._p4_auth_fields(dev, purpose=f"http:POST:{path}"))
+            resp = await self._http.post(f"{dev.base_url}{path}", json=body)
             if resp.status_code < 400:
                 dev.last_health_ok = True
                 dev.last_health_ok_at = time.monotonic()
@@ -705,6 +707,32 @@ class Esp32DeviceManager:
             return resp.status_code, body, content_type
         except httpx.HTTPError as exc:
             return 502, {"ok": False, "error": f"proxy_failed: {exc}"}, "application/json"
+
+    @staticmethod
+    def _is_p4(dev: Esp32Device) -> bool:
+        return str(dev.extras.get("platform") or "") == "esp32-p4"
+
+    async def _p4_auth_fields(self, dev: Esp32Device, *, purpose: str) -> dict[str, str]:
+        """Fetch one P4 nonce and turn it into a non-replayable HMAC proof."""
+        if self._http is None:
+            raise httpx.RequestError("no HTTP client available for P4 authentication")
+        response = await self._http.get(
+            f"{dev.base_url}/device/auth/challenge", params={"purpose": purpose}
+        )
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        finally:
+            await response.aclose()
+        nonce = str(payload.get("nonce") or "") if isinstance(payload, dict) else ""
+        if not nonce:
+            raise httpx.ProtocolError("P4 challenge response is missing a nonce")
+        return build_p4_auth_fields(
+            owner_id=self._owner_id,
+            pairing_secret=self._pairing_secret,
+            purpose=purpose,
+            nonce=nonce,
+        )
 
     async def proxy_get(self, path: str) -> tuple[int, dict[str, Any] | bytes, str]:
         dev = self._pick_active()
@@ -747,10 +775,8 @@ class Esp32DeviceManager:
         """Stream an asset to the P4 without retaining its complete body in RAM.
 
         Arduino ``WebServer`` invokes a bounded raw-body callback while it
-        receives an octet stream.  Query parameters are not available to that
-        callback yet, so the small authentication and asset-routing fields are
-        duplicated as request headers.  The query stays for API compatibility
-        with older device firmwares.
+        receives an octet stream.  P4 uploads get a fresh device nonce for
+        every phase; legacy S3/C6 uploads retain their existing query contract.
         """
         dev = self._pick_active()
         if dev is None or self._http is None:
@@ -760,11 +786,9 @@ class Esp32DeviceManager:
             self.mark_active_healthy()
             try:
                 upload_timeout_s = max(float(self._config.http_timeout_s), min(180.0, 30.0 + len(payload) / 4_000.0))
-                request_params = params or {}
+                request_params = dict(params or {})
                 headers = {"Content-Type": content_type}
                 header_fields = {
-                    "X-Lampgo-Owner": request_params.get("owner_id"),
-                    "X-Lampgo-Token": request_params.get("pairing_secret"),
                     "X-Lampgo-Clip-Id": request_params.get("clip_id"),
                     "X-Lampgo-Effect-Id": request_params.get("effect_id"),
                 }
@@ -782,17 +806,27 @@ class Esp32DeviceManager:
                 if upload_port != dev.port:
                     upload_host = dev.ip or dev.host
                     upload_base_url = f"http://{upload_host}:{upload_port}"
-                if str(dev.extras.get("platform") or "") == "esp32-p4":
+                if self._is_p4(dev):
                     async def post_chunk_phase(phase: str, content: bytes = b"") -> tuple[int, dict[str, Any], str]:
+                        purpose = f"asset:POST:{path}:{phase}"
+                        auth = await self._p4_auth_fields(dev, purpose=purpose)
                         response = await self._http.post(
                             f"{upload_base_url}{path}",
-                            params=request_params,
+                            params={
+                                key: value
+                                for key, value in request_params.items()
+                                if key not in {"owner_id", "pairing_secret"}
+                            },
                             content=content,
                             # Arduino WebServer completes a request only after the
                             # peer closes its connection. Reusing keep-alive here
                             # would stall the next bounded chunk indefinitely.
                             headers={
                                 **headers,
+                                "X-Lampgo-Owner": auth["owner_id"],
+                                "X-Lampgo-Auth-Purpose": auth["auth_purpose"],
+                                "X-Lampgo-Auth-Nonce": auth["auth_nonce"],
+                                "X-Lampgo-Auth-Proof": auth["auth_proof"],
                                 "Connection": "close",
                                 "X-Lampgo-Upload-Phase": phase,
                             },

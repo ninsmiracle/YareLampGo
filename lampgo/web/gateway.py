@@ -3135,10 +3135,7 @@ class WebGateway:
         stream_base = re.sub(r":(\d+)$", lambda m: f":{int(m.group(1)) + 1}", base_url)
         if stream_base == base_url:
             stream_base = base_url.rstrip("/") + ":81"
-        owner_query = ""
-        if self.server.esp32 and hasattr(self.server.esp32, "ws_owner_query"):
-            owner_query = f"?{self.server.esp32.ws_owner_query()}"
-        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + f"/ws/speaker{owner_query}"
+        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + "/ws/speaker"
         safe_esp32_ws_url = redact_ws_owner_token(esp32_ws_url)
         try:
             import websockets
@@ -3183,6 +3180,9 @@ class WebGateway:
                     max_size=None,
                     proxy=None,
                 )
+                from lampgo.device.p4_auth import authenticate_p4_websocket
+
+                await authenticate_p4_websocket(esp32_ws, self.server.esp32, purpose="ws:speaker")
             except Exception as exc:
                 next_connect_at = now + 0.5
                 logger.warning("web.esp32_speaker_proxy_connect_failed", url=safe_esp32_ws_url, error=str(exc))

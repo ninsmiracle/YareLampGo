@@ -108,7 +108,7 @@ def build_mimo_speech_settings(
 
 
 def _normalize_api_base(value: str) -> str:
-    return (value or DEFAULT_MIMO_BASE_URL).strip().rstrip("/")
+    return ((value or "").strip() or DEFAULT_MIMO_BASE_URL).rstrip("/")
 
 
 def mimo_asr_model_or_default(value: str | None) -> str:

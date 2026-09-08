@@ -164,19 +164,19 @@ class MiMoLiveKitTTS:
 
         class _MiMoChunkedStream(tts.ChunkedStream):
             async def _run(self, output_emitter) -> None:
-                initialized = False
                 request_id = uuid.uuid4().hex
                 audio_bytes = 0
+                # LiveKit owns the emitter lifecycle even when MiMo returns no
+                # PCM (for example, a whitespace-only LLM segment).
+                output_emitter.initialize(
+                    request_id=request_id,
+                    sample_rate=MIMO_TTS_SAMPLE_RATE,
+                    num_channels=1,
+                    mime_type="audio/pcm",
+                )
                 try:
                     async for pcm in stream_mimo_tts_pcm(settings, self.input_text):
-                        if not initialized:
-                            output_emitter.initialize(
-                                request_id=request_id,
-                                sample_rate=MIMO_TTS_SAMPLE_RATE,
-                                num_channels=1,
-                                mime_type="audio/pcm",
-                            )
-                            initialized = True
+                        if audio_bytes == 0:
                             logger.info(
                                 "voice.mimo_livekit_tts_first_audio request_id=%s text_chars=%s",
                                 request_id,
@@ -193,13 +193,12 @@ class MiMoLiveKitTTS:
                         request_id=exc.request_id or None,
                         body=exc.body,
                     ) from exc
-                if initialized:
-                    output_emitter.flush()
-                    logger.info(
-                        "voice.mimo_livekit_tts_flushed request_id=%s pcm_bytes=%s",
-                        request_id,
-                        audio_bytes,
-                    )
+                output_emitter.flush()
+                logger.info(
+                    "voice.mimo_livekit_tts_flushed request_id=%s pcm_bytes=%s",
+                    request_id,
+                    audio_bytes,
+                )
 
         class _MiMoLiveKitTTS(tts.TTS):
             def __init__(self) -> None:

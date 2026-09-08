@@ -42,6 +42,8 @@ uv run lampgo run --web
 
 P4 的构建、原生 USB、供电和第一次运动说明见固件仓库的 [`ESP32_P4_HEAD/README.md`](https://github.com/shelly-tang/YareLampGo_esp32/tree/main/ESP32_P4_HEAD)。首次切换前必须完成五关节校准、低扭矩无负载动作、LCD/LED 方向、摄像头、音频和配网验证。
 
+P4 是后端与固件配套发布的路线。完成初始配对后，正常 LAN 控制、媒体和资源上传使用设备签发的一次性 nonce 与 HMAC 证明；不要把这套后端和仍在传输可重放配对密钥的旧 P4 固件混用。
+
 不要混用以下内容：
 
 - 不要把根目录的 S3 `scripts/flash.sh` 用于 P4。

@@ -725,6 +725,10 @@ def load_config_with_provenance(
         for dotted in cli_fields:
             provenance[dotted] = "cli"
 
+    # Environment and CLI helpers assign nested model attributes directly.
+    # Reconstruct once afterwards so Literal/range constraints cannot be
+    # bypassed by a string-valued environment variable.
+    config = LampgoConfig.model_validate(config.model_dump())
     _resolve_default_asset_paths(config, provenance, project_root)
     return config, provenance
 

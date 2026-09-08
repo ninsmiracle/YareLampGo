@@ -115,6 +115,13 @@ def test_mimo_adapter_emits_lifecycle_markers() -> None:
     assert "voice.mimo_livekit_tts_flushed" in source
 
 
+def test_mimo_tts_initializes_the_emitter_before_consuming_pcm() -> None:
+    source = __import__("inspect").getsource(__import__("lampgo.voice.mimo_livekit", fromlist=["*"]))
+
+    assert source.index("output_emitter.initialize(") < source.index("async for pcm in stream_mimo_tts_pcm")
+    assert "output_emitter.flush()" in source
+
+
 def _mimo_llm() -> LLMConfig:
     return LLMConfig(
         provider="mimo",
