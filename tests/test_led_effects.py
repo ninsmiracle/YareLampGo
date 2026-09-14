@@ -95,6 +95,18 @@ def test_p4_variant_centres_legacy_hand_drawing_on_native_rectangular_payload():
     assert info["bytes"] == LEF_HEADER.size + 3 * 3 + 30 + 2 * ((P4_LED_PIXEL_COUNT + 1) // 2)
 
 
+def test_p4_package_uses_vertical_right_to_left_serpentine_wiring():
+    """The physical chain starts at the top-right, then snakes by column."""
+    topology = led_effects.LED_TOPOLOGY_P4
+
+    assert led_effects._physical_index(0, 53, topology=topology) == 0
+    assert led_effects._physical_index(8, 53, topology=topology) == 8
+    assert led_effects._physical_index(8, 52, topology=topology) == 9
+    assert led_effects._physical_index(0, 52, topology=topology) == 17
+    assert led_effects._physical_index(8, 0, topology=topology) == P4_LED_PIXEL_COUNT - 9
+    assert led_effects._physical_index(0, 0, topology=topology) == P4_LED_PIXEL_COUNT - 1
+
+
 def test_pixel_effect_storage_capacity_and_llm_catalog(monkeypatch, tmp_path):
     monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
     saved = save_led_effect(_effect())

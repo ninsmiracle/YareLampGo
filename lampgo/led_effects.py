@@ -91,8 +91,14 @@ def _rgb_bytes(color: str) -> bytes:
 def _physical_index(row: int, col: int, *, topology: str) -> int | None:
     """Map the editor's front-facing 51x9 grid to the wired pixel order."""
     if topology == LED_TOPOLOGY_P4:
-        physical_col = P4_LED_WIDTH - 1 - col if row & 1 else col
-        return row * P4_LED_WIDTH + physical_col
+        # The rectangular P4 panel is built from 54 vertical, nine-pixel
+        # columns.  DIN enters at the top-right column, then the chain turns
+        # bottom-to-top on every next column toward the left.  This is a
+        # column-serpentine layout, not the row-serpentine arrangement used
+        # by the original tapered S3 board.
+        chain_column = P4_LED_WIDTH - 1 - col
+        chain_row = P4_LED_HEIGHT - 1 - row if chain_column & 1 else row
+        return chain_column * P4_LED_HEIGHT + chain_row
     wired_row = LED_HEIGHT - 1 - row
     wired_col = LED_WIDTH - 1 - col
     row_length = _ROW_LENGTHS[wired_row]
