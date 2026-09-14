@@ -44,16 +44,58 @@ def redact_ws_owner_token(url: str | None) -> str | None:
     try:
         parts = urlsplit(url)
         query = urlencode(
-            [(key, "<redacted>" if key == "token" else value) for key, value in parse_qsl(parts.query, keep_blank_values=True)]
+            [
+                (key, "<redacted>" if key == "token" else value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            ]
         )
         return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
     except Exception:
         return url.replace("token=", "token=<redacted>&")
 
 
-async def send_stream_auth(ws, manager: Esp32DeviceManager) -> None:
-    """Authenticate audio without placing a reusable secret on the LAN."""
-    await authenticate_p4_websocket(ws, manager, purpose="ws:audio")
+async def send_stream_auth(
+    ws,
+    manager: Esp32DeviceManager,
+    *,
+    purpose: str = "ws:audio",
+) -> bool:
+    """Authenticate a P4 media stream without placing a reusable secret on the LAN."""
+    return await authenticate_p4_websocket(ws, manager, purpose=purpose)
+
+
+async def acknowledge_audio_frame(ws, flow_control: bool) -> None:
+    """Return a microphone credit only after its bounded consumer accepted it."""
+    if flow_control:
+        await asyncio.wait_for(ws.send("ack"), timeout=2.0)
+
+
+class P4SpeakerStream:
+    """Single-writer PCM transport with a four-packet (240 ms) credit window.
+
+    Stop-and-wait would turn a 200 ms LAN round trip into gaps between 60 ms
+    packets. Pipeline a bounded 7.5 KiB instead, across calls as well as within
+    one call. ACK means queue acceptance, not audible playback. After any
+    error discard this object and close its socket before reconnecting.
+    """
+
+    def __init__(self, ws, flow_control: bool) -> None:
+        self._ws = ws
+        self._flow_control = flow_control
+        self._pending = 0
+
+    async def send(self, pcm: bytes) -> None:
+        if len(pcm) % 2:
+            raise ValueError("Speaker PCM16 must contain complete samples")
+        for offset in range(0, len(pcm), 1920):
+            if self._flow_control and self._pending >= 4:
+                ack = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
+                if ack != "ack":
+                    raise ConnectionError("P4 speaker did not acknowledge its audio packet")
+                self._pending -= 1
+            await asyncio.wait_for(self._ws.send(pcm[offset:offset + 1920]), timeout=2.0)
+            if self._flow_control:
+                self._pending += 1
 
 
 class Esp32AudioCapture:
@@ -165,7 +207,7 @@ class Esp32AudioCapture:
             ping_interval=None,
             proxy=None,
         ) as ws:
-            await send_stream_auth(ws, self._esp32)
+            flow_control = await send_stream_auth(ws, self._esp32)
             logger.info("esp32_audio.connected", url=safe_url)
             self._connected = True
             self._last_frame_at = time.monotonic()
@@ -173,7 +215,7 @@ class Esp32AudioCapture:
                 while self._running:
                     try:
                         data = await asyncio.wait_for(ws.recv(), timeout=WS_RECV_TIMEOUT_S)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         if time.monotonic() - self._last_frame_at > STALE_AUDIO_S:
                             raise ConnectionError("stale ESP32 audio websocket")
                         continue
@@ -187,6 +229,7 @@ class Esp32AudioCapture:
                             except queue.Empty:
                                 pass
                             self._queue.put_nowait(data)
+                        await acknowledge_audio_frame(ws, flow_control)
             finally:
                 self._connected = False
 
@@ -194,8 +237,8 @@ class Esp32AudioCapture:
         return build_ws_audio_url(self._esp32)
 
 
-def build_ws_audio_url(esp32: Esp32DeviceManager) -> str | None:
-    """Build the ``ws://host:port/ws/audio`` URL for the active ESP32.
+def _build_ws_stream_url(esp32: Esp32DeviceManager, path: str) -> str | None:
+    """Build a stream-server URL for the active ESP32-P4 device.
 
     Prefers ``dev.ip`` over ``dev.host`` to avoid flaky mDNS resolution.
     This intentionally doesn't require ``is_online()``: HTTP health checks can
@@ -206,7 +249,17 @@ def build_ws_audio_url(esp32: Esp32DeviceManager) -> str | None:
         return None
     host = dev.ip or dev.host
     port = _stream_ws_port(dev.port or 80)
-    return f"ws://{host}:{port}/ws/audio"
+    return f"ws://{host}:{port}{path}"
+
+
+def build_ws_audio_url(esp32: Esp32DeviceManager) -> str | None:
+    """Build the ``ws://host:port/ws/audio`` URL for the active ESP32."""
+    return _build_ws_stream_url(esp32, "/ws/audio")
+
+
+def build_ws_speaker_url(esp32: Esp32DeviceManager) -> str | None:
+    """Build the ``ws://host:port/ws/speaker`` URL for the active ESP32."""
+    return _build_ws_stream_url(esp32, "/ws/speaker")
 
 
 def build_ws_events_url(esp32: Esp32DeviceManager) -> str | None:
@@ -265,7 +318,7 @@ class Esp32AudioSession:
         if self._task:
             try:
                 await asyncio.wait_for(self._task, timeout=3.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 self._task.cancel()
             self._task = None
         return self._build_wav()
@@ -295,7 +348,7 @@ class Esp32AudioSession:
                 ping_interval=None,
                 proxy=None,
             ) as ws:
-                await send_stream_auth(ws, self._esp32)
+                flow_control = await send_stream_auth(ws, self._esp32)
                 self._esp32.mark_active_healthy()
                 frames = 0
                 while not self._stop_event.is_set():
@@ -303,13 +356,14 @@ class Esp32AudioSession:
                         break
                     try:
                         data = await asyncio.wait_for(ws.recv(), timeout=0.5)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except Exception:
                         logger.info("esp32_audio.session_ws_closed", pcm_so_far=len(self._pcm))
                         break
                     if isinstance(data, bytes):
                         self._pcm.extend(data)
+                        await acknowledge_audio_frame(ws, flow_control)
                         frames += 1
                         if frames == 1 or frames % 100 == 0:
                             logger.info(

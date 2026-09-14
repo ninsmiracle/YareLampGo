@@ -7,7 +7,7 @@ import hmac
 import httpx
 
 from lampgo.core.config import DeviceEsp32Config
-from lampgo.device.audio_stream import build_ws_audio_url
+from lampgo.device.audio_stream import build_ws_audio_url, build_ws_speaker_url, send_stream_auth
 from lampgo.device.esp32 import Esp32Device, Esp32DeviceManager
 from lampgo.device.p4_auth import AUTH_DOMAIN, build_p4_auth_fields, build_p4_auth_proof
 
@@ -55,6 +55,31 @@ def test_p4_audio_url_does_not_embed_replayable_pairing_credentials() -> None:
             return Device()
 
     assert build_ws_audio_url(Manager()) == "ws://192.0.2.4:81/ws/audio"
+    assert build_ws_speaker_url(Manager()) == "ws://192.0.2.4:81/ws/speaker"
+
+
+def test_p4_audio_auth_uses_the_device_manager_not_a_transport_url() -> None:
+    class WebSocket:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, value: str) -> None:
+            self.sent.append(value)
+
+        async def recv(self) -> str:
+            return '{"type":"challenge","purpose":"ws:audio","nonce":"test-nonce"}'
+
+    class Manager:
+        owner_id = "lampgo-owner"
+        pairing_secret = "pairing-secret-for-test"
+
+    ws = WebSocket()
+    asyncio.run(send_stream_auth(ws, Manager()))
+
+    assert '"type":"auth_init"' in ws.sent[0]
+    assert '"purpose":"ws:audio"' in ws.sent[0]
+    assert '"owner_id":"lampgo-owner"' in ws.sent[1]
+    assert "pairing-secret-for-test" not in ws.sent[1]
 
 
 def test_p4_control_post_replaces_pairing_secret_with_single_use_proof(monkeypatch, tmp_path) -> None:

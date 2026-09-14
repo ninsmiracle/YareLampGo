@@ -6993,8 +6993,14 @@
       };
       speakerWs.onerror = () => fail("ESP32 speaker WS 连接失败");
       speakerWs.onclose = () => {
-        if (esp32SpeakerWs === speakerWs) esp32SpeakerWs = null;
-        fail("ESP32 speaker WS 已断开");
+        const wasActive = esp32SpeakerWs === speakerWs;
+        if (wasActive) esp32SpeakerWs = null;
+        if (!settled) {
+          fail("ESP32 speaker WS 已断开");
+        } else if (wasActive && esp32SpeakerRelayStats) {
+          console.warn("[call] ESP32 speaker relay closed after connection");
+          addCallSystemNote("ESP32 扬声器通道已断开，请检查设备音频状态");
+        }
       };
     });
 

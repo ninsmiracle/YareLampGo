@@ -44,11 +44,13 @@ def build_p4_auth_fields(*, owner_id: str, pairing_secret: str, purpose: str, no
     }
 
 
-async def authenticate_p4_websocket(ws: Any, manager: Esp32DeviceManager, *, purpose: str) -> None:
+async def authenticate_p4_websocket(ws: Any, manager: Esp32DeviceManager, *, purpose: str) -> bool:
     """Complete a P4 WebSocket challenge-response exchange.
 
     The first frame intentionally contains no credential.  The device returns
     a one-time nonce, and only then does the backend send an HMAC proof.
+    Return whether bounded audio flow control was negotiated (older P4s do
+    not advertise it). Motion/events never opt into the media protocol.
     """
     await ws.send(json.dumps({"type": "auth_init", "purpose": purpose}, separators=(",", ":")))
     raw_challenge = await asyncio.wait_for(ws.recv(), timeout=5.0)
@@ -67,4 +69,8 @@ async def authenticate_p4_websocket(ws: Any, manager: Esp32DeviceManager, *, pur
         purpose=purpose,
         nonce=nonce,
     )
+    flow_control = purpose in {"ws:audio", "ws:speaker"} and challenge.get("flow_control") == "ack-v1"
+    if flow_control:
+        fields["flow_control"] = "ack-v1"
     await ws.send(json.dumps({"type": "auth", **fields}, separators=(",", ":")))
+    return flow_control

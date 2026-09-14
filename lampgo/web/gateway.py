@@ -3122,8 +3122,10 @@ class WebGateway:
             await ws.close(code=1013)
             return
         self._esp32_speaker_clients.add(ws)
-        base_url = self.server.esp32.get_active_base_url() if self.server.esp32 else None
-        if not base_url:
+        from lampgo.device.audio_stream import P4SpeakerStream, build_ws_speaker_url
+
+        esp32_ws_url = build_ws_speaker_url(self.server.esp32) if self.server.esp32 else None
+        if not esp32_ws_url:
             self._esp32_speaker_clients.discard(ws)
             await ws.close(code=1011)
             return
@@ -3142,11 +3144,6 @@ class WebGateway:
         # Speaker WS lives on the stream httpd (port 81). Batch browser-side
         # 20 ms PCM frames before forwarding so full-duplex calls do not starve
         # /ws/audio async sends with a high-frequency receive loop.
-        import re
-        stream_base = re.sub(r":(\d+)$", lambda m: f":{int(m.group(1)) + 1}", base_url)
-        if stream_base == base_url:
-            stream_base = base_url.rstrip("/") + ":81"
-        esp32_ws_url = stream_base.replace("http://", "ws://", 1).replace("https://", "wss://", 1) + "/ws/speaker"
         safe_esp32_ws_url = redact_ws_owner_token(esp32_ws_url)
         try:
             import websockets
@@ -3163,10 +3160,11 @@ class WebGateway:
         batch_target_bytes = 1920  # 60 ms of PCM16LE @ 16 kHz mono.
         batch_max_delay_s = 0.06
         esp32_ws = None
+        speaker_stream = None
         next_connect_at = 0.0
 
         async def close_esp32_ws() -> None:
-            nonlocal esp32_ws
+            nonlocal esp32_ws, speaker_stream
             if esp32_ws is None:
                 return
             try:
@@ -3174,9 +3172,10 @@ class WebGateway:
             except Exception:
                 pass
             esp32_ws = None
+            speaker_stream = None
 
         async def ensure_esp32_ws():
-            nonlocal esp32_ws, next_connect_at
+            nonlocal esp32_ws, next_connect_at, speaker_stream
             if esp32_ws is not None:
                 return esp32_ws
             now = asyncio.get_running_loop().time()
@@ -3193,8 +3192,12 @@ class WebGateway:
                 )
                 from lampgo.device.p4_auth import authenticate_p4_websocket
 
-                await authenticate_p4_websocket(esp32_ws, self.server.esp32, purpose="ws:speaker")
+                flow_control = await authenticate_p4_websocket(
+                    esp32_ws, self.server.esp32, purpose="ws:speaker",
+                )
+                speaker_stream = P4SpeakerStream(esp32_ws, flow_control)
             except Exception as exc:
+                await close_esp32_ws()
                 next_connect_at = now + 0.5
                 logger.warning("web.esp32_speaker_proxy_connect_failed", url=safe_esp32_ws_url, error=str(exc))
                 return None
@@ -3224,7 +3227,7 @@ class WebGateway:
                 if target is None:
                     break
                 try:
-                    await target.send(frame)
+                    await speaker_stream.send(frame)
                     sent = True
                     break
                 except Exception as exc:
@@ -3258,10 +3261,19 @@ class WebGateway:
             return True
 
         try:
+            # Fail the browser-facing connection promptly when the P4 did not
+            # bring up its I2S speaker endpoint. Leaving it open would silently
+            # discard every Agent PCM frame and make the UI look merely stuck.
+            if await ensure_esp32_ws() is None:
+                await ws.close(code=1011)
+                return
             while True:
                 frame = await ws.receive_bytes()
                 if not frame:
                     continue
+                if len(frame) > 3840 or len(frame) % 2:
+                    await ws.close(code=1009)
+                    break
                 if not pending_audio:
                     pending_started_at = asyncio.get_running_loop().time()
                 pending_audio.extend(frame)
@@ -4351,7 +4363,7 @@ class WebGateway:
 
     async def _relay_esp32_audio_to_browser(self, ws: WebSocket) -> None:
         """Forward ESP32 PCM16 frames directly to one browser WebSocket client."""
-        from lampgo.device.audio_stream import build_ws_audio_url, send_stream_auth
+        from lampgo.device.audio_stream import acknowledge_audio_frame, build_ws_audio_url, send_stream_auth
 
         claim_owner = getattr(self.server.esp32, "claim_owner", None) if self.server.esp32 else None
         if callable(claim_owner):
@@ -4423,7 +4435,7 @@ class WebGateway:
                         max_size=None,
                         proxy=None,
                     ) as esp32_ws:
-                        await send_stream_auth(esp32_ws, url)
+                        flow_control = await send_stream_auth(esp32_ws, self.server.esp32)
                         self.server.esp32.mark_active_healthy()
                         safe_url = redact_ws_owner_token(url)
                         logger.info("web.esp32_audio_relay_authenticated", url=safe_url)
@@ -4451,6 +4463,7 @@ class WebGateway:
                                 continue
                             idle_timeouts = 0
                             await ws.send_bytes(data)
+                            await acknowledge_audio_frame(esp32_ws, flow_control)
                             frames += 1
                             bytes_sent += len(data)
                             if frames == 1:
