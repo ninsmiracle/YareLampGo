@@ -4140,9 +4140,10 @@
       const sync = eye.sync || {};
       eyeGrid.appendChild(expressionResource(
         eye.label || eye.eye_clip_id,
-        `${eye.eye_clip_id} · ${eye.frame_count || 0} 帧 · ${eye.fps || 0} FPS · ${formatBytes(lcd.bytes)} · ${sync.status || "unsynced"}`,
+        eye.source_kind === "factory" ? "出厂内置 · 眼嘴可联动 · 无需同步素材" :
+          `${eye.eye_clip_id} · ${eye.frame_count || 0} 帧 · ${eye.fps || 0} FPS · ${formatBytes(lcd.bytes)} · ${sync.status || "unsynced"}`,
         [
-          { label: "同步", run: () => syncExpressionResources(eye.eye_clip_id) },
+          ...(eye.source_kind === "factory" ? [] : [{ label: "同步", run: () => syncExpressionResources(eye.eye_clip_id) }]),
           { label: "选用", run: () => selectExpressionResource(eye.eye_clip_id, null), primary: true },
         ],
       ));
@@ -4157,7 +4158,8 @@
       const pair = `${preset.eye_clip_id || "无眼睛"} + ${preset.led_effect_id || "无 LED"}`;
       expressionPresetGrid.appendChild(expressionResource(
         preset.label || preset.preset_id,
-        `${preset.preset_id} · ${pair} · ${preset.playback === "loop" ? "循环" : "单次"}`,
+        preset.source === "factory" ? preset.description :
+          `${preset.preset_id} · ${pair} · ${preset.playback === "loop" ? "循环" : "单次"}`,
         [
           { label: "载入", run: () => loadExpressionPreset(preset) },
           { label: "▶", title: "播放", run: () => playExpression({ preset_id: preset.preset_id }), primary: true },
@@ -4403,9 +4405,11 @@
         fetchJson("/api/expression-presets"),
         fetchJson("/api/device/expression-capabilities"),
       ]);
-      expressionEyes = eyes.eyes || [];
-      expressionLedEffects = effects.led_effects || [];
-      expressionPresets = presets.presets || [];
+      const isFactoryP4 = capacity.device && capacity.device.platform === "esp32-p4";
+      const visiblePlatform = (x) => !x.platform || (isFactoryP4 && x.platform === "esp32-p4");
+      expressionEyes = (eyes.eyes || []).filter(visiblePlatform);
+      expressionLedEffects = (effects.led_effects || []).filter(visiblePlatform).filter((x) => !isFactoryP4 || !x.p4_archived);
+      expressionPresets = (presets.presets || []).filter(visiblePlatform);
       renderExpressionStudio();
       renderExpressions(ledEffectExpressionEntries(expressionLedEffects));
       renderRecordings();
@@ -4418,8 +4422,9 @@
           const lcd = `${device.lcd_width || 320}×${device.lcd_height || 172}`;
           const led = `${device.led_width || 54}×${device.led_height || 9}`;
           expressionCapacityEl.textContent = [
-            `P4 屏幕 ${lcd} · 本地素材直传`,
-            `P4 LED ${led} · 物理走线待校准`,
+            `P4 屏幕 ${lcd} · ${library.eyes.factory_count || 0} 组内置 + ${library.eyes.max_count} 个上传位置`,
+            `素材可用 ${device.storage ? formatBytes(device.storage.filesystem_free_bytes) : "待新版固件读回"}`,
+            `P4 LED ${led} · ${device.led_renderer === "p4-canvas-v2" ? "新版灯效已就绪" : "新版灯效需更新 P4 固件"}`,
             `组合 ${library.presets.installed}/${library.presets.max_count}`,
           ].join("  |  ");
           void refreshClock();
@@ -4531,6 +4536,20 @@
     }
   }
 
+  let p4LedPreviewAtlas = null;
+  async function loadP4LedPreview() {
+    if (ledEditorTopology !== "p4-54x9" || p4LedPreviewAtlas) return;
+    const response = await fetch("/p4-led-preview.json?v=p4-led-v2-20260917");
+    if (!response.ok) throw new Error("P4 灯效预览加载失败");
+    const atlas = await response.json();
+    if (atlas.renderer !== "p4-canvas-v2" || atlas.width !== 54) throw new Error("P4 预览版本不匹配");
+    const factoryResponse = await fetch("/factory-faces/led.json?v=p4-face-v1");
+    if (!factoryResponse.ok) throw new Error("P4 出厂预览加载失败");
+    const factoryAtlas = await factoryResponse.json();
+    Object.assign(atlas.effects, factoryAtlas.effects);
+    p4LedPreviewAtlas = atlas;
+  }
+
   function ledCellActive(effect, row, col, phase) {
     if (!effect) return false;
     const program = effect.program || {};
@@ -4604,7 +4623,7 @@
     return (program.palette && program.palette[symbol]) || null;
   }
 
-  function renderLedPreview(effect, phase) {
+  function renderLedPreview(effect, phase, elapsedMs = phase * 3000) {
     ensureLedPreviewCells();
     if (!expressionLedPreview) return;
     const color = (composerColor && composerColor.value) || "#ffffff";
@@ -4613,11 +4632,18 @@
     const brightnessCeiling = clampEsp32LedBrightness((esp32LedBrightnessSlider && esp32LedBrightnessSlider.value) || 32);
     const brightness = Math.min(requestedBrightness, brightnessCeiling) / 96;
     const pixelClipReady = effect && effect.kind === "pixel_clip" && ledEffectSourceCache.has(effect.effect_id);
+    const p4Colors = ledEditorTopology === "p4-54x9" && effect && effect.kind !== "pixel_clip"
+      ? window.P4LedPreview.frame(p4LedPreviewAtlas, effect, elapsedMs, {
+          intensity,
+          ...((composerColorOverride && composerColorOverride.checked) ? { color } : {}),
+          ...((effect.program || {}).template === "arrow" ? { direction: expressionDirection } : {}),
+        })
+      : null;
     Array.from(expressionLedPreview.children).forEach((cell, index) => {
       const row = Math.floor(index / ledEditorWidth);
       const col = index % ledEditorWidth;
-      const pixelColor = pixelClipReady ? pixelClipCellColor(effect, row, col, phase) : null;
-      const active = pixelClipReady ? Boolean(pixelColor) : ledCellActive(effect, row, col, phase);
+      const pixelColor = p4Colors ? p4Colors[index] : (pixelClipReady ? pixelClipCellColor(effect, row, col, phase) : null);
+      const active = (p4Colors || pixelClipReady) ? Boolean(pixelColor) : ledCellActive(effect, row, col, phase);
       const activeColor = pixelColor || color;
       cell.style.background = active ? activeColor : "#30353a";
       cell.style.opacity = active ? String(0.35 + intensity * 0.65) : "1";
@@ -4684,7 +4710,7 @@
       const composition = result.composition;
       const eye = expressionEyes.find((item) => item.eye_clip_id === composition.eye_clip_id);
       const effect = expressionLedEffects.find((item) => item.effect_id === composition.led_effect_id);
-      await Promise.all([loadEyePreviewImage(eye), loadLedPreviewSource(effect)]);
+      await Promise.all([loadEyePreviewImage(eye), loadLedPreviewSource(effect), loadP4LedPreview()]);
       if (expressionPreviewTimer) cancelAnimationFrame(expressionPreviewTimer);
       const started = Date.now();
       const durationMs = Math.max(1000, Number(composition.duration_ms || (eye && eye.duration_ms) || 3000));
@@ -4695,7 +4721,7 @@
         const eyeElapsed = looping ? elapsed % durationMs : Math.min(elapsed, durationMs - 1);
         const ledElapsed = looping ? elapsed % ledDurationMs : Math.min(elapsed, ledDurationMs - 1);
         renderEyePreview(eye, eyeElapsed / durationMs);
-        renderLedPreview(effect, ledElapsed / ledDurationMs);
+        renderLedPreview(effect, ledElapsed / ledDurationMs, ledElapsed);
         if (expressionPreviewStatus) {
           expressionPreviewStatus.textContent = `${(Math.min(durationMs, elapsed) / 1000).toFixed(1)} / ${(durationMs / 1000).toFixed(1)} 秒`;
         }
@@ -4718,7 +4744,12 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body || currentExpressionBody()),
       });
-      if (expressionPreviewStatus) expressionPreviewStatus.textContent = result.device ? "设备播放中" : "播放已发送";
+      if (expressionPreviewStatus) {
+        const device = result.device || {};
+        expressionPreviewStatus.textContent = device.accepted
+          ? "播放指令已接收，请查看灯板效果"
+          : (result.device ? "设备播放中" : "播放已发送");
+      }
       return result;
     } catch (error) {
       window.alert(`播放失败：${error.message || error}`);
@@ -4730,7 +4761,7 @@
     try {
       await fetchJson("/api/device/led-topology-test", { method: "POST" });
       if (ledEditorStatus) {
-        ledEditorStatus.textContent = "走线标记已显示：红 #0、绿 #53、蓝 #54、黄 #107、青 #432、品红 #485";
+        ledEditorStatus.textContent = "走线标记已显示：红 #0、绿 #8、蓝 #9、黄 #17、青 #477、品红 #485";
       }
     } catch (error) {
       if (ledEditorStatus) ledEditorStatus.textContent = "走线校准失败";

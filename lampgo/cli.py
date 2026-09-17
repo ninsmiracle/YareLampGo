@@ -34,8 +34,11 @@ from pathlib import Path
 
 import structlog
 
+from lampgo.diagnostics import install_exception_logging, persist_log
+
 structlog.configure(
     processors=[
+        persist_log,
         structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(20),
@@ -59,6 +62,7 @@ def _configure_windows_console_encoding() -> None:
 
 
 def main() -> None:
+    install_exception_logging()
     _configure_windows_console_encoding()
     parser = argparse.ArgumentParser(
         prog="lampgo",
@@ -599,6 +603,9 @@ def _cmd_ping(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    from lampgo.serial_guard import require_quiet_port
+    require_quiet_port(port)
+
     try:
         from lerobot.motors import Motor, MotorNormMode
         from lerobot.motors.feetech import FeetechMotorsBus
@@ -644,6 +651,9 @@ def _cmd_setup_motors(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    from lampgo.serial_guard import require_quiet_port
+    require_quiet_port(port)
 
     try:
         from lerobot.motors import Motor, MotorNormMode
@@ -723,6 +733,9 @@ def _cmd_scan_motors(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    from lampgo.serial_guard import require_quiet_port
+    require_quiet_port(port)
+
     # --- parse ID range ---
     ids: list[int] = []
     spec: str = getattr(args, "ids", "1-20") or "1-20"
@@ -761,14 +774,8 @@ def _cmd_scan_motors(args: argparse.Namespace) -> None:
         # Read up to 12 bytes: 6 possible TX echo + 6 status response
         raw = ser.read(12)
 
-        # Scan for a valid status-packet starting with FF FF <id>
-        model_num: int | None = None
-        for i in range(len(raw) - 5):
-            if raw[i] == 0xFF and raw[i + 1] == 0xFF and raw[i + 2] == motor_id:
-                # status packet: FF FF ID LEN ERROR CHECKSUM
-                # Some buses also include model in extended response — accept any reply
-                model_num = 0
-                break
+        from lampgo.serial_guard import has_ping_reply
+        model_num = 0 if has_ping_reply(raw, motor_id, packet) else None
 
         if model_num is not None:
             found.append((motor_id, model_num))
@@ -1183,6 +1190,9 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
 
     project_root = _require_calibration_project_root()
     config = load_config(config_path=getattr(args, "config", None))
+    if config.device.motor_transport == "p4":
+        print("P4 使用无线校准：启动 lampgo run --web，在页面的‘P4 无线维护’中校准。请勿同时连接 USB 舵机驱动板。")
+        return
     port = _resolve_calibration_port(args, config, interactive=True)
     lamp_id = args.id or config.device.lamp_id
     _require_calibration_path_in_project(project_root, config.device.calibration_dir, lamp_id)
@@ -1196,6 +1206,9 @@ def _cmd_calibrate(args: argparse.Namespace) -> None:
 
     dev_config = config.device.model_copy(update={"motor_port": port, "lamp_id": lamp_id})
     hal = HardwareAbstraction(dev_config)
+    from lampgo.serial_guard import require_quiet_port
+    require_quiet_port(port)
+
     try:
         hal.connect(calibrate=False, configure=False)
         hal.calibrate()

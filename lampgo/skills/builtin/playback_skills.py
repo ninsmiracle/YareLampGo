@@ -166,6 +166,12 @@ class PlayRecordingSkill(Skill):
                 message=f"Recording '{name}' not found. Available: {available}",
             )
 
+        if not expression_preset and not expression:
+            from lampgo.recordings import list_recording_catalog
+            entry = next((x for x in list_recording_catalog(self._recordings_dir) if x["name"] == name), {})
+            expression_preset = str(entry.get("expression_preset") or "")
+            expression = str(entry.get("expression") or "")
+
         frames, detected_fps = load_recording(path)
         if not frames:
             return SkillResult(status="error", message=f"Recording '{name}' has no valid frames")

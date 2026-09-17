@@ -118,3 +118,36 @@ def test_p4_control_post_replaces_pairing_secret_with_single_use_proof(monkeypat
     assert isinstance(sent, dict)
     assert sent["auth_purpose"] == "http:POST:/device/led"
     assert "pairing_secret" not in sent
+
+
+def test_asset_timeout_reports_phase_and_acknowledged_progress(monkeypatch, tmp_path):
+    from lampgo.device.esp32 import P4_ASSET_CHUNK_BYTES
+    monkeypatch.setenv('LAMPGO_HOME', str(tmp_path))
+    manager = Esp32DeviceManager(DeviceEsp32Config(enabled=True))
+    dev = Esp32Device('p4', 'lampgo-p4.local', extras={'platform': 'esp32-p4'})
+    monkeypatch.setattr(manager, '_pick_active', lambda: dev)
+    chunks = 0
+
+    async def handler(request):
+        nonlocal chunks
+        if request.url.path == '/device/auth/challenge':
+            return httpx.Response(200, json={'nonce': 'test-nonce'})
+        if request.headers.get('X-Lampgo-Upload-Phase') == 'chunk':
+            chunks += 1
+            if chunks == 2:
+                raise httpx.ReadTimeout('', request=request)
+        return httpx.Response(200, json={'ok': True})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            manager._http = client
+            return await manager.proxy_post_bytes('/device/expression-clips/upload',
+                                                  b'x' * (P4_ASSET_CHUNK_BYTES + 1),
+                                                  params={'clip_id': 'legacy'})
+
+    status, body, _ = asyncio.run(run())
+    assert status == 502
+    assert body['error'] == 'proxy_failed: ReadTimeout during chunk'
+    assert body['sent_bytes'] == P4_ASSET_CHUNK_BYTES
+    assert body['total_bytes'] == P4_ASSET_CHUNK_BYTES + 1
+    assert manager._active_transfers == 0

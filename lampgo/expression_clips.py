@@ -242,13 +242,18 @@ def create_expression_clip(
     grid_rows: int | None = None,
     grid_cols: int | None = None,
     default_led_effect_id: str | None = None,
+    platform: str = "",
 ) -> dict[str, Any]:
     clip_id = sanitize_clip_id(clip_id)
+    from lampgo.factory_faces import BY_ID
+    if clip_id in BY_ID:
+        raise ExpressionClipError("reserved factory eye id")
     expression = (expression or clip_id).strip().lower()
     if not expression:
         raise ExpressionClipError("expression is required")
-    if len(list_expression_clips()) >= MAX_CLIPS and not _manifest_path(clip_id).exists():
-        raise ExpressionClipError(f"maximum expression clips reached: {MAX_CLIPS}")
+    max_clips = 16 if platform == "esp32-p4" else MAX_CLIPS
+    if len(list_expression_clips()) >= max_clips and not _manifest_path(clip_id).exists():
+        raise ExpressionClipError(f"maximum expression clips reached: {max_clips}")
     if fps < MIN_FPS or fps > MAX_FPS:
         raise ExpressionClipError(f"fps must be between {MIN_FPS} and {MAX_FPS}")
     if not source_bytes:

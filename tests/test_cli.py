@@ -511,6 +511,7 @@ def test_server_blocks_teach_recording_until_motor_recovery_finishes() -> None:
 
 
 def test_cmd_ping_reports_status_error(monkeypatch, capsys):
+    monkeypatch.setattr("lampgo.serial_guard.require_quiet_port", lambda port: None)
     args = argparse.Namespace(port="/dev/tty.test", config=None)
 
     class FakePacketHandler:
@@ -572,6 +573,7 @@ def test_cmd_ping_reports_status_error(monkeypatch, capsys):
 
 
 def test_cmd_setup_motors_assigns_each_configured_motor(monkeypatch, capsys):
+    monkeypatch.setattr("lampgo.serial_guard.require_quiet_port", lambda port: None)
     args = argparse.Namespace(port="/dev/tty.test", config=None)
     prompts: list[str] = []
     setup_calls: list[tuple[str, int]] = []

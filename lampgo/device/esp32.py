@@ -384,6 +384,11 @@ class Esp32DeviceManager:
             "led_height",
             "led_panel_count",
             "led_output_ok",
+            "led_renderer",
+            "factory_face_version",
+            "storage",
+            "led_tx_failures",
+            "led_error",
         ):
             if key in body:
                 dev.extras[key] = body.get(key)
@@ -839,6 +844,8 @@ class Esp32DeviceManager:
         async with self._transfer_lock:
             self._active_transfers += 1
             self.mark_active_healthy()
+            phase = "prepare"
+            sent_bytes = 0
             try:
                 upload_timeout_s = max(float(self._config.http_timeout_s), min(180.0, 30.0 + len(payload) / 4_000.0))
                 request_params = dict(params or {})
@@ -862,7 +869,9 @@ class Esp32DeviceManager:
                     upload_host = dev.ip or dev.host
                     upload_base_url = f"http://{upload_host}:{upload_port}"
                 if self._is_p4(dev):
-                    async def post_chunk_phase(phase: str, content: bytes = b"") -> tuple[int, dict[str, Any], str]:
+                    async def post_chunk_phase(next_phase: str, content: bytes = b"") -> tuple[int, dict[str, Any], str]:
+                        nonlocal phase
+                        phase = next_phase
                         purpose = f"asset:POST:{path}:{phase}"
                         auth = await self._p4_auth_fields(dev, purpose=purpose)
                         response = await self._http.post(
@@ -909,6 +918,7 @@ class Esp32DeviceManager:
                         )
                         if status >= 400 or (isinstance(body, dict) and body.get("ok") is False):
                             return status, body, response_content_type
+                        sent_bytes += len(payload[offset : offset + P4_ASSET_CHUNK_BYTES])
                     status, body, response_content_type = await post_chunk_phase("finish")
                 else:
                     response = await self._http.post(
@@ -930,7 +940,10 @@ class Esp32DeviceManager:
                     self.mark_active_healthy()
                 return status, body, response_content_type
             except httpx.HTTPError as exc:
-                return 502, {"ok": False, "error": f"proxy_failed: {exc}"}, "application/json"
+                # Timeout exceptions often have an empty str(exc). Keep the
+                # failing stage and exception class visible, without auth data.
+                return 502, {"ok": False, "error": f"proxy_failed: {type(exc).__name__} during {phase}",
+                             "phase": phase, "sent_bytes": sent_bytes, "total_bytes": len(payload)}, "application/json"
             finally:
                 self._active_transfers = max(0, self._active_transfers - 1)
 

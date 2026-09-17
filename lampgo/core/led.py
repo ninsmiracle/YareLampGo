@@ -278,6 +278,10 @@ class LEDController:
             return False, None
 
         composition = dict(composition)
+        if composition.get("requires_p4_face") and not self._active_device_is_p4():
+            from lampgo.factory_faces import BY_ID
+            face = BY_ID.get(expression_id) or BY_ID.get(composition.get("led_effect_id"))
+            return (self.set_mode(face["fallback"]) if face else False), composition
         led_params = dict(composition.get("led_params") or {})
         led_params["brightness"] = self._clamp_brightness(
             led_params.get("brightness", self._brightness_ceiling_value())

@@ -231,6 +231,8 @@ class WebGateway:
             Route("/api/text", self.api_text, methods=["POST"]),
             Route("/api/invoke", self.api_invoke, methods=["POST"]),
             Route("/api/status", self.api_status),
+            Route("/api/maintenance", self.api_maintenance, methods=["GET", "POST"]),
+            Route("/api/diagnostics/download", self.api_diagnostics),
             Route("/api/skills", self.api_skills),
             Route("/api/skills/save", self.api_skills_save, methods=["POST"]),
             Route("/api/skills/delete", self.api_skills_delete, methods=["POST"]),
@@ -694,6 +696,36 @@ class WebGateway:
             status_code=503,
         )
 
+    async def api_maintenance(self, request: Request) -> JSONResponse:
+        from lampgo.diagnostics import runtime_log_path
+        if request.method == "GET":
+            return JSONResponse({"ok": True, "result": {**self.server.maintenance.status(),
+                "transport": self.server.config.device.motor_transport,
+                "hardware": getattr(self.server.hal, "transport_status", lambda: {})(),
+                "log_path": str(runtime_log_path())}})
+        body = {}
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Expected a maintenance operation object")
+            result = await self.server.maintenance.command(str(body.get("operation", "")), body)
+            return JSONResponse({"ok": True, "result": result})
+        except (ValueError, RuntimeError, OSError) as exc:
+            self.server.maintenance.error = str(exc)
+            logger.warning(
+                "maintenance.request_failed",
+                operation=body.get("operation") if isinstance(body, dict) else None,
+                error=str(exc),
+                phase=self.server.maintenance.phase,
+            )
+            return JSONResponse({"ok": False, "error": str(exc),
+                "result": self.server.maintenance.status()}, status_code=409)
+
+    async def api_diagnostics(self, request: Request) -> FileResponse:
+        from lampgo.diagnostics import support_bundle
+        path = await asyncio.to_thread(support_bundle, self.server)
+        return FileResponse(path, filename=path.name, media_type="application/zip")
+
     async def api_status(self, request: Request) -> JSONResponse:
         result = self.server._handle_status()
         return JSONResponse(result)
@@ -993,6 +1025,9 @@ class WebGateway:
 
     async def api_eye_sync(self, request: Request) -> JSONResponse:
         eye_id = str(request.path_params.get("eye_id") or "")
+        from lampgo.factory_faces import BY_ID
+        if eye_id in BY_ID:
+            return JSONResponse({"ok": True, "result": {"source": "firmware_builtin"}})
         return await self._sync_eye_response(eye_id)
 
     async def api_led_effects(self, request: Request) -> JSONResponse:
@@ -1173,7 +1208,11 @@ class WebGateway:
         self.server.clock.deactivate()
         self.server.electronic_ocean.deactivate()
         eye_clip_id = composition.get("eye_storage_clip_id")
-        if eye_clip_id:
+        if composition.get("requires_p4_face"):
+            device = self.server.esp32.get_status().get("device") or {}
+            if device.get("factory_face_version") != "p4-face-v1":
+                return 409, {"ok": False, "error": "此出厂表情需要 P4 p4-head-0.3.6 或更新固件"}
+        if eye_clip_id and not composition.get("factory_eye"):
             # An eye clip is a P4-local LittleFS asset, not a C6 relay.  Do
             # the upload in the same user action so Play cannot silently fall
             # back to the firmware's generic circular eyes.
@@ -1221,7 +1260,12 @@ class WebGateway:
         status, device_body = await self._play_resolved_expression(composition)
         ok = status < 400 and not (isinstance(device_body, dict) and device_body.get("ok") is False)
         return JSONResponse(
-            {"ok": ok, "result": {"composition": composition, "device": device_body}},
+            {
+                "ok": ok,
+                **({"error": str(device_body.get("error") or "LED playback rejected")}
+                   if not ok and isinstance(device_body, dict) else {}),
+                "result": {"composition": composition, "device": device_body},
+            },
             status_code=status,
         )
 
@@ -1318,6 +1362,8 @@ class WebGateway:
                 candidate = status_snapshot.get("device") if isinstance(status_snapshot, dict) else None
                 if isinstance(candidate, dict) and candidate.get("platform") == "esp32-p4":
                     device = candidate
+        if isinstance(device, dict) and device.get("platform") == "esp32-p4":
+            local = expression_capabilities("esp32-p4")
         return JSONResponse({"ok": True, "result": {"library": local, "device": device}})
 
     async def api_expression_clips(self, request: Request) -> JSONResponse:
@@ -1326,6 +1372,8 @@ class WebGateway:
 
         try:
             payload = await self._read_expression_clip_upload(request)
+            device = self.server.esp32.get_status().get("device") if self.server.esp32 else None
+            payload["platform"] = (device or {}).get("platform", "")
             manifest = create_expression_clip(**payload)
             refresh_llm_expression_catalog()
         except ExpressionClipError as exc:
@@ -2958,10 +3006,10 @@ class WebGateway:
         return await self._sync_eye_response(clip_id)
 
     async def _sync_eye_response(self, eye_id: str) -> JSONResponse:
-        status, body = await self._sync_eye_to_device(eye_id)
+        status, body = await self._sync_eye_to_device(eye_id, force=True)
         return JSONResponse(body, status_code=status)
 
-    async def _sync_eye_to_device(self, eye_id: str) -> tuple[int, dict[str, Any]]:
+    async def _sync_eye_to_device(self, eye_id: str, *, force: bool = False) -> tuple[int, dict[str, Any]]:
         """Copy one LCD clip to the paired P4 and return an API-safe result."""
         if not self.server.esp32:
             return 503, {"ok": False, "error": "no_device"}
@@ -2976,6 +3024,20 @@ class WebGateway:
             return 500, {"ok": False, "error": f"sync prepare failed: {exc}"}
 
         lcd_meta = manifest.get("lcd") or {}
+        device = self.server.esp32.get_status().get("device") or {}
+        if not force and device.get("platform") == "esp32-p4":
+            # Verify the device's actual bytes, not a local "synced" flag: a
+            # reboot, deleted asset or another device must not yield a stale hit.
+            expected_sha = hashlib.sha256(payload).hexdigest()
+            status, inventory, _ = await self.server.esp32.proxy_get("/device/expression-clips")
+            if status >= 400:
+                return status, {"ok": False, "error": "device asset inventory unavailable", "result": inventory}
+            installed = ((inventory.get("result") or {}).get("expression_clips") or []) if isinstance(inventory, dict) else []
+            if any(isinstance(item, dict) and item.get("clip_id") == clip_id
+                   and item.get("sha256") == expected_sha and item.get("bytes") == len(payload)
+                   for item in installed):
+                manifest = update_expression_clip_sync(clip_id, status="synced", device=device)
+                return 200, {"ok": True, "action": "already_synced", "result": {"clip": manifest}}
         query = {
             "clip_id": manifest["clip_id"],
             "expression": manifest["expression"],
@@ -2995,6 +3057,9 @@ class WebGateway:
         display_confirmed = isinstance(last_body, dict) and (
             last_body.get("display_confirmed") is True or last_body.get("c6_confirmed") is True
         )
+        device_state = self.server.esp32.get_status().get("device") or {}
+        asset_stored = (isinstance(last_body, dict) and last_body.get("asset_stored") is True
+                        and device_state.get("platform") == "esp32-p4")
         log_fields = {
             "clip_id": clip_id,
             "device_status": status,
@@ -3006,7 +3071,7 @@ class WebGateway:
                 else ""
             ),
         }
-        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not display_confirmed:
+        if status >= 400 or (isinstance(last_body, dict) and last_body.get("ok") is False) or not (display_confirmed or asset_stored):
             logger.warning("expression_clip.p4_upload_failed", **log_fields)
             device = self.server.esp32.get_status().get("device")
             update_expression_clip_sync(clip_id, status="sync_failed", device=device)

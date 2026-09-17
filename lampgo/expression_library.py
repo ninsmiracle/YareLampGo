@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from lampgo import factory_faces as factory
 from lampgo import personastore
 from lampgo.core.led import led_expression_catalog
 from lampgo.expression_clips import (
@@ -141,10 +142,12 @@ def list_eyes() -> list[dict[str, Any]]:
                 "sync": dict(manifest.get("sync") or {}),
             }
         )
-    return eyes
+    return eyes + factory.factory_eyes()
 
 
 def load_eye(eye_clip_id: str) -> dict[str, Any]:
+    if eye_clip_id in factory.BY_ID:
+        return next(x for x in factory.factory_eyes() if x["eye_clip_id"] == eye_clip_id)
     storage_id = eye_storage_id(eye_clip_id)
     load_expression_clip(storage_id)
     for eye in list_eyes():
@@ -154,6 +157,8 @@ def load_eye(eye_clip_id: str) -> dict[str, Any]:
 
 
 def eye_source_path(eye_clip_id: str) -> Path:
+    if eye_clip_id in factory.BY_ID:
+        return factory.eye_preview_path(eye_clip_id)
     eye = load_eye(eye_clip_id)
     storage_id = str(eye["storage_clip_id"])
     manifest = load_expression_clip(storage_id)
@@ -170,6 +175,8 @@ def eye_source_path(eye_clip_id: str) -> Path:
 
 
 def set_eye_default_led(eye_clip_id: str, led_effect_id: str | None) -> dict[str, Any]:
+    if eye_clip_id in factory.BY_ID:
+        raise ExpressionLibraryError("出厂眼睛保持原配；请另存为新的组合表情")
     storage_id = eye_storage_id(eye_clip_id)
     manifest = load_expression_clip(storage_id)
     normalized_effect = str(led_effect_id or "").strip().lower() or None
@@ -337,7 +344,10 @@ def _validate_program(raw: Any) -> dict[str, Any]:
 
 def list_led_effects() -> list[dict[str, Any]]:
     custom = [*_read_json_objects(_led_effect_dir()), *list_pixel_led_effects()]
-    by_id = {str(item["effect_id"]): item for item in _virtual_effects()}
+    by_id = {str(item["effect_id"]): item for item in [*_virtual_effects(), *factory.factory_effects()]}
+    for effect_id in factory.P4_ARCHIVED_LED_IDS:
+        if effect_id in by_id:
+            by_id[effect_id]["p4_archived"] = True
     for item in custom:
         effect_id = str(item.get("effect_id") or "")
         if effect_id:
@@ -496,7 +506,7 @@ def _virtual_dizzy_preset() -> dict[str, Any] | None:
 
 
 def list_expression_presets() -> list[dict[str, Any]]:
-    by_id: dict[str, dict[str, Any]] = {}
+    by_id = {x["preset_id"]: x for x in factory.factory_presets()}
     dizzy = _virtual_dizzy_preset()
     if dizzy:
         by_id["dizzy"] = dizzy
@@ -520,6 +530,8 @@ def save_expression_preset(raw: dict[str, Any]) -> dict[str, Any]:
         raise ExpressionLibraryError("preset must be an object")
     requested_id = str(raw.get("preset_id") or "").strip().lower()
     preset_id = sanitize_library_id(requested_id or f"usr_{uuid.uuid4().hex[:12]}", field="preset_id")
+    if preset_id in factory.BY_ID:
+        raise ExpressionLibraryError("factory presets cannot be overwritten")
     if preset_id == "dizzy" and _virtual_dizzy_preset():
         raise ExpressionLibraryError("migration expression presets cannot be overwritten")
     eye_id = str(raw.get("eye_clip_id") or "").strip().lower() or None
@@ -622,6 +634,8 @@ def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
     )
     if not 1000 <= duration_ms <= MAX_EXPRESSION_DURATION_MS:
         raise ExpressionLibraryError(f"duration_ms must be 1000-{MAX_EXPRESSION_DURATION_MS}")
+    if eye_id in factory.BY_ID or led_id in factory.BY_ID:
+        duration_ms = 3000
     return {
         "preset_id": (preset or {}).get("preset_id"),
         "eye_clip_id": eye_id,
@@ -631,12 +645,14 @@ def resolve_expression(raw: dict[str, Any]) -> dict[str, Any]:
         "led_params": _normalize_led_params(merged_params, effect),
         "playback": playback,
         "duration_ms": duration_ms,
+        "factory_eye": eye_id in factory.BY_ID,
+        "requires_p4_face": eye_id in factory.BY_ID or led_id in factory.BY_ID,
         "persist": False,
     }
 
 
-def expression_capabilities() -> dict[str, Any]:
-    eyes = list_eyes()
+def expression_capabilities(platform: str = "") -> dict[str, Any]:
+    eyes = [x for x in list_eyes() if x.get("source_kind") != "factory"]
     legacy_effects = [item for item in _read_json_objects(_led_effect_dir())]
     pixel_effects = list_pixel_led_effects()
     custom_effects = [*legacy_effects, *pixel_effects]
@@ -649,11 +665,12 @@ def expression_capabilities() -> dict[str, Any]:
     return {
         "eyes": {
             "installed": len(eyes),
-            "max_count": MAX_EYES_CURRENT,
+            "max_count": factory.P4_EYE_MAX_COUNT if platform == "esp32-p4" else MAX_EYES_CURRENT,
+            "factory_count": len(factory.FACES) if platform == "esp32-p4" else 0,
             "used_bytes": eye_used,
-            "budget_bytes": C6_INSTALLED_BUDGET_BYTES,
+            "budget_bytes": factory.P4_EYE_BUDGET_BYTES if platform == "esp32-p4" else C6_INSTALLED_BUDGET_BYTES,
             "single_max_bytes": MAX_EYE_BYTES,
-            "reserved_bytes": C6_RESERVED_BYTES,
+            "reserved_bytes": factory.P4_RESERVED_BYTES if platform == "esp32-p4" else C6_RESERVED_BYTES,
             "staging_bytes": C6_STAGING_BYTES,
         },
         "led_effects": {

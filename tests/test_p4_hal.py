@@ -53,7 +53,7 @@ class _FakeSocket:
                         "type": "hello",
                         "ok": True,
                         "request_id": request_id,
-                        "protocol": "lampgo-motion-v1",
+                        "protocol": "lampgo-motion-v2",
                         "positions": {str(i): 2048 for i in range(1, 6)},
                         "online_ids": list(range(1, 6)),
                     }
@@ -180,12 +180,12 @@ def test_p4_hal_keeps_torque_off_when_profile_needs_recovery(tmp_path) -> None:
     hal.connect()
     try:
         assert hal.recovery_required is True
-        assert hal.supports_remote_recovery is False
+        assert hal.supports_remote_recovery is True
         assert hal.read_health() is DeviceHealth.DEGRADED
         assert not any(message.get("type") == "control" and message.get("enabled") is True for message in socket.sent)
-        with pytest.raises(RuntimeError, match="remote recovery is disabled"):
+        with pytest.raises(RuntimeError, match="not been prepared"):
             hal.write_recovery_positions({"base_yaw": 0.0})
-        with pytest.raises(RuntimeError, match="remote recovery is disabled"):
+        with pytest.raises(RuntimeError, match="stable recovery start"):
             hal.prepare_recovery([{"base_yaw": 0.0}])
     finally:
         hal.disconnect()

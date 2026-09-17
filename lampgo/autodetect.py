@@ -96,6 +96,8 @@ def _probe_feetech(port: str) -> bool:
         return False
 
     try:
+        from lampgo.serial_guard import require_quiet_serial
+        require_quiet_serial(ser)
         for motor_id in range(1, 7):
             payload = bytes([motor_id, 2, 1])  # ID, length=2, instruction=PING
             checksum = (~sum(payload)) & 0xFF
@@ -105,13 +107,10 @@ def _probe_feetech(port: str) -> bool:
             ser.flush()
             # Read up to 12 bytes: 6 possible TX echo + 6 response
             raw = ser.read(12)
-            # Scan for a valid status-packet header anywhere in the buffer
-            for i in range(len(raw) - 5):
-                if raw[i : i + 2] == b"\xff\xff" and raw[i + 2] == motor_id:
-                    logger.info(
-                        "autodetect.feetech_found", port=port, motor_id=motor_id
-                    )
-                    return True
+            from lampgo.serial_guard import has_ping_reply
+            if has_ping_reply(raw, motor_id, packet):
+                logger.info("autodetect.feetech_found", port=port, motor_id=motor_id)
+                return True
         return False
     except Exception:
         return False
@@ -137,6 +136,8 @@ def _probe_esp32(port: str) -> bool:
 
     try:
         import time
+        from lampgo.serial_guard import require_quiet_serial
+        require_quiet_serial(ser)
         ser.reset_input_buffer()
         ser.write(b"ping\n")
         time.sleep(0.15)

@@ -1,5 +1,7 @@
 # YareLampGo
 
+> **分支约定：** `main` 保留成熟的 S3/C6 方案；`P4_version` 提供 P4 方案。P4 部署请同时使用 [固件仓库的 P4_version](https://github.com/shelly-tang/YareLampGo_esp32/tree/P4_version)，当前对应 `p4-head-0.3.8`。
+
 简体中文 | [English](README.en.md)
 
 > 一盏能听、能看、会动、还会用表情回应你的开源桌面 AI 机械臂台灯。

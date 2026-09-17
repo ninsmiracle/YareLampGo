@@ -77,7 +77,7 @@ class SkillExecutor:
             )
 
         recovery_exception = self._allow_return_safe_recovery and skill_id in {"return_safe", "estop"}
-        if skill_id in _MOTION_SKILLS and self._motion_block_reason and not recovery_exception:
+        if skill_id != "estop" and skill_id in _MOTION_SKILLS and self._motion_block_reason and not recovery_exception:
             logger.warning(
                 "executor.motion_blocked_hardware_unavailable",
                 skill_id=skill_id,

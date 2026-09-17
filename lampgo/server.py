@@ -41,6 +41,7 @@ from lampgo.core.hal import HardwareAbstraction, MotorStartupState
 from lampgo.core.led import LEDController
 from lampgo.core.motion import MotionRuntime
 from lampgo.core.motor_hal import MotorHAL
+from lampgo.core.p4_hal import P4HardwareAbstraction
 from lampgo.core.safety import SafetyKernel
 from lampgo.core.types import InvokeResult
 from lampgo.core.virtual_motion import VirtualMotionRuntime
@@ -48,6 +49,7 @@ from lampgo.device import Esp32DeviceManager
 from lampgo.electronic_ocean import ElectronicOceanController
 from lampgo.ipc import IPCServer
 from lampgo.lighting_mode import LightingModeController
+from lampgo.p4_maintenance import P4Maintenance
 from lampgo.perception.cat_teaser import CatTeaserFrameSource, is_supported_local_camera_port
 from lampgo.perception.router import IntentRouter, IntentType
 from lampgo.recordings import (
@@ -213,6 +215,8 @@ class LampgoServer:
         self._tts_tasks: set[asyncio.Task] = set()
         self._tts_lock = asyncio.Lock()
         self._cancelled_request_ids: set[str] = set()
+        self.maintenance = P4Maintenance(self)
+        self._record_error = ""
         self._record_lock = asyncio.Lock()
         self._record_recorder: TeachRecorder | None = None
         self._record_task: asyncio.Task | None = None
@@ -248,7 +252,7 @@ class LampgoServer:
         self.lighting_mode.bind_runtime(self.motion, self.hal)
 
     def _resume_motion_after_recording(self) -> None:
-        if self.config.no_hw or not self.hal.is_connected:
+        if self.config.no_hw or not self.hal.is_connected or self.hal.startup_state is not MotorStartupState.READY:
             return
         if not self.motion.is_running:
             self.motion.start()
@@ -717,9 +721,11 @@ class LampgoServer:
         skill_id = data.get("skill_id", "")
         params = data.get("params", {})
 
+        if self.maintenance.active and skill_id not in {"estop", "set_expression"}:
+            return {"ok": False, "error": "P4 校准维护中，请先结束维护"}
         # Teach recording owns the motion stack, but LED expressions are safe
         # to change while a recording is active or waiting to be saved.
-        if self._record_recorder is not None and skill_id != "set_expression":
+        if self._record_recorder is not None and skill_id not in {"set_expression", "estop"}:
             return {
                 "ok": False,
                 "error": "recording session active; save/discard recording first",
@@ -766,6 +772,8 @@ class LampgoServer:
         The session samples HAL joint positions at a fixed FPS and buffers frames
         in memory until the caller stops + saves (or discards).
         """
+        if self.maintenance.active:
+            return {"ok": False, "error": "正在进行 P4 校准，请先结束维护"}
         if self.lighting_mode.is_engaged:
             exited = await self._exit_lighting_mode_with_return_safe(reason="recording_start")
             if exited.status != "ok":
@@ -795,7 +803,11 @@ class LampgoServer:
             self._record_motion_was_running = bool(getattr(self.motion, "is_running", False))
             if self._record_motion_was_running:
                 self.motion.stop()
-            self.hal.disable_torque()
+            self._record_error = ""
+            if isinstance(self.hal, P4HardwareAbstraction):
+                await asyncio.to_thread(self.hal.enter_maintenance)
+            else:
+                self.hal.disable_torque()
 
             recordings_dir = Path(self.config.recordings_dir) / "user"
             recordings_dir.mkdir(parents=True, exist_ok=True)
@@ -828,7 +840,7 @@ class LampgoServer:
                 self._record_task = None
             # Product requirement: after recording ends, re-enable torque so the
             # arm holds its current pose and does not slump under gravity.
-            self.hal.enable_torque()
+            await self._finish_teach_motion()
             self._resume_motion_after_recording()
             self._record_motion_was_running = False
             elapsed = max(0.0, time.monotonic() - self._record_started_at)
@@ -856,6 +868,8 @@ class LampgoServer:
             rec = self._record_recorder
             if rec is None:
                 return {"ok": False, "error": "no recording session to save"}
+            if self._record_error:
+                return {"ok": False, "error": "录制期间反馈异常，请丢弃后重录：" + self._record_error}
             if rec.is_recording:
                 return {"ok": False, "error": "recording still active; stop first"}
 
@@ -913,7 +927,7 @@ class LampgoServer:
             if self._record_task is not None:
                 await self._record_task
                 self._record_task = None
-            self.hal.enable_torque()
+            await self._finish_teach_motion()
             frames = rec.frame_count
             self._record_recorder = None
             self._record_started_at = 0.0
@@ -921,6 +935,25 @@ class LampgoServer:
             self._resume_motion_after_recording()
             self._record_motion_was_running = False
             return {"ok": True, "result": {"status": "discarded", "frames": frames}}
+
+    async def _finish_teach_motion(self) -> None:
+        if isinstance(self.hal, P4HardwareAbstraction):
+            if not self.hal.is_connected:
+                self.executor.set_motion_block_reason("P4 已断开，录制缓冲已保留；重新连接后再回位")
+                return
+            # Stop and then discard can both reach this cleanup. The P4 must
+            # only leave maintenance once; the second call keeps the hold.
+            if self.hal.transport_status().get("maintenance"):
+                await asyncio.to_thread(self.hal.exit_maintenance)
+            if self.hal.startup_state is not MotorStartupState.READY:
+                self.executor.set_motion_block_reason(self.hal.recovery_reason or "录制结束，请先回位",
+                    allow_return_safe_recovery=self.hal.recovery_required and self.hal.supports_remote_recovery)
+                return
+            if self.hal.transport_status().get("torque_enabled"):
+                self.executor.set_motion_block_reason(None)
+                return
+        await asyncio.to_thread(self.hal.enable_torque)
+        self.executor.set_motion_block_reason(None)
 
     async def _record_loop(self) -> None:
         """Background sampling loop for run-mode recording sessions."""
@@ -935,7 +968,9 @@ class LampgoServer:
         except asyncio.CancelledError:
             # Normal shutdown/cancel path.
             pass
-        except Exception:
+        except Exception as exc:
+            rec.stop()
+            self._record_error = str(exc)
             logger.exception("server.record_loop_failed")
 
     def _record_status(self) -> dict[str, Any]:
@@ -943,6 +978,7 @@ class LampgoServer:
         if rec is None:
             return {"active": False, "has_buffer": False, "frames": 0}
         return {
+            "error": self._record_error,
             "active": rec.is_recording,
             "has_buffer": rec.frame_count > 0,
             "fps": self._record_fps,
@@ -2233,6 +2269,9 @@ class LampgoServer:
 
     async def start(self) -> None:
         logger.info("server.starting")
+        pending_calibration = (
+            self.config.device.motor_transport == "p4" and self.maintenance._load_draft() is not None
+        )
         if self.config.device.motor_transport == "p4" and self.config.device_esp32.enabled:
             try:
                 await self.esp32.start()
@@ -2247,7 +2286,7 @@ class LampgoServer:
             # the user can fix the port in the settings page.
             try:
                 if self.config.device.motor_transport == "p4":
-                    await asyncio.to_thread(self.hal.connect)
+                    await asyncio.to_thread(self.hal.connect, configure=not pending_calibration)
                 else:
                     self.hal.connect()
             except Exception as exc:  # noqa: BLE001
@@ -2274,7 +2313,9 @@ class LampgoServer:
                 self._use_virtual_motion()
             else:
                 self._hal_startup_error = None
-                if self.hal.startup_state is MotorStartupState.READY:
+                if pending_calibration:
+                    self.executor.set_motion_block_reason("已保留校准预览，请进入 P4 无线维护继续或重新采集")
+                elif self.hal.startup_state is MotorStartupState.READY:
                     self.executor.set_motion_block_reason(None)
                 else:
                     self.executor.set_motion_block_reason(
@@ -2287,7 +2328,7 @@ class LampgoServer:
                     self.led.connect()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("server.led_connect_failed", error=str(exc))
-                if self.hal.startup_state is MotorStartupState.READY:
+                if self.hal.startup_state is MotorStartupState.READY and not pending_calibration:
                     self.motion.start()
                 home = self.hal.get_calibration_home()
                 if home is not None:
@@ -2299,7 +2340,7 @@ class LampgoServer:
         # ~/.lampgo/skills/user/ AFTER factory skills so their step targets
         # resolve during validation.
         self._load_user_skills()
-        if self.config.home_on_start:
+        if self.config.home_on_start and not pending_calibration:
             await self._home_on_start()
         self._start_idle_sway_scheduler()
         await self._ipc.start()
@@ -2324,6 +2365,8 @@ class LampgoServer:
 
     async def reload_motor_runtime(self) -> dict[str, Any]:
         """Hot-reconnect the motor HAL and MotionRuntime after motor_port edits."""
+        if self.maintenance.active or self._record_recorder is not None:
+            return {"ok": False, "error": "请先结束校准/录制，再修改电机连接配置"}
         if not self._started:
             return {"ok": True, "skipped": True, "reason": "server_not_started"}
 
@@ -2526,6 +2569,7 @@ class LampgoServer:
                 await asyncio.gather(self._web_serve_task, return_exceptions=True)
         self._web_serve_task = None
         self._uvicorn_server = None
+        await self.maintenance._stop_capture()
         await self._stop_idle_sway_scheduler()
         await self.lighting_mode.force_exit(reason="shutdown", turn_off_led=True)
         async with self._record_lock:

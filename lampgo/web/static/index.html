@@ -170,9 +170,12 @@
             <span id="music-mode-label" class="music-mode-label">音乐律动</span>
           </button>
           <button id="btn-pet-open" class="ghost-button pet-open-button" type="button" title="打开 YareLampGo pet">Pet</button>
+          <button id="btn-p4-return-safe" class="ghost-button" type="button">回到安全位</button>
+          <button id="btn-p4-maintenance" class="ghost-button" type="button">P4 无线维护</button>
           <button id="btn-estop" class="danger-button" type="button" title="立刻切断电机力矩，停止一切动作">安全急停</button>
         </div>
       </header>
+      <div id="p4-motion-notice" class="event-log-hint" role="status" hidden></div>
 
       <div id="esp32-banner" class="esp32-banner hidden" role="status" aria-live="polite">
         <span id="esp32-banner-text" class="esp32-banner-text"></span>
@@ -596,8 +599,9 @@
 
         <div class="event-log-hint">
           <strong>UI 日志</strong> = 面向用户的业务事件，写入 <code>~/.lampgo/events.log</code>（JSONL，单段 10MB，轮转 3 份）。
-          <strong>终端日志</strong> = 进程 stderr，面向开发者，粒度更细（motor bus、LLM 原始请求等）。
-          两者不重复，视角不同。
+          <strong>运行诊断</strong> 会自动写入 <code>~/.lampgo/logs/runtime-进程号.log</code>，包括错误堆栈和舵机链路状态。
+          <a href="/api/diagnostics/download" download class="ghost-button">下载诊断包</a>
+          把整个 ZIP 文件发给技术人员即可，无需复制终端文字。
         </div>
 
         <div id="event-log" class="event-log"></div>
@@ -1541,7 +1545,38 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=feature-batch-20260803"></script>
+  <dialog id="p4-maintenance-dialog" class="record-dialog">
+    <div class="record-dialog-card maintenance-card">
+      <div class="record-dialog-title">P4 无线维护</div>
+      <p>电脑通过 Wi-Fi 操作 P4，无需接 USB 舵机驱动板。维护期间自动动作暂停。</p>
+      <p id="maintenance-hardware"></p>
+      <strong id="maintenance-status" role="status" aria-live="polite"></strong>
+      <ol>
+        <li>扶稳灯臂，进入维护并释放扭矩。</li>
+        <li>摆好希望一键回到的中立位，点击记录中立位。</li>
+        <li>缓慢活动每个关节到日常使用的两端，不要强推机械硬限位。</li>
+        <li>结束采集并检查范围，短暂扶稳后直接保存，无需摆回中立位。</li>
+      </ol>
+      <div class="record-dialog-actions maintenance-actions">
+        <button class="ghost-button" data-maintenance-op="begin" type="button">1. 进入维护</button>
+        <button class="ghost-button" data-maintenance-op="neutral" type="button">2. 记录中立位 / 重新采集</button>
+        <button class="ghost-button" data-maintenance-op="preview" type="button">3. 结束采集并预览</button>
+        <button class="send-button" data-maintenance-op="commit" type="button">4. 保存并应用校准</button>
+      </div>
+      <div id="maintenance-preview"></div>
+      <p id="maintenance-message" class="record-dialog-error" role="alert"></p>
+      <p>录制新动作请使用原有的“录制动作”按钮，同样由 P4 完成采样。</p>
+      <details><summary>诊断文件</summary><p id="runtime-log-location"></p><a href="/api/diagnostics/download" download>下载诊断包并发给技术人员</a></details>
+      <div class="record-dialog-actions">
+        <button class="ghost-button" data-maintenance-op="finish" type="button">结束维护 / 保持姿态</button>
+        <button id="maintenance-close" class="ghost-button" type="button">关闭窗口</button>
+      </div>
+      <small>关闭窗口不会开启扭矩或取消维护。完成后请点击“结束维护”。</small>
+    </div>
+  </dialog>
+  <script src="/maintenance.js?v=p4-maintenance-4"></script>
+  <script src="/p4-led-preview.js?v=p4-led-v2-20260917"></script>
+  <script src="/app.js?v=feature-batch-20260803-p4-led-20260917"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

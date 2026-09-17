@@ -25,6 +25,49 @@ from lampgo.web.gateway import WebGateway
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("name,mode", [
+    ("off", 0), ("red", 1), ("green", 2), ("blue", 3), ("white", 4),
+    ("theater", 5), ("theaterred", 6), ("theatergreen", 7), ("theaterblue", 8),
+    ("rainbow", 9), ("rainbowchase", 10), ("left", 11), ("right", 12),
+    ("up", 13), ("down", 14), ("check", 15), ("cross", 16), ("exclaim", 17),
+    ("question", 18), ("star", 19), ("music", 20), ("smiley", 21),
+    ("sad", 22), ("heart", 23), ("surprised", 24), ("blush", 25),
+    ("angry", 26), ("thinking", 27), ("sleep", 28), ("helpless", 29),
+    ("cool", 30), ("focused", 31), ("wink", 32), ("myu7gt", 33),
+])
+def test_factory_led_selection_preserves_wire_mode_and_eye_only_boundary(monkeypatch, tmp_path, name, mode):
+    gateway = _gateway(monkeypatch, tmp_path)
+    sent = []
+
+    async def post(path, payload):
+        sent.append((path, payload))
+        return 200, {"ok": True, "accepted": True, "display_confirmed": False}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", post)
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/expressions/play", json={"led_effect_id": name, "eye_clip_id": None})
+    assert response.status_code == 200
+    assert len(sent) == 1
+    payload = sent[0][1]
+    assert payload["led_effect_id"] == name
+    assert payload["led_mode"] == mode
+    assert payload["eye_clip_id"] is None
+    assert response.json()["result"]["device"]["display_confirmed"] is False
+
+
+def test_device_led_failure_reaches_frontend_error_message(monkeypatch, tmp_path):
+    gateway = _gateway(monkeypatch, tmp_path)
+
+    async def post(path, payload):
+        return 400, {"ok": False, "error": "LED effect id/mode mismatch"}, "application/json"
+
+    monkeypatch.setattr(gateway.server.esp32, "proxy_post", post)
+    with TestClient(gateway.app) as client:
+        response = client.post("/api/expressions/play", json={"led_effect_id": "exclaim"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "LED effect id/mode mismatch"
+
+
 def _sprite_sheet(*, rows: int = 3, cols: int = 10) -> bytes:
     cv2 = pytest.importorskip("cv2")
     sheet = np.zeros((rows * 12, cols * 20, 3), dtype=np.uint8)
@@ -185,7 +228,7 @@ def test_many_to_many_presets_reuse_assets(monkeypatch, tmp_path):
         }
     )
 
-    presets = list_expression_presets()
+    presets = [x for x in list_expression_presets() if x.get("source") != "factory"]
     assert {item["preset_id"] for item in presets} == {"calm_smile", "happy_smile"}
     assert {item["led_effect_id"] for item in presets} == {"soft_mouth"}
     assert [item["effect_id"] for item in list_led_effects()].count("soft_mouth") == 1
@@ -257,7 +300,7 @@ def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monke
         played = client.post("/api/expressions/play", json=composition)
         assert played.status_code == 200
         assert [path for path, _payload in uploads] == ["/device/expression-clips/upload"]
-        assert list_expression_presets() == []
+        assert [x for x in list_expression_presets() if x.get("source") != "factory"] == []
 
         rejected = client.post("/api/expression-presets", json={"preset_id": "focus", **composition})
         assert rejected.status_code == 400
@@ -278,7 +321,7 @@ def test_preset_api_requires_confirmation_and_transient_play_does_not_save(monke
     assert sent[0][1]["led_effect_id"] == "soft_mouth"
     assert sent[0][1]["led_program"]["template"] == "mouth"
     assert sent[0][1]["led_params"]["brightness"] == 32
-    assert [item["preset_id"] for item in list_expression_presets()] == ["focus"]
+    assert [item["preset_id"] for item in list_expression_presets() if item.get("source") != "factory"] == ["focus"]
 
 
 def test_led_only_play_keeps_eye_channel_untouched(monkeypatch, tmp_path):

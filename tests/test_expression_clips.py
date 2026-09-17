@@ -371,3 +371,59 @@ def test_expression_clip_sync_surfaces_device_error(monkeypatch, tmp_path):
 
     assert response.status_code == 400
     assert response.json()["error"] == "device sync failed: manifest open failed"
+
+@pytest.mark.parametrize('installed_state', ['match', 'wrong_hash', 'missing', 'wrong_size'])
+def test_p4_eye_play_checks_device_content_before_reupload(monkeypatch, tmp_path, installed_state):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    manifest = create_expression_clip(
+        clip_id='cached-eye', expression='focused', source_bytes=_png_sprite_sheet(),
+        filename='focused.png', fps=10, grid_rows=3, grid_cols=10,
+    )
+    monkeypatch.setattr(gateway.server.esp32, 'get_status', lambda: {'device': {'platform': 'esp32-p4'}})
+    calls = []
+    item = {'clip_id': 'cached-eye', 'bytes': manifest['lcd']['bytes'], 'sha256': manifest['lcd']['sha256']}
+    if installed_state == 'wrong_hash': item['sha256'] = '0' * 64
+    if installed_state == 'wrong_size': item['bytes'] += 1
+
+    async def inventory(path):
+        calls.append(path)
+        return 200, {'ok': True, 'result': {'expression_clips': [] if installed_state == 'missing' else [item]}}, 'application/json'
+
+    async def upload(path, *_args, **_kwargs):
+        calls.append(path)
+        return 200, {'ok': True, 'asset_stored': True}, 'application/json'
+
+    async def play(path, *_args, **_kwargs):
+        calls.append(path)
+        return 200, {'ok': True}, 'application/json'
+
+    monkeypatch.setattr(gateway.server.esp32, 'proxy_get', inventory)
+    monkeypatch.setattr(gateway.server.esp32, 'proxy_post_bytes', upload)
+    monkeypatch.setattr(gateway.server.esp32, 'proxy_post', play)
+    with TestClient(gateway.app) as client:
+        response = client.post('/api/expressions/play', json={'eye_clip_id': 'cached-eye'})
+    assert response.status_code == 200, response.text
+    assert calls[0] == '/device/expression-clips'
+    assert calls[-1] == '/device/expressions/play'
+    assert ('/device/expression-clips/upload' in calls) == (installed_state != 'match')
+
+
+def test_p4_inventory_timeout_does_not_start_blind_upload(monkeypatch, tmp_path):
+    gateway = _make_gateway(monkeypatch, tmp_path)
+    create_expression_clip(clip_id='cached-eye', expression='focused', source_bytes=_png_sprite_sheet(),
+                           filename='focused.png', fps=10, grid_rows=3, grid_cols=10)
+    monkeypatch.setattr(gateway.server.esp32, 'get_status', lambda: {'device': {'platform': 'esp32-p4'}})
+
+    async def unavailable(*_args, **_kwargs):
+        return 502, {'ok': False, 'error': 'proxy_failed: ReadTimeout'}, 'application/json'
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail('unavailable device must not receive upload or play')
+
+    monkeypatch.setattr(gateway.server.esp32, 'proxy_get', unavailable)
+    monkeypatch.setattr(gateway.server.esp32, 'proxy_post_bytes', forbidden)
+    monkeypatch.setattr(gateway.server.esp32, 'proxy_post', forbidden)
+    with TestClient(gateway.app) as client:
+        response = client.post('/api/expressions/play', json={'eye_clip_id': 'cached-eye'})
+    assert response.status_code == 502
+    assert 'inventory unavailable' in response.json()['error']

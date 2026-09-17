@@ -1,5 +1,7 @@
 # YareLampGo
 
+> **Branches:** `main` preserves the established S3/C6 release; `P4_version` contains P4 development. Pair it with [firmware P4_version](https://github.com/shelly-tang/YareLampGo_esp32/tree/P4_version), currently `p4-head-0.3.8`.
+
 [简体中文](README.md) | English
 
 > An open-source desktop AI robotic lamp that can listen, see, move, and answer with expressions.

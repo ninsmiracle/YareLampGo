@@ -14,6 +14,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from lampgo.factory_faces import RECORDING_FACES
+
 MAX_RECORDING_DESCRIPTION_CHARS = 500
 MAX_RECORDING_NAME_CHARS = 64
 RECORDING_NAME_ERROR = "动作名称仅支持中文、字母、数字、下划线和短横线（最多 64 个字符）"
@@ -253,7 +255,9 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
             "path": str(csv_path),
             "description": metadata["description"],
             "expression": metadata["expression"],
-            "expression_preset": metadata["expression_preset"],
+            "expression_preset": metadata["expression_preset"] or (
+                RECORDING_FACES.get(csv_path.stem, "") if not override_path.exists() else ""
+            ),
         }
     user_dir = recordings_dir / "user"
     if user_dir.is_dir():

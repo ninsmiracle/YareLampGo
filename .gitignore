@@ -38,3 +38,6 @@ assets/lampgo.STEP
 assets/lampgo.glb
 docs/Appearance
 docs/Appearance/*
+
+# Device-local maintenance drafts; never publish calibration snapshots.
+assets/calibration/*.pending-*.json

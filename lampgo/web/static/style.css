@@ -5059,3 +5059,15 @@ section.view[data-view="settings"] .view-header {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Wireless maintenance keeps existing debugging actions visible. */
+#p4-maintenance-dialog { max-width: 760px; }
+.maintenance-card { max-height: 85vh; overflow-y: auto; color: var(--text); font-size: 14px; }
+.maintenance-card p, .maintenance-card ol { margin: 0; }
+.maintenance-card p, .maintenance-card li { line-height: 1.65; }
+.maintenance-card ol { padding-left: 24px; }
+.maintenance-card p:empty, #maintenance-preview:empty { display: none; }
+.maintenance-actions { flex-wrap: wrap; justify-content: flex-start; }
+.maintenance-card table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+.maintenance-card td, .maintenance-card th { padding: 8px; border-bottom: 1px solid #8884; text-align: left; }
+.maintenance-card details { overflow-wrap: anywhere; }
