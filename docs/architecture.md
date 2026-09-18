@@ -125,7 +125,7 @@ LLM 工具列表由当前 `SkillRegistry` 生成。用户保存的新组合技�
 配置优先级：
 
 ```text
-CLI 参数 > 环境变量 / .env > ~/.lampgo/config.toml / credentials.json > 内置默认值
+CLI 参数 > Shell 环境变量 > ~/.lampgo/credentials.json > 项目 .env > ~/.lampgo/config.toml > 内置默认值
 ```
 
 ## 启动流程

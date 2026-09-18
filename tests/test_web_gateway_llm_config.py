@@ -141,6 +141,85 @@ def test_provider_presets_expose_per_format_base_urls(monkeypatch, tmp_path):
     # introduce the "pick the wrong thing" UX trap the split fixed.
     assert "mimo-anthropic" not in presets
 
+    deepseek = presets["deepseek"]
+    assert deepseek["api_urls"]["openai"] == "https://api.deepseek.com"
+    assert deepseek["default_model"] == "deepseek-flash"
+    assert deepseek["default_fast_model"] == "deepseek-flash"
+
+
+def test_switching_to_deepseek_migrates_existing_mimo_key_to_fallback(monkeypatch, tmp_path):
+    """A MiMo-only installation can switch providers without losing voice or fallback."""
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null")))
+    server.config.llm.provider = "mimo"
+    server.config.llm.api_base = "https://api.xiaomimimo.com/v1"
+    server.config.llm.api_key = "existing-mimo-key"
+    monkeypatch.setattr(server, "reload_llm_client", lambda: True)
+
+    async def fake_restart_agent_sdk():
+        return False
+
+    monkeypatch.setattr(server, "restart_agent_sdk", fake_restart_agent_sdk)
+    gateway = WebGateway(server)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/config/llm",
+            json={
+                "validate": False,
+                "provider": "deepseek",
+                "api_base": "https://api.deepseek.com",
+                "api_key": "new-deepseek-key",
+                "model": "deepseek-flash",
+                "fast_model": "deepseek-flash",
+                "message_type": "openai",
+                "fallback_enabled": True,
+                "fallback_after_s": 6,
+                "fallback_provider": "mimo",
+                "fallback_model": "mimo-v2.5",
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["provider"] == "deepseek"
+    assert result["fallback_enabled"] is True
+    assert result["fallback_api_key_is_set"] is True
+    assert server.config.llm.api_key == "new-deepseek-key"
+    assert server.config.llm.fallback_api_key == "existing-mimo-key"
+
+    creds = json.loads((tmp_path / "credentials.json").read_text(encoding="utf-8"))
+    assert creds["llm_primary_provider"] == "deepseek"
+    assert creds["deepseek_api_key"] == "new-deepseek-key"
+    assert creds["mimo_api_key"] == "existing-mimo-key"
+    config_text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "new-deepseek-key" not in config_text
+    assert "existing-mimo-key" not in config_text
+
+
+def test_deepseek_save_requires_its_own_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAMPGO_HOME", str(tmp_path))
+    server = LampgoServer(LampgoConfig(device=DeviceConfig(motor_port="/dev/null")))
+    server.config.llm.provider = "mimo"
+    server.config.llm.api_key = "existing-mimo-key"
+    gateway = WebGateway(server)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/api/config/llm",
+            json={
+                "validate": False,
+                "provider": "deepseek",
+                "api_base": "https://api.deepseek.com",
+                "model": "deepseek-flash",
+                "fast_model": "deepseek-flash",
+                "fallback_enabled": False,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "DeepSeek API Key" in response.json()["error"]
+
 
 def test_llm_config_normalizes_mimo_anthropic_alias_to_mimo(monkeypatch, tmp_path):
     """A user who saved `provider = "mimo-anthropic"` during the brief

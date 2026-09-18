@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+from urllib.request import getproxies
 
 import structlog
 
@@ -248,8 +249,40 @@ except Exception as e:
     print("[lampgo] TTS flush patch failed: %r" % (e,), file=sys.stderr, flush=True)
 
 try:
+    from livekit.agents.voice.agent import Agent as _LampgoInputAgent
+    from lampgo.voice.input_diagnostics import instrument_stt_node
+
+    _LampgoInputAgent.default.stt_node = staticmethod(
+        instrument_stt_node(_LampgoInputAgent.default.stt_node)
+    )
+except Exception as e:
+    print("[lampgo] input diagnostics patch failed: %r" % (e,), file=sys.stderr, flush=True)
+
+try:
+    from livekit.plugins import silero as _lampgo_silero
+
+    _orig_silero_load = _lampgo_silero.VAD.load.__func__
+
+    def _lampgo_silero_load(cls, **kwargs):
+        # Wireless PCM can arrive in bursts and quiet sentence openings may
+        # precede the VAD trigger. Preserve those samples for batch MiMo ASR;
+        # this is look-back audio, not an extra wait before/after speaking.
+        # Keep explicit settings and the original detection threshold.
+        kwargs.setdefault("prefix_padding_duration", 1.5)
+        vad = _orig_silero_load(cls, **kwargs)
+        print("[lampgo] VAD prefix_padding_duration=%s (pid=%d)" % (
+            kwargs["prefix_padding_duration"], os.getpid(),
+        ), file=sys.stderr, flush=True)
+        return vad
+
+    _lampgo_silero.VAD.load = classmethod(_lampgo_silero_load)
+except Exception as e:
+    print("[lampgo] VAD prefix patch failed: %r" % (e,), file=sys.stderr, flush=True)
+
+try:
     from livekit.agents.voice.agent_session import AgentSession as _LampgoAgentSession
     from livekit.agents.types import NOT_GIVEN as _LAMPGO_NOT_GIVEN
+    from lampgo.voice.input_diagnostics import log_vad_metrics
 
     _orig_agent_session_init = _LampgoAgentSession.__init__
     _LAMPGO_ALLOW_INTERRUPTIONS = os.environ.get("LAMPGO_LIVEKIT_ALLOW_INTERRUPTIONS", "1").strip().lower() not in {
@@ -267,8 +300,20 @@ try:
         if "turn_handling" not in kwargs or kwargs.get("turn_handling") is _LAMPGO_NOT_GIVEN:
             kwargs.setdefault("allow_interruptions", _LAMPGO_ALLOW_INTERRUPTIONS)
             kwargs.setdefault("min_interruption_words", 3)
-            kwargs["aec_warmup_duration"] = max(float(kwargs.get("aec_warmup_duration", 3.0) or 0.0), 8.0)
-        return _orig_agent_session_init(self, *args, **kwargs)
+            # Raw ESP32 input has no browser AEC to warm up. LiveKit replaces
+            # STT input with silence during this window, losing genuine speech.
+            # Echo is filtered on the transcript path; preserve explicit options.
+            kwargs.setdefault("aec_warmup_duration", 0.0)
+        _orig_agent_session_init(self, *args, **kwargs)
+        # State transitions locate missing turns before ASR without recording
+        # microphone audio or adding another model request.
+        def _lampgo_log_voice_state(event):
+            print("[lampgo] voice_state session=%x pid=%d event=%s old=%s new=%s" % (
+                id(self), os.getpid(), event.type, event.old_state, event.new_state,
+            ), file=sys.stderr, flush=True)
+        self.on("user_state_changed", _lampgo_log_voice_state)
+        self.on("agent_state_changed", _lampgo_log_voice_state)
+        self.on("metrics_collected", log_vad_metrics)
 
     _LampgoAgentSession.__init__ = _lampgo_agent_session_init
     print("[lampgo] patched AgentSession interruption defaults (pid=%d)" % os.getpid(),
@@ -767,10 +812,12 @@ class AgentSDKManager:
                 (connection, connection.pid)
                 for connection in psutil.net_connections(kind="tcp")
             ]
-        except (psutil.AccessDenied, OSError):
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError, RuntimeError):
             # macOS can reject the whole system-wide query because of one
-            # protected process. Fall back to inspecting current-user
-            # processes individually so a single denial is harmless.
+            # protected or disappearing process. psutil's native macOS
+            # proc_pidinfo calls can also raise RuntimeError. Fall back to
+            # individual current-user processes; the bind probe below still
+            # rejects an occupied port whose owner could not be inspected.
             connections = []
             for process in psutil.process_iter():
                 if not self._process_is_current_user(process):
@@ -780,7 +827,7 @@ class AgentSDKManager:
                         (connection, process.pid)
                         for connection in process.net_connections(kind="tcp")
                     )
-                except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                except (psutil.AccessDenied, psutil.NoSuchProcess, OSError, RuntimeError):
                     continue
 
         for connection, owner_pid in connections:
@@ -1037,6 +1084,28 @@ class AgentSDKManager:
                 seen.add(host.lower())
         return ",".join(existing)
 
+    @classmethod
+    def _configure_network_env(cls, env: dict[str, str]) -> None:
+        # On macOS urllib/httpx fall back to System Settings only while the
+        # environment has no proxy entries. Adding NO_PROXY alone suppresses
+        # that fallback. Capture the effective system HTTP proxies FIRST, and
+        # export them for LiveKit too (its worker only reads uppercase env).
+        explicit_proxy = any(
+            key in env for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                                   "http_proxy", "https_proxy", "all_proxy")
+        )
+        if sys.platform == "darwin" and not explicit_proxy:
+            for scheme, value in getproxies().items():
+                if scheme in {"http", "https"} and urlparse(value).scheme in {"http", "https"}:
+                    env[f"{scheme.upper()}_PROXY"] = value
+        for scheme in ("http", "https"):
+            if f"{scheme}_proxy" in env:
+                env[f"{scheme.upper()}_PROXY"] = env[f"{scheme}_proxy"]
+        no_proxy = cls._merge_no_proxy(
+            ",".join(value for value in (env.get("NO_PROXY"), env.get("no_proxy")) if value)
+        )
+        env["NO_PROXY"] = env["no_proxy"] = no_proxy
+
     async def start(self) -> bool:
         """Start the Agent SDK subprocess if config is complete."""
         async with self._start_lock:
@@ -1094,12 +1163,14 @@ class AgentSDKManager:
             else bool(self._voice.livekit_allow_interruptions)
         )
         env["LAMPGO_LIVEKIT_ALLOW_INTERRUPTIONS"] = "1" if allow_interruptions else "0"
-        no_proxy = self._merge_no_proxy(
-            ",".join(value for value in (env.get("NO_PROXY"), env.get("no_proxy")) if value)
+        env["LAMPGO_VOICE_ECHO_TEXT_FILTER_ENABLED"] = "1" if self._voice.echo_text_filter_enabled else "0"
+        self._configure_network_env(env)
+        logger.info(
+            "agent_sdk.network_configured",
+            http_proxy_host=urlparse(env.get("HTTP_PROXY", "")).hostname,
+            https_proxy_host=urlparse(env.get("HTTPS_PROXY", "")).hostname,
+            no_proxy=env["NO_PROXY"],
         )
-        env["NO_PROXY"] = no_proxy
-        env["no_proxy"] = no_proxy
-        logger.info("agent_sdk.no_proxy_configured", no_proxy=no_proxy)
 
         self._ready_event.clear()
         self._startup_failed_event.clear()

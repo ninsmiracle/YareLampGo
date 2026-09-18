@@ -237,6 +237,15 @@ class SafetyKernel:
                 else:
                     value = goal
 
+            if command_reference is not None and joint in command_reference:
+                # Feedback can retreat under load or fluctuate by an encoder
+                # count. The lead clamp must not reverse an already issued
+                # command: P4 rejects any reversal of the verified corridor.
+                # Hold the prior command if feedback now exceeds the lead;
+                # issuing a new, farther target remains forbidden.
+                previous_command = float(command_reference[joint])
+                value = max(min(previous_command, goal), min(max(previous_command, goal), value))
+
             safe[joint] = value
 
         return safe

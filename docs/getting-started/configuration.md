@@ -7,10 +7,10 @@ YareLampGo 的本地配置推荐通过 `uv run lampgo onboard` 和 Web 控制台
 运行时真实优先级从高到低：
 
 ```text
-CLI 参数 > Shell 环境变量 > 项目 .env > ~/.lampgo/credentials.json > ~/.lampgo/config.toml > 内置默认值
+CLI 参数 > Shell 环境变量 > ~/.lampgo/credentials.json > 项目 .env > ~/.lampgo/config.toml > 内置默认值
 ```
 
-Web 控制台本身不是一个独立优先级。它会把普通配置写入 `~/.lampgo/config.toml`，把 LLM API Key 写入 `~/.lampgo/credentials.json`，并在保存后尽量热更新当前进程。若同一字段被 CLI 参数或环境变量覆盖，Web 设置页会显示覆盖提示，保存到本地文件后也不会立刻压过更高优先级。
+Web 控制台本身不是一个独立优先级。它会把普通配置写入 `~/.lampgo/config.toml`，把 LLM API Key 写入 `~/.lampgo/credentials.json`，并在保存后尽量热更新当前进程。凭据文件高于项目 `.env`，因此网页保存的密钥不会被仓库中的旧 `.env` 覆盖；CLI 参数和显式 Shell 环境变量仍然优先。
 
 常用 CLI 覆盖方式：
 
@@ -47,7 +47,7 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 └── <persona>.md         # 当前人设文件
 ```
 
-`~/.lampgo/config.toml` 和 `~/.lampgo/credentials.json` 都是本机私有文件，不要提交到仓库。MiMo API Key 由 LLM 设置页写入本地凭据文件，也应按敏感信息处理。
+`~/.lampgo/config.toml` 和 `~/.lampgo/credentials.json` 都是本机私有文件，不要提交到仓库。DeepSeek、MiMo 与 MiMo 联网搜索的 API Key 都由 LLM 设置页写入本地凭据文件，也应按敏感信息处理。
 
 ## Web 端配置入口
 
@@ -67,8 +67,8 @@ LAMPGO_HOME=/tmp/lampgo-dev uv run lampgo run --web --no-hw
 
 模型页包含两类软件配置：
 
-- `LLM 模型`：Provider、Base URL、API Key、主模型、快速模型、消息格式、上下文窗口、输出 token、历史轮数、温度和超时。
-- `声音和唤醒`：MiMo TTS / ASR（复用 LLM Base URL / API Key）、唤醒词、通话模式和回声保护。
+- `LLM 模型`：Provider、Base URL、API Key、主模型、快速模型、消息格式、上下文窗口、输出 token、历史轮数、温度、超时，以及 DeepSeek Flash 到 MiMo 的自动降级。
+- `声音和唤醒`：MiMo TTS / ASR。主模型为 MiMo 时复用主 MiMo 路由；主模型为 DeepSeek 等其他 Provider 时复用已配置的 MiMo 备用路由，唤醒词、通话模式和回声保护。
 
 LLM 保存后下一条消息即可生效；MiMo 语音和语音相关字段保存后会重建语音链路。Web 端口这类服务监听配置保存后需要重启 `lampgo run --web`。
 
@@ -78,21 +78,22 @@ LLM 保存后下一条消息即可生效；MiMo 语音和语音相关字段保�
 
 1. 打开 `设置 -> 模型 -> LLM 模型`。
 2. 选择 `Provider`。内置选项包括 `MiMo`、`OpenRouter`、`Anthropic`、`OpenAI`、`DeepSeek`、`Google`、`Ollama` 和 `自定义`。
-3. 如果选择 `MiMo`，先参考 [Xiaomi MiMo API Open Platform](https://platform.xiaomimimo.com/docs/zh-CN/welcome) 注册并获取 API Key，也可以在官方文档里查看模型、限速和 OpenAI / Anthropic 兼容接口说明。
-4. 检查 `Base URL`。内置 Provider 会自动填入默认地址；自定义代理、Azure 网关或私有网关需要手动填写。
-5. 填写 `API Key`。密钥会保存到 `~/.lampgo/credentials.json`，不会写入 `config.toml`。
-6. 填写 `主模型`。第一次使用建议先保持 Provider 默认模型。
-7. 点击 `测试连接`。成功后点击 `保存并生效`。
+3. 日常对话推荐选择 `DeepSeek`，保持 `deepseek-flash`。如果 DeepSeek 在设定时间内没有首个有效响应，LampGo 会将这一轮请求自动改发给 MiMo；已收到任何正文、推理片段或工具调用后不会中途切换，避免重复执行动作。
+4. 填写 DeepSeek API Key；在“DeepSeek Flash → MiMo 自动降级”中启用回退，并填写或保留已有的 MiMo API Key。两个密钥分别保存，MiMo 密钥不会发送到 DeepSeek。
+5. 如果选择 `MiMo` 作为主模型，先参考 [Xiaomi MiMo API Open Platform](https://platform.xiaomimimo.com/docs/zh-CN/welcome) 注册并获取 API Key，也可以在官方文档里查看模型、限速和 OpenAI / Anthropic 兼容接口说明。
+6. 检查 `Base URL`。内置 Provider 会自动填入默认地址；自定义代理、Azure 网关或私有网关需要手动填写。
+7. 填写 `主模型`。第一次使用建议先保持 Provider 默认模型。
+8. 点击 `测试连接`。成功后点击 `保存并生效`。
 
 高级项通常保持默认即可：
 
 ```toml
 [llm]
-provider = "mimo"
+provider = "deepseek"
 message_type = "openai"
-api_base = "https://api.xiaomimimo.com/v1"
-model = "mimo-v2.5"
-fast_model = "mimo-v2.5"
+api_base = "https://api.deepseek.com"
+model = "deepseek-flash"
+fast_model = "deepseek-flash"
 enable_thinking = false
 context_window = 200000
 max_tokens = 20000
@@ -100,20 +101,28 @@ summary_max_tokens = 20000
 history_turns = 30
 temperature = 0.3
 timeout_s = 300.0
+fallback_enabled = true
+fallback_after_s = 6.0
+fallback_provider = "mimo"
+fallback_model = "mimo-v2.5"
+fallback_api_base = "https://api.xiaomimimo.com/v1"
 ```
 
 也可以用环境变量临时覆盖：
 
 ```bash
-export LAMPGO_LLM_API_KEY="api-key-placeholder"
-export LAMPGO_LLM_PROVIDER="mimo"
-export LAMPGO_LLM_MODEL="mimo-v2.5"
-export LAMPGO_LLM_API_BASE="https://api.xiaomimimo.com/v1"
+export LAMPGO_DEEPSEEK_API_KEY="deepseek-api-key-placeholder"
+export LAMPGO_MIMO_API_KEY="mimo-api-key-placeholder"
+export LAMPGO_LLM_PROVIDER="deepseek"
+export LAMPGO_LLM_MODEL="deepseek-flash"
+export LAMPGO_LLM_API_BASE="https://api.deepseek.com"
+export LAMPGO_LLM_FALLBACK_ENABLED=true
+export LAMPGO_LLM_FALLBACK_AFTER_S=6
 ```
 
 ## 配置 MiMo 语音
 
-MiMo 同时用于语音识别和语音播报，并复用 LLM 的 `api_base` 与 API Key：
+MiMo 同时用于语音识别和语音播报。主模型为 MiMo 时，它复用主 LLM 的 `api_base` 与 API Key；主模型为 DeepSeek Flash 时，它复用“自动降级”中的 MiMo `api_base` 与 API Key：
 
 - `stt_provider = "mimo"`，默认模型 `mimo-v2.5-asr`。
 - `tts_provider = "mimo"`，默认模型 `mimo-v2.5-tts`、音色 `mimo_default`。
@@ -121,7 +130,7 @@ MiMo 同时用于语音识别和语音播报，并复用 LLM 的 `api_base` 与 
 
 配置步骤：
 
-1. 在 Web UI 的 `设置 → 大模型` 选择 MiMo 并保存 Base URL、API Key。
+1. 在 Web UI 的 `设置 → 大模型` 配置 MiMo 主模型，或在 DeepSeek Flash → MiMo 自动降级中配置 MiMo API Key。
 2. 在 `设置 → 声音和唤醒` 保持 `MiMo V2.5 TTS（复用 LLM 配置）`。
 3. 保存任一 LLM 或声音设置后，后台会停止旧的语音 Agent；下一次通话会以新配置启动。
 
@@ -142,6 +151,38 @@ silence_timeout_s = 60
 ```
 
 唤醒词目前只支持 `Hi,小星`。保存唤醒词后，Web 会尝试把 WakeNet 模型同步到 ESP32；若固件未烧录对应模型，前端会提示错误。
+
+### 对话中的表情与动作
+
+语音通话会把现有组合表情的名称、描述，以及录制动作目录提供给模型。模型在回复时选择
+一个适合语境的已有组合表情，或明确选择不切换；后端通过正常技能执行链路循环播放，
+并记录实际执行结果。优先使用屏幕眼睛与 LED 嘴巴联动的组合，不会为聊天自动创建新素材。
+动画保持循环，直到新的表情或显示模式替换；明确要求“只播放一遍”时仍支持单次播放。
+
+普通回复默认同时配合动态组合表情和小幅摆动。`say.motion` 可选 `idle_sway`（轻柔随机摆动）、
+`playful_sway`（类似逗猫互动的俏皮小摆动）、`auto`（两种交替）或 `none`。后端通过
+`conversation_gesture` 技能执行伴随动作，每次 3–8 秒、单关节偏移不超过 3°，从当前姿态
+平滑开始并回到起始目标；不会开启摄像头跟踪或录制。明确表达特定动作时仍使用
+`play_recording`，沿用录制绑定表情，不叠加默认摆动。用户可以直接说“只聊天，不要动作和表情”；
+新通话取得令牌后会关闭此前的时钟、电子海洋自动刷新，让组合表情接管显示。
+通话中主动重新开启的显示模式、照明和前台任务仍受保护，急停或恢复状态下跳过伴随动作。
+模型选择和真实设备执行是两个环节；工具日志成功后仍需实机观察动作与表情效果。
+
+语音中已完成的回复可通过 `say.response_complete=true` 直接结束本轮，省去只生成结束语的
+额外模型请求，默认伴随摆动也可在同一轮完成；特定动作、工具报错和中途说明仍保留后续处理。MiMo 请求使用官方
+`thinking.type` 控制深度思考。日志 `llm_client.stream_latency` 记录首个有效增量、完整回复
+耗时与思考内容字符数，便于区分模型等待和 ASR/TTS 耗时；这不等于设备扬声器的端到端延迟。
+
+通话每个用户轮次最多执行一次联网搜索，搜索请求最多等待 20 秒（主配置超时更短时取更短值）。
+搜索结果要求包含来源和日期；超时或信息不完整时说明无法核实，不换关键词连续搜索，也不补造
+天气等实时数据。`llm_client.voice_search_latency` 单独记录这一步的耗时。此预算不含主模型和语音合成时间。
+
+`voice.echo_text_filter_enabled` 同时控制后端入口和 LiveKit 工作进程的文字回声过滤。
+工作进程在 TTS 开始输出音频时登记原文，在 ASR 结果进入 LiveKit 之前进行比对；后端入口
+再次保护正在执行的请求。过滤会按播报长度、排队和识别延迟保留参考文字，最长 90 秒、
+最多 24 段，新通话清空。纯回声丢弃，带新指令的回声前后缀尽量剥离，否定、提问和停止
+意图保留。`voice.mimo_livekit_echo_filtered` 和 `llm_compat.echo_text_*` 可用于检查结果。
+这是文字过滤，不是声学回声消除；与播报内容高度相同的真实复述仍可能被误判，需要实机验证。
 
 ## 常见配置字段
 

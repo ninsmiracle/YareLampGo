@@ -9,6 +9,7 @@ import hmac
 import ipaddress
 import json
 import re
+import struct
 import time
 import uuid
 from collections.abc import AsyncGenerator, Coroutine
@@ -1430,7 +1431,7 @@ class WebGateway:
         camera = self._make_camera_capture()
         if not camera.enabled:
             return JSONResponse({"ok": False, "error": "camera_disabled", "result": {"device": camera.device_label}})
-        data_url = camera.capture_data_url()
+        data_url = await asyncio.to_thread(camera.capture_data_url)
         if not data_url:
             return JSONResponse({"ok": False, "error": "capture_failed", "result": {"device": camera.device_label}})
         return JSONResponse(
@@ -1629,6 +1630,9 @@ class WebGateway:
                 return JSONResponse({"ok": False, "error": "another call is already active"}, status_code=409)
         if not room_name:
             room_name = f"lampgo-{uuid.uuid4().hex[:12]}"
+            from lampgo.voice.echo_filter import clear_recent_tts
+
+            clear_recent_tts(self.server)
 
         await self._close_existing_livekit_rooms(
             keep_room=room_name,
@@ -1687,7 +1691,17 @@ class WebGateway:
             reason=reason,
             audio_source=audio_source,
         )
-        return JSONResponse({"ok": True, "result": result})
+        # A call can start without ever opening Settings. Send the effective
+        # configuration with its token so the browser does not use UI defaults.
+        self.server.begin_voice_display()
+        voice = self.server.config.voice
+        voice_config = {
+            "call_mode": voice.call_mode,
+            "echo_gate_hangover_ms": voice.echo_gate_hangover_ms,
+            "echo_text_filter_enabled": voice.echo_text_filter_enabled,
+        }
+        logger.info("web.livekit_voice_config", room=room_name, **voice_config)
+        return JSONResponse({"ok": True, "result": result, "voice_config": voice_config})
 
     async def api_livekit_room_end(self, request: Request) -> JSONResponse:
         """Release LampGo's local call ownership after the browser disconnects."""
@@ -1853,12 +1867,12 @@ class WebGateway:
         "deepseek": {
             "label": "DeepSeek",
             "api_urls": {
-                "openai": "https://api.deepseek.com/v1",
+                "openai": "https://api.deepseek.com",
             },
             "default_message_type": "openai",
-            "default_model": "deepseek-chat",
-            "default_fast_model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1",
+            "default_model": "deepseek-flash",
+            "default_fast_model": "deepseek-flash",
+            "base_url": "https://api.deepseek.com",
             "message_type": "openai",
         },
         "google": {
@@ -2360,6 +2374,13 @@ class WebGateway:
                         "timeout_s": cfg.timeout_s,
                         "history_turns": cfg.history_turns,
                         "enable_thinking": bool(cfg.enable_thinking),
+                        "fallback_enabled": bool(cfg.fallback_enabled),
+                        "fallback_after_s": cfg.fallback_after_s,
+                        "fallback_provider": cfg.fallback_provider,
+                        "fallback_model": cfg.fallback_model,
+                        "fallback_api_base": cfg.fallback_api_base,
+                        "fallback_api_key_preview": personastore.mask_api_key(cfg.fallback_api_key),
+                        "fallback_api_key_is_set": bool(cfg.fallback_api_key),
                         "share_codex_memory": share_memory,
                         "provider_presets": self._PROVIDER_PRESETS,
                         # MiMo web search sub-service (see LLMConfig docstring).
@@ -2394,6 +2415,12 @@ class WebGateway:
                 "timeout_s",
                 "history_turns",
                 "enable_thinking",
+                "fallback_enabled",
+                "fallback_after_s",
+                "fallback_provider",
+                "fallback_model",
+                "fallback_api_base",
+                "fallback_api_key",
                 "web_search_enabled",
                 "web_search_force",
                 "web_search_limit",
@@ -2493,6 +2520,19 @@ class WebGateway:
 
         enable_thinking_val = _opt_bool(body.get("enable_thinking"), current_llm.enable_thinking)
 
+        fallback_enabled_val = _opt_bool(body.get("fallback_enabled"), current_llm.fallback_enabled)
+        fallback_after_s_val = _coerce_timeout(body.get("fallback_after_s"), current_llm.fallback_after_s)
+        fallback_after_s_val = max(1.0, min(60.0, fallback_after_s_val))
+        fallback_provider = str(body.get("fallback_provider") or current_llm.fallback_provider or "mimo").strip()
+        fallback_provider = str(LLMConfig.normalize_provider_alias(fallback_provider) or "").strip()
+        fallback_model = str(body.get("fallback_model") or current_llm.fallback_model or "mimo-v2.5").strip()
+        fallback_api_base = (
+            str(body.get("fallback_api_base") or "").strip()
+            if "fallback_api_base" in body else current_llm.fallback_api_base
+        )
+        fallback_key_raw = body.get("fallback_api_key")
+        fallback_key_in = str(fallback_key_raw).strip() if fallback_key_raw is not None else ""
+
         # ------------------------------------------------------------------
         # MiMo web search sub-service fields.
         #
@@ -2535,18 +2575,41 @@ class WebGateway:
         else:
             effective_ws_key = ws_key_in
 
-        if api_key == "":
-            # empty string is a no-op (keep existing); client sends new key only when rotating.
-            effective_key = self.server.config.llm.api_key
-        elif set(api_key) <= {"•", "*"}:
-            effective_key = self.server.config.llm.api_key
-        else:
+        credentials = personastore.get_credentials()
+        current_provider = str(LLMConfig.normalize_provider_alias(current_llm.provider) or "").strip().lower()
+        deepseek_saved_key = str(credentials.get("deepseek_api_key") or "").strip()
+        mimo_saved_key = str(credentials.get("mimo_api_key") or "").strip()
+        # A pre-migration credentials file contains just llm_api_key and the
+        # active project config tells us that it belongs to MiMo.
+        if not mimo_saved_key and current_provider == "mimo":
+            mimo_saved_key = current_llm.api_key
+
+        if api_key and not set(api_key) <= {"•", "*"}:
             effective_key = api_key
+        elif provider == "deepseek":
+            effective_key = current_llm.api_key if current_provider == "deepseek" else deepseek_saved_key
+        elif provider == "mimo":
+            effective_key = current_llm.api_key if current_provider == "mimo" else mimo_saved_key
+        else:
+            effective_key = self.server.config.llm.api_key
+
+        if fallback_key_in and not set(fallback_key_in) <= {"•", "*"}:
+            effective_fallback_key = fallback_key_in
+        else:
+            effective_fallback_key = current_llm.fallback_api_key or mimo_saved_key
 
         try:
-            self._validated_llm_base(provider, api_base)
+            api_base = self._validated_llm_base(provider, api_base)
+            if fallback_provider != "mimo":
+                raise ValueError("当前自动降级仅支持 MiMo 备用模型")
+            fallback_api_base = self._validated_llm_base(fallback_provider, fallback_api_base)
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        if provider == "deepseek" and not effective_key:
+            return JSONResponse({"ok": False, "error": "DeepSeek API Key 未配置；请填写后再保存。"}, status_code=400)
+        if fallback_enabled_val and not effective_fallback_key:
+            return JSONResponse({"ok": False, "error": "已启用 MiMo 降级，但 MiMo API Key 未配置。"}, status_code=400)
 
         if validate:
             probe_error = await self._probe_llm(
@@ -2575,6 +2638,11 @@ class WebGateway:
                 "timeout_s": timeout_s_val,
                 "history_turns": history_turns_val,
                 "enable_thinking": enable_thinking_val,
+                "fallback_enabled": fallback_enabled_val,
+                "fallback_after_s": fallback_after_s_val,
+                "fallback_provider": fallback_provider,
+                "fallback_model": fallback_model,
+                "fallback_api_base": fallback_api_base,
                 "web_search_enabled": ws_enabled,
                 "web_search_force": ws_force,
                 "web_search_limit": ws_limit,
@@ -2602,10 +2670,18 @@ class WebGateway:
         #      it into credentials so users can later remove .env safely
         #   3. user left field blank and a key was already in credentials →
         #      no-op write (same value)
+        credential_patch: dict[str, str] = {}
         if effective_key:
-            existing = personastore.get_credentials().get("llm_api_key")
-            if existing != effective_key:
-                personastore.set_credentials({"llm_api_key": effective_key})
+            credential_patch["llm_api_key"] = effective_key
+            credential_patch["llm_primary_provider"] = provider
+            if provider == "deepseek":
+                credential_patch["deepseek_api_key"] = effective_key
+            elif provider == "mimo":
+                credential_patch["mimo_api_key"] = effective_key
+        if effective_fallback_key:
+            credential_patch["mimo_api_key"] = effective_fallback_key
+        if credential_patch:
+            personastore.set_credentials(credential_patch)
 
         # Web-search key lives in credentials.json under its own slot.
         # Only persist when the user actually typed a new key — an empty
@@ -2629,6 +2705,12 @@ class WebGateway:
         cfg.llm.timeout_s = timeout_s_val
         cfg.llm.history_turns = history_turns_val
         cfg.llm.enable_thinking = enable_thinking_val
+        cfg.llm.fallback_enabled = fallback_enabled_val
+        cfg.llm.fallback_after_s = fallback_after_s_val
+        cfg.llm.fallback_provider = fallback_provider
+        cfg.llm.fallback_model = fallback_model
+        cfg.llm.fallback_api_base = fallback_api_base
+        cfg.llm.fallback_api_key = effective_fallback_key
         cfg.llm.web_search_enabled = ws_enabled
         cfg.llm.web_search_force = ws_force
         cfg.llm.web_search_limit = ws_limit
@@ -2672,6 +2754,13 @@ class WebGateway:
                     "enable_thinking": enable_thinking_val,
                     "api_key_preview": personastore.mask_api_key(effective_key),
                     "api_key_is_set": bool(effective_key),
+                    "fallback_enabled": fallback_enabled_val,
+                    "fallback_after_s": fallback_after_s_val,
+                    "fallback_provider": fallback_provider,
+                    "fallback_model": fallback_model,
+                    "fallback_api_base": fallback_api_base,
+                    "fallback_api_key_preview": personastore.mask_api_key(effective_fallback_key),
+                    "fallback_api_key_is_set": bool(effective_fallback_key),
                     "web_search_enabled": ws_enabled,
                     "web_search_force": ws_force,
                     "web_search_limit": ws_limit,
@@ -2795,6 +2884,11 @@ class WebGateway:
                 "max_tokens": 4,
                 "temperature": 0,
             }
+            # DeepSeek enables reasoning by default. A connection probe needs
+            # only a short visible reply, so explicitly turn it off; otherwise
+            # the tiny token budget may be spent on hidden reasoning.
+            if provider == "deepseek":
+                payload["thinking"] = {"type": "disabled"}
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, headers=headers, json=payload)
@@ -3187,7 +3281,7 @@ class WebGateway:
             await ws.close(code=1013)
             return
         self._esp32_speaker_clients.add(ws)
-        from lampgo.device.audio_stream import P4SpeakerStream, build_ws_speaker_url
+        from lampgo.device.audio_stream import P4SpeakerStream, SpeakerSilenceGate, build_ws_speaker_url
 
         esp32_ws_url = build_ws_speaker_url(self.server.esp32) if self.server.esp32 else None
         if not esp32_ws_url:
@@ -3222,6 +3316,7 @@ class WebGateway:
         dropped_frames = 0
         pending_audio = bytearray()
         pending_started_at = 0.0
+        silence_gate = SpeakerSilenceGate()
         batch_target_bytes = 1920  # 60 ms of PCM16LE @ 16 kHz mono.
         batch_max_delay_s = 0.06
         esp32_ws = None
@@ -3333,12 +3428,26 @@ class WebGateway:
                 await ws.close(code=1011)
                 return
             while True:
-                frame = await ws.receive_bytes()
+                if pending_audio:
+                    remaining = max(0.001, batch_max_delay_s -
+                                    (asyncio.get_running_loop().time() - pending_started_at))
+                    try:
+                        frame = await asyncio.wait_for(ws.receive_bytes(), timeout=remaining)
+                    except TimeoutError:
+                        await flush_pending_audio(force=True)
+                        continue
+                else:
+                    frame = await ws.receive_bytes()
                 if not frame:
                     continue
                 if len(frame) > 3840 or len(frame) % 2:
                     await ws.close(code=1009)
                     break
+                frame = silence_gate.filter(frame)
+                if not frame:
+                    # A short final batch must not wait for the next utterance.
+                    await flush_pending_audio(force=True)
+                    continue
                 if not pending_audio:
                     pending_started_at = asyncio.get_running_loop().time()
                 pending_audio.extend(frame)
@@ -3358,7 +3467,8 @@ class WebGateway:
                 logger.debug("web.esp32_speaker_proxy_final_flush_failed", exc_info=True)
             await close_esp32_ws()
             self._esp32_speaker_clients.discard(ws)
-            logger.info("web.esp32_speaker_proxy_closed", frames=frames, bytes=bytes_sent, dropped_frames=dropped_frames)
+            logger.info("web.esp32_speaker_proxy_closed", frames=frames, bytes=bytes_sent,
+                        dropped_frames=dropped_frames, silence_bytes_skipped=silence_gate.skipped_bytes)
 
     async def api_esp32_reboot(self, request: Request) -> JSONResponse:
         payload = self.server.esp32.owner_auth_payload(reason="reboot")
@@ -3780,12 +3890,12 @@ class WebGateway:
             "max_tokens": summary_budget,
             "temperature": 0.2,
         }
-        # mimo-v2-omni 是推理模型；这个任务里它会花几百 token 思考却不吐内容。
-        # chat_template_kwargs.enable_thinking=false 会跳过思考链，直接吐 bullet。
-        # 对非 mimo provider 带上这个字段也无副作用（未知字段多半被忽略），但为
-        # 保守起见仅在 mimo 下注入。
+        # 推理模型可能把很小的摘要预算花在 reasoning_content 上。两家的
+        # OpenAI 兼容接口使用不同字段，分别显式关闭推理以保证可见 bullet。
         if (cfg.provider or "").lower() == "mimo":
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        elif (cfg.provider or "").lower() == "deepseek":
+            payload["thinking"] = {"type": "disabled"}
         headers = {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -4393,6 +4503,26 @@ class WebGateway:
             result["request_id"] = request_id
             await ws.send_json(result)
 
+        elif msg_type == "voice_input_diagnostics":
+            # Only bounded counters/states; never persist client-supplied audio,
+            # arbitrary RTC reports (which contain network identifiers), or text.
+            from math import isfinite
+
+            fields = {}
+            for key in (
+                "frames", "echo_muted", "output_samples", "underrun_samples",
+                "buffering_samples", "overflow_samples", "rebuffer_count",
+                "queued_ms", "rms", "peak", "output_gap_ms", "stats_age_ms",
+                "packets_sent", "bytes_sent", "track_enabled", "processor_failed",
+            ):
+                value = msg.get(key)
+                if isinstance(value, (int, float)) and abs(value) <= 1e15 and isfinite(value):
+                    fields[key] = value
+            for key in ("ctx", "track_state", "client_call_id"):
+                if isinstance(msg.get(key), str):
+                    fields[key] = msg[key][:80]
+            logger.info("web.voice_input_diagnostics", **fields)
+
         elif msg_type == "start_esp32_relay":
             if self._esp32_capture_active:
                 await ws.send_json(
@@ -4429,6 +4559,7 @@ class WebGateway:
     async def _relay_esp32_audio_to_browser(self, ws: WebSocket) -> None:
         """Forward ESP32 PCM16 frames directly to one browser WebSocket client."""
         from lampgo.device.audio_stream import acknowledge_audio_frame, build_ws_audio_url, send_stream_auth
+        from lampgo.device.audio_stream import Esp32MicrophoneStream
 
         claim_owner = getattr(self.server.esp32, "claim_owner", None) if self.server.esp32 else None
         if callable(claim_owner):
@@ -4474,11 +4605,13 @@ class WebGateway:
 
         frames = 0
         bytes_sent = 0
-        idle_timeouts = 0
         last_report_at = time.monotonic()
         last_report_frames = 0
         last_report_bytes = 0
-        idle_timeout_s = 5.0
+        last_frame_at = None
+        max_frame_gap_ms = 0.0
+        max_rms = 0.0
+        max_peak = 0.0
         reconnect_delay_s = 1.0
         safe_url = redact_ws_owner_token(url)
         logger.info("web.esp32_audio_relay_connecting", url=safe_url)
@@ -4505,28 +4638,33 @@ class WebGateway:
                         safe_url = redact_ws_owner_token(url)
                         logger.info("web.esp32_audio_relay_authenticated", url=safe_url)
                         try:
-                            await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus", "data": {"state": "connected", "url": safe_url}})
+                            await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus", "data": {"state": "authenticated", "url": safe_url}})
                         except Exception:
                             pass
-                        reconnect_delay_s = 1.0
+                        mic_stream = Esp32MicrophoneStream(esp32_ws)
+                        first_pcm = True
                         while True:
                             try:
-                                data = await asyncio.wait_for(esp32_ws.recv(), timeout=idle_timeout_s)
-                            except TimeoutError:
-                                idle_timeouts += 1
-                                if idle_timeouts == 1 or idle_timeouts % 6 == 0:
-                                    logger.warning(
-                                        "web.esp32_audio_relay_idle",
-                                        url=redact_ws_owner_token(url),
-                                        frames=frames,
-                                        bytes=bytes_sent,
-                                        idle_timeouts=idle_timeouts,
-                                        timeout_s=idle_timeout_s,
-                                    )
-                                continue
-                            if not isinstance(data, bytes) or not data:
-                                continue
-                            idle_timeouts = 0
+                                data = await mic_stream.receive()
+                            except ConnectionError:
+                                # Snapshot before closing the socket frees its
+                                # buffers and hides the device's memory pressure.
+                                await self._log_esp32_audio_health()
+                                raise
+                            if first_pcm:
+                                await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus",
+                                                    "data": {"state": "connected", "url": safe_url}})
+                                first_pcm = False
+                            reconnect_delay_s = 1.0
+                            received_at = time.monotonic()
+                            if last_frame_at is not None:
+                                max_frame_gap_ms = max(max_frame_gap_ms, (received_at - last_frame_at) * 1000)
+                            last_frame_at = received_at
+                            # Signal levels only: never retain microphone audio.
+                            samples = tuple(value[0] for value in struct.iter_unpack("<h", data[:len(data) // 2 * 2]))
+                            if samples:
+                                max_rms = max(max_rms, (sum(v * v for v in samples) / len(samples)) ** 0.5 / 32768)
+                                max_peak = max(max_peak, max(abs(v) for v in samples) / 32768)
                             await ws.send_bytes(data)
                             await acknowledge_audio_frame(esp32_ws, flow_control)
                             frames += 1
@@ -4545,13 +4683,22 @@ class WebGateway:
                                     bytes=bytes_sent,
                                     frames_per_s=frames - last_report_frames,
                                     bytes_per_s=bytes_sent - last_report_bytes,
+                                    rms_max=round(max_rms, 5),
+                                    peak_max=round(max_peak, 5),
+                                    max_frame_gap_ms=round(max_frame_gap_ms, 1),
                                 )
                                 last_report_at = now
                                 last_report_frames = frames
                                 last_report_bytes = bytes_sent
+                                max_rms = max_peak = max_frame_gap_ms = 0.0
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    try:
+                        await ws.send_json({"type": "event", "event": "Esp32AudioRelayStatus",
+                                            "data": {"state": "recovering"}})
+                    except Exception:
+                        return  # Browser is gone; don't keep a device mic session alive.
                     logger.warning(
                         "web.esp32_audio_relay_reconnect",
                         url=redact_ws_owner_token(url),
@@ -4599,6 +4746,23 @@ class WebGateway:
                 pass
             if self.server._wake_loop:
                 self.server._wake_loop.resume_device_wake_listener()
+
+    async def _log_esp32_audio_health(self) -> None:
+        """Capture device-side counters when PCM stops, without recording audio."""
+        try:
+            status, body, _ = await asyncio.wait_for(self.server.esp32.proxy_get("/device/status"), timeout=1.5)
+            if status == 200 and isinstance(body, dict):
+                audio = body.get("audio") or {}
+                hosted = body.get("hosted") or {}
+                logger.warning("web.esp32_audio_device_health", **{
+                    key: audio.get(key) for key in (
+                        "microphone_ready", "microphone_enabled", "mic_frames", "ws_frames_sent",
+                        "ws_flow_pauses", "ws_clients", "ws_send_failures", "speaker_packets",
+                    )
+                }, internal_dma_free=hosted.get("internal_dma_free"),
+                    internal_dma_low_water=hosted.get("internal_dma_low_water"))
+        except Exception:
+            logger.debug("web.esp32_audio_device_health_unavailable")
 
     async def _ensure_esp32_mic_stream_enabled(self) -> None:
         """Best-effort nudge so ESP32 starts publishing PCM before call relay."""

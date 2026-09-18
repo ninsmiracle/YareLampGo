@@ -25,7 +25,7 @@ import structlog
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
-from lampgo.voice.echo_filter import likely_recent_tts_echo, remember_tts_text
+from lampgo.voice.echo_filter import filter_recent_tts_echo, remember_tts_text
 
 if TYPE_CHECKING:
     from lampgo.server import LampgoServer
@@ -139,8 +139,8 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
         stream=body.get("stream", True),
     )
 
-    is_echo, echo_detail = likely_recent_tts_echo(server, user_text)
-    if is_echo:
+    filtered_text, echo_detail = filter_recent_tts_echo(server, user_text)
+    if not filtered_text:
         logger.info(
             "llm_compat.echo_text_dropped",
             chat_id=chat_id,
@@ -157,12 +157,13 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
             },
         )
     logger.info(
-        "llm_compat.echo_text_kept",
+        "llm_compat.echo_text_trimmed" if filtered_text != user_text else "llm_compat.echo_text_kept",
         chat_id=chat_id,
         request_id=request_id,
         user_text=user_text[:80],
         **echo_detail,
     )
+    user_text = filtered_text
 
     async def _generate():
         from lampgo.core.events import IntentProgress, VoiceUserText
@@ -264,6 +265,7 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
             "request_id": request_id,
             "history": history,
             "call_mode": True,
+            "echo_checked": True,
             "enable_thinking": enable_thinking,
         }))
         server._llm_active_task = task  # type: ignore[attr-defined]

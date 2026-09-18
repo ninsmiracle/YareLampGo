@@ -670,9 +670,41 @@
 
                 <label class="settings-field">
                   <span class="settings-field-label">主模型（Model）</span>
-                  <input id="cfg-llm-model" class="settings-input" type="text" placeholder="mimo-v2.5" autocomplete="off">
-                  <span class="settings-field-hint">建议使用多模态模型，否则无法理解语音与图像信息。默认 <code>mimo-v2.5</code>；需强推理可改 <code>mimo-v2-omni</code>。</span>
+                  <input id="cfg-llm-model" class="settings-input" type="text" placeholder="deepseek-flash" autocomplete="off">
+                  <span class="settings-field-hint">对话优先推荐 <code>deepseek-flash</code>；使用视觉或音频直传时，系统会保留 MiMo 的兼容路径。</span>
                 </label>
+
+                <details class="settings-disclosure" open>
+                  <summary>DeepSeek Flash → MiMo 自动降级</summary>
+                  <div class="settings-form settings-form-nested">
+                    <div class="settings-field">
+                      <span class="settings-field-label">启用自动降级</span>
+                      <label class="settings-toggle" title="首选模型在首个有效回复前超时或临时不可用时，改由 MiMo 回答">
+                        <input id="cfg-llm-fallback-enabled" type="checkbox">
+                        <span>首选无响应时自动切换到 MiMo</span>
+                      </label>
+                      <span class="settings-field-hint">只会在首个文本、思考或工具调用前切换，已开始输出时不会重复执行动作。</span>
+                    </div>
+
+                    <label class="settings-field">
+                      <span class="settings-field-label">首个响应等待（秒）</span>
+                      <input id="cfg-llm-fallback-after" class="settings-input" type="number" min="1" max="60" step="1" placeholder="6" autocomplete="off">
+                      <span class="settings-field-hint">超过此时间仍没有有效响应时才降级；默认 6 秒。</span>
+                    </label>
+
+                    <label class="settings-field">
+                      <span class="settings-field-label">备用模型（MiMo）</span>
+                      <input id="cfg-llm-fallback-model" class="settings-input" type="text" placeholder="mimo-v2.5" autocomplete="off">
+                      <span class="settings-field-hint">备用 Provider 固定为 MiMo OpenAI 兼容接口。</span>
+                    </label>
+
+                    <label class="settings-field">
+                      <span class="settings-field-label">MiMo API Key（备用）</span>
+                      <input id="cfg-llm-fallback-api-key" class="settings-input settings-secret-input" type="text" placeholder="mimo-api-key-placeholder" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
+                      <span class="settings-field-hint">与 DeepSeek 主密钥分开保存到 <code>~/.lampgo/credentials.json</code>，不会写入 config。</span>
+                    </label>
+                  </div>
+                </details>
 
                 <details class="settings-disclosure">
                   <summary>高级：连接细节、上下文与输出预算</summary>
@@ -749,7 +781,7 @@
 
             <div class="settings-card">
               <div class="settings-card-title">声音和唤醒</div>
-              <div class="settings-card-desc">语音识别与播报复用上方 LLM 设置中的 MiMo Base URL 和 API Key；无需另配语音服务商凭据。</div>
+              <div class="settings-card-desc">语音识别与播报使用上方的 MiMo 路由：主模型为 MiMo 时复用主密钥，主模型为 DeepSeek 时使用 MiMo 备用密钥；无需另配语音服务商凭据。</div>
 
               <div class="settings-form" data-cfg-section="voice">
                 <label class="settings-field" data-cfg-field="voice.tts_provider">
@@ -1576,7 +1608,7 @@
   </dialog>
   <script src="/maintenance.js?v=p4-maintenance-4"></script>
   <script src="/p4-led-preview.js?v=p4-led-v2-20260917"></script>
-  <script src="/app.js?v=feature-batch-20260803-p4-led-20260917"></script>
+  <script src="/app.js?v=feature-batch-20260803-p4-led-20260918-input-jitter"></script>
   <script type="module" src="/pet.js?v=19"></script>
   <script src="/setup.js?v=secret-inputs-20260602"></script>
 </body>

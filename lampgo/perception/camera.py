@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import sys
+import threading
 from typing import TYPE_CHECKING
 
 import structlog
@@ -37,6 +38,7 @@ class CameraCapture:
     HEIGHT = 480
     JPEG_QUALITY = 60
     ESP32_HTTP_TIMEOUT_S = 8.0
+    _capture_lock = threading.Lock()
 
     def __init__(
         self,
@@ -74,6 +76,17 @@ class CameraCapture:
         Routing is computed on every call so a mid-session switch to ESP32
         takes effect on the next agent tool call without rebuilding LLMClient.
         """
+        # Cancelling an async turn does not stop its HTTP worker. Do not pile a
+        # second snapshot onto the device while the first worker is draining.
+        if not self._capture_lock.acquire(blocking=False):
+            logger.info("camera.capture_busy")
+            return None
+        try:
+            return self._capture_data_url()
+        finally:
+            self._capture_lock.release()
+
+    def _capture_data_url(self) -> str | None:
         use_esp32 = bool(self._device_cfg and self._device_cfg.enabled and self._esp32 is not None)
 
         if use_esp32 and self._esp32.is_online():

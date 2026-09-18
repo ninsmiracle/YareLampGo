@@ -174,9 +174,8 @@ class ReturnSafeSkill(Skill):
                 if hasattr(ctx.motion, "record_recovery_failure"):
                     ctx.motion.record_recovery_failure(str(exc))
                 logger.warning(
-                    "return_safe.recovery_failed_holding_torque",
+                    "return_safe.recovery_failed",
                     error=str(exc),
-                    torque_held=True,
                 )
                 self._recovery_active = False
                 return SkillResult(status="error", message=str(exc))

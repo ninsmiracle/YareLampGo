@@ -209,7 +209,15 @@ class CatTeaserSkill(Skill):
                 )
             while not cancel_event.is_set() and time.monotonic() < end_at:
                 tick_started = time.monotonic()
+                if not ctx.motion.ready_for_motion:
+                    stop_reason = "motion_unavailable"
+                    break
                 frame = await asyncio.to_thread(source.read)
+                # A capture can outlast a transport failure. Never interpret a
+                # falling arm as a cat touch or queue an escape after reconnect.
+                if not ctx.motion.ready_for_motion:
+                    stop_reason = "motion_unavailable"
+                    break
                 if frame is None:
                     missing_frames += 1
                     if missing_frames >= max(2, int(camera_fps * 2)):
@@ -323,6 +331,12 @@ class CatTeaserSkill(Skill):
 
             if cancel_event.is_set():
                 stop_reason = "cancelled"
+            if stop_reason == "motion_unavailable":
+                return SkillResult(
+                    status="error",
+                    message="逗猫已停止：运动连接异常或设备需要安全恢复，请先执行安全归位。",
+                    data={"stop_reason": stop_reason, "frames": frames},
+                )
             if frames == 0:
                 return SkillResult(status="error", message="cat_teaser camera did not provide frames")
             recorder.close(stop_reason=stop_reason)

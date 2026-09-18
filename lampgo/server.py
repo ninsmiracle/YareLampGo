@@ -10,6 +10,7 @@ The server owns:
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import re
 import signal
@@ -73,6 +74,7 @@ from lampgo.skills.builtin.lighting_mode_skills import (
 from lampgo.skills.builtin.motion_skills import EStopSkill, MoveToSkill, ReturnSafeSkill
 from lampgo.skills.builtin.music_skills import DanceToMusicSkill
 from lampgo.skills.builtin.parametric_skills import (
+    ConversationGestureSkill,
     HeadShakeSkill,
     IdleSwaySkill,
     LookAtSkill,
@@ -93,7 +95,7 @@ from lampgo.skills.loader import (
 )
 from lampgo.skills.recorder import TeachRecorder
 from lampgo.skills.registry import SkillRegistry
-from lampgo.voice.echo_filter import likely_recent_tts_echo, remember_tts_text
+from lampgo.voice.echo_filter import filter_recent_tts_echo, remember_tts_text
 from lampgo.voice.stt import MiMoASR, build_stt
 
 logger = structlog.get_logger(__name__)
@@ -273,6 +275,7 @@ class LampgoServer:
         self.registry.register(HeadShakeSkill())
         self.registry.register(LookAtSkill())
         self.registry.register(IdleSwaySkill())
+        self.registry.register(ConversationGestureSkill())
         self.registry.register(DanceToMusicSkill())
         self.registry.register(
             CatTeaserSkill(
@@ -289,11 +292,34 @@ class LampgoServer:
             allow_local_camera_fallback=bool(self.config.no_hw),
         )
 
+    def begin_voice_display(self) -> None:
+        """A newly accepted call owns the face instead of the previous idle display."""
+        clock_enabled = bool(self.clock.snapshot().get("enabled"))
+        ocean_enabled = bool(self.electronic_ocean.snapshot().get("enabled"))
+        self.clock.deactivate()
+        self.electronic_ocean.deactivate()
+        logger.info("server.voice_display_acquired", clock_was_enabled=clock_enabled,
+                    ocean_was_enabled=ocean_enabled)
+
     def _recording_actions_prompt(self) -> str:
         from lampgo.expression_library import build_expression_prompt
 
         recordings = build_recording_actions_prompt(Path(self.config.recordings_dir))
-        return f"{recordings}\n\n{build_expression_prompt()}".strip()
+        activity = {
+            "lighting_engaged": self.lighting_mode.is_engaged,
+            "clock_enabled": bool(self.clock.snapshot().get("enabled")),
+            "ocean_enabled": bool(self.electronic_ocean.snapshot().get("enabled")),
+            "running_skill": self.executor.current_skill_id,
+            "is_busy": self.executor.is_busy,
+            "motor_startup_state": self.hal.startup_state.value,
+            "estopped": self.safety.is_estopped(),
+            "no_hw": bool(self.config.no_hw),
+        }
+        return (
+            f"{recordings}\n\n{build_expression_prompt()}\n\n"
+            "Current activity (preserve active modes/tasks during unsolicited conversation reactions):\n"
+            + json.dumps(activity, ensure_ascii=False)
+        ).strip()
 
     # ---- user / composed skills (JSON-defined, created by agents & UI) ----
 
@@ -466,6 +492,36 @@ class LampgoServer:
         reason: str,
         **params: Any,
     ) -> InvokeResult:
+        # Discovery can finish after the initial P4 handshake deadline. Only an
+        # explicit safe-return request retries that failed startup; expressions
+        # and automatic conversation gestures must not energize the arm.
+        if (
+            skill_id == "return_safe"
+            and self.config.device.motor_transport == "p4"
+            and self._hal_startup_error
+            and self._started
+            and self.esp32.get_active_host()
+        ):
+            await self.reload_motor_runtime(only_if_startup_failed=True)
+            # Reload replaces the virtual runtime; never invoke with its old ctx.
+            ctx = self.make_context()
+        companion = skill_id == "conversation_gesture" or bool(params.get("preserve_activity"))
+        blocked = []
+        if companion:
+            if self.lighting_mode.is_engaged:
+                blocked.append("lighting_mode_active")
+            if self.clock.snapshot().get("enabled"):
+                blocked.append("clock_active")
+            if self.electronic_ocean.snapshot().get("enabled"):
+                blocked.append("ocean_active")
+            if self.safety.is_estopped():
+                blocked.append("estopped")
+            if not self.config.no_hw and self.hal.startup_state is not MotorStartupState.READY:
+                blocked.append(f"motor_{self.hal.startup_state.value}")
+        if blocked:
+            logger.info("server.companion_rejected", skill_id=skill_id, reasons=blocked)
+            return InvokeResult(invocation_id=uuid.uuid4().hex[:12], status="rejected",
+                                error_code="companion_unavailable", error_detail=", ".join(blocked))
         if skill_id == "exit_lighting_mode":
             return await self._exit_lighting_mode_with_return_safe(reason=reason)
         if skill_id == "enter_lighting_mode":
@@ -1092,8 +1148,8 @@ class LampgoServer:
         voice_input = bool(data.get("voice_input")) or call_mode
 
         if voice_input and not bool(data.get("echo_checked")):
-            is_echo, echo_detail = likely_recent_tts_echo(self, text)
-            if is_echo:
+            filtered_text, echo_detail = filter_recent_tts_echo(self, text)
+            if not filtered_text:
                 logger.info(
                     "server.echo_text_dropped",
                     text=_log_safe(text, limit=80),
@@ -1112,11 +1168,12 @@ class LampgoServer:
                     },
                 }
             logger.info(
-                "server.echo_text_kept",
+                "server.echo_text_trimmed" if filtered_text != text else "server.echo_text_kept",
                 text=_log_safe(text, limit=80),
                 request_id=request_id,
                 **echo_detail,
             )
+            text = filtered_text
 
         alias = self._resolve_recording_alias(text)
         if alias:
@@ -1367,8 +1424,8 @@ class LampgoServer:
             return {"ok": True, "result": {"type": "chat", "response": "抱歉，没有听清您说的话。", "source": "audio"}}
 
         logger.info("server.audio_transcribed", request_id=request_id, text=_log_safe(text))
-        is_echo, echo_detail = likely_recent_tts_echo(self, text)
-        if is_echo:
+        filtered_text, echo_detail = filter_recent_tts_echo(self, text)
+        if not filtered_text:
             logger.info(
                 "server.audio_echo_text_dropped",
                 text=_log_safe(text, limit=80),
@@ -1387,11 +1444,12 @@ class LampgoServer:
                 },
             }
         logger.info(
-            "server.audio_echo_text_kept",
+            "server.audio_echo_text_trimmed" if filtered_text != text else "server.audio_echo_text_kept",
             text=_log_safe(text, limit=80),
             request_id=request_id,
             **echo_detail,
         )
+        text = filtered_text
         await self.events.publish(
             IntentProgress(stage="audio_transcribed", message=f"听到：{text}", source="llm", request_id=request_id)
         )
@@ -2363,7 +2421,7 @@ class LampgoServer:
         )
         self._started = True
 
-    async def reload_motor_runtime(self) -> dict[str, Any]:
+    async def reload_motor_runtime(self, *, only_if_startup_failed: bool = False) -> dict[str, Any]:
         """Hot-reconnect the motor HAL and MotionRuntime after motor_port edits."""
         if self.maintenance.active or self._record_recorder is not None:
             return {"ok": False, "error": "请先结束校准/录制，再修改电机连接配置"}
@@ -2371,6 +2429,12 @@ class LampgoServer:
             return {"ok": True, "skipped": True, "reason": "server_not_started"}
 
         async with self._motor_reload_lock:
+            # A simultaneous safe-return/config request may already have
+            # recovered the runtime while this request waited for the lock.
+            if only_if_startup_failed and not self._hal_startup_error:
+                return {"ok": True, "skipped": True, "reason": "startup_already_recovered"}
+            if only_if_startup_failed and self.maintenance._load_draft() is not None:
+                return {"ok": False, "error": "已保留校准预览，请进入 P4 无线维护继续或重新采集"}
             transport = self.config.device.motor_transport
             port = str(self.config.device.motor_port or "").strip()
             logger.info("server.motor_runtime_reload_starting", motor_transport=transport, motor_port=port)

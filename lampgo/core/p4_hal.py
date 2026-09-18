@@ -227,8 +227,13 @@ class P4HardwareAbstraction:
             }
 
     def write_recovery_positions(self, positions: dict[str, float]) -> None:
-        if self.startup_state is not MotorStartupState.RECOVERING or self._maintenance:
-            raise RuntimeError("P4 recovery has not been prepared")
+        if not self.is_connected or self.startup_state is not MotorStartupState.RECOVERING or self._maintenance:
+            raise RuntimeError(
+                "P4 recovery has not been prepared or is no longer active: "
+                f"state={self.startup_state.value}, connected={self.is_connected}, "
+                f"maintenance={self._maintenance}, "
+                f"reason={self._recovery_reason or self._last_error or 'unspecified'}"
+            )
         targets = self._recovery_targets(positions)
         with self._latest_lock:
             self._sequence += 1
@@ -656,6 +661,7 @@ class P4HardwareAbstraction:
         if not has_servo_feedback and not has_runtime_state:
             return
         with self._state_lock:
+            previous_state = self._startup_state
             self._device_snapshot.update(
                 {
                     k: v
@@ -704,6 +710,14 @@ class P4HardwareAbstraction:
                 self._recovery_reason = str(message.get("recovery_reason") or "") or None
             if "torque_enabled" in message:
                 self._torque_enabled = bool(message.get("torque_enabled"))
+            if self._startup_state is not previous_state:
+                logger.info(
+                    "p4_hal.startup_state_changed",
+                    old=previous_state.value,
+                    new=self._startup_state.value,
+                    reason=self._recovery_reason,
+                    torque_enabled=self._torque_enabled,
+                )
 
     def _apply_startup_response(self, response: dict[str, Any]) -> None:
         state = str(response.get("startup_state") or "hard_fault")

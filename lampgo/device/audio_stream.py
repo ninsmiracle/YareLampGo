@@ -70,6 +70,56 @@ async def acknowledge_audio_frame(ws, flow_control: bool) -> None:
         await asyncio.wait_for(ws.send("ack"), timeout=2.0)
 
 
+class SpeakerSilenceGate:
+    """Stop idle network PCM; the P4 I2S task supplies its own silence.
+
+    Keep 200 ms of trailing silence after real samples so sentence tails and
+    batch boundaries drain. Only exact digital zero is skipped: quiet speech
+    and every nonzero PCM sample pass unchanged. This gate never touches mic
+    input, VAD or the echo gate.
+    """
+
+    def __init__(self, sample_rate: int = 16000, tail_ms: int = 200) -> None:
+        self._tail_bytes = sample_rate * 2 * tail_ms // 1000
+        self._remaining = 0
+        self.skipped_bytes = 0
+
+    def filter(self, pcm: bytes) -> bytes:
+        if len(pcm) % 2:
+            raise ValueError("Speaker PCM16 must contain complete samples")
+        if any(pcm):
+            self._remaining = self._tail_bytes
+            return pcm
+        keep = min(self._remaining, len(pcm))
+        self._remaining -= keep
+        self.skipped_bytes += len(pcm) - keep
+        return pcm[:keep]
+
+
+class Esp32MicrophoneStream:
+    """Receive actual PCM with a deadline, even if the socket stays open.
+
+    Authentication, pongs and text are not evidence of a working microphone.
+    The owner reconnects on failure; cancellation still exits immediately.
+    """
+
+    def __init__(self, ws, *, idle_timeout_s: float = 3.0) -> None:
+        self._ws = ws
+        self._idle_timeout_s = idle_timeout_s
+
+    async def receive(self) -> bytes:
+        try:
+            async with asyncio.timeout(self._idle_timeout_s):
+                while True:
+                    pcm = await self._ws.recv()
+                    if isinstance(pcm, bytes) and pcm:
+                        if len(pcm) % 2:
+                            raise ConnectionError("ESP32 sent incomplete PCM16 samples")
+                        return pcm
+        except TimeoutError as exc:
+            raise ConnectionError(f"ESP32 microphone sent no PCM for {self._idle_timeout_s:.1f}s") from exc
+
+
 class P4SpeakerStream:
     """Single-writer PCM transport with a four-packet (240 ms) credit window.
 

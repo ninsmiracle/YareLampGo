@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterable
 
 from lampgo import personastore
 from lampgo.agent.codex import ensure_codex_integration, find_codex_binary
+from lampgo.core.config import LLMConfig
 
 StepName = str
 
@@ -194,12 +195,12 @@ PROVIDER_PRESETS: dict[str, dict[str, object]] = {
     "deepseek": {
         "label": "DeepSeek",
         "api_urls": {
-            "openai": "https://api.deepseek.com/v1",
+            "openai": "https://api.deepseek.com",
         },
         "default_message_type": "openai",
-        "default_model": "deepseek-chat",
-        "default_fast_model": "deepseek-chat",
-        "base_url": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-flash",
+        "default_fast_model": "deepseek-flash",
+        "base_url": "https://api.deepseek.com",
         "message_type": "openai",
     },
     "google": {
@@ -671,7 +672,6 @@ def _step_llm(ctx: InstallContext) -> list[StepOutcome]:
     ov = _current_overrides().get("llm") if isinstance(_current_overrides(), dict) else None
     current_llm: dict[str, Any] = ov if isinstance(ov, dict) else {}
     creds = personastore.get_credentials()
-    current_key = str(creds.get("llm_api_key") or creds.get("api_key") or "").strip()
 
     default_provider = (
         ctx.llm_provider_override
@@ -691,6 +691,23 @@ def _step_llm(ctx: InstallContext) -> list[StepOutcome]:
     provider = _ask_choice(ctx, "    ", provider_choices, default_idx=default_idx)
 
     preset = PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["custom"])
+    current_provider = str(
+        LLMConfig.normalize_provider_alias(
+            creds.get("llm_primary_provider") or current_llm.get("provider") or ""
+        )
+        or ""
+    ).strip().lower()
+    legacy_key = str(creds.get("llm_api_key") or creds.get("api_key") or "").strip()
+    if provider == "deepseek":
+        current_key = str(creds.get("deepseek_api_key") or "").strip()
+        if not current_key and current_provider == "deepseek":
+            current_key = legacy_key
+    elif provider == "mimo":
+        current_key = str(creds.get("mimo_api_key") or "").strip()
+        if not current_key and current_provider in {"", "mimo"}:
+            current_key = legacy_key
+    else:
+        current_key = legacy_key
 
     _print_sub(ctx, "Endpoint & 模型")
     api_base_default = current_llm.get("api_base") or preset.get("base_url", "")
@@ -721,7 +738,15 @@ def _step_llm(ctx: InstallContext) -> list[StepOutcome]:
     }
     personastore.patch_overrides_toml({"llm": llm_patch})
     if effective_key:
-        personastore.set_credentials({"llm_api_key": effective_key})
+        credential_patch = {
+            "llm_api_key": effective_key,
+            "llm_primary_provider": provider,
+        }
+        if provider == "deepseek":
+            credential_patch["deepseek_api_key"] = effective_key
+        elif provider == "mimo":
+            credential_patch["mimo_api_key"] = effective_key
+        personastore.set_credentials(credential_patch)
     outcomes.append(
         StepOutcome(
             step="llm",
@@ -792,6 +817,8 @@ def _probe_llm_sync(
             "max_tokens": 4,
             "temperature": 0,
         }
+        if provider == "deepseek":
+            payload["thinking"] = {"type": "disabled"}
 
     try:
         with httpx.Client(timeout=timeout) as client:

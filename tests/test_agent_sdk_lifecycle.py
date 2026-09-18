@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +31,11 @@ def test_command_runs_agent_sdk_matches_exact_executable() -> None:
     assert not agent_sdk._command_runs_agent_sdk(["lampgo-livekit-agent-helper"])
 
 
-def test_find_port_listener_falls_back_to_current_user_processes(monkeypatch) -> None:
+@pytest.mark.parametrize("system_error", ["access_denied", "runtime_error", "no_such_process"])
+@pytest.mark.parametrize("process_error", [False, True])
+def test_find_port_listener_falls_back_to_current_user_processes(
+    monkeypatch, system_error, process_error,
+) -> None:
     manager = _manager()
 
     class AccessDenied(Exception):
@@ -38,6 +43,17 @@ def test_find_port_listener_falls_back_to_current_user_processes(monkeypatch) ->
 
     class NoSuchProcess(Exception):
         pass
+
+    def fail_process_query(*, kind):
+        raise RuntimeError("proc_pidinfo(PROC_PIDLISTFDS) 2/2 syscall failed")
+
+    def fail_system_query(*, kind):
+        error_class = {
+            "access_denied": AccessDenied,
+            "runtime_error": RuntimeError,
+            "no_such_process": NoSuchProcess,
+        }[system_error]
+        raise error_class("proc_pidinfo(PROC_PIDLISTFDS) 2/2 syscall failed")
 
     process = SimpleNamespace(
         pid=2468,
@@ -52,13 +68,48 @@ def test_find_port_listener_falls_back_to_current_user_processes(monkeypatch) ->
         AccessDenied=AccessDenied,
         NoSuchProcess=NoSuchProcess,
         CONN_LISTEN="LISTEN",
-        net_connections=lambda *, kind: (_ for _ in ()).throw(AccessDenied()),
-        process_iter=lambda: [process],
+        net_connections=fail_system_query,
+        process_iter=lambda: (
+            [SimpleNamespace(pid=1234, net_connections=fail_process_query), process]
+            if process_error else [process]
+        ),
     )
     monkeypatch.setattr(manager, "_psutil", lambda: fake_psutil)
     monkeypatch.setattr(manager, "_process_is_current_user", lambda _process: True)
 
     assert manager._find_port_listener_pid() == process.pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("occupied", [False, True])
+async def test_failed_process_queries_still_check_actual_port(monkeypatch, occupied) -> None:
+    """A failed scan is neither proof of a free port nor permission to kill."""
+    import psutil
+
+    manager = _manager()
+
+    def fail_query(*, kind):
+        raise RuntimeError("proc_pidinfo(PROC_PIDLISTFDS) 2/2 syscall failed")
+
+    monkeypatch.setattr(psutil, "net_connections", fail_query)
+    monkeypatch.setattr(psutil, "process_iter", lambda: [
+        SimpleNamespace(pid=1234, net_connections=fail_query),
+    ])
+    monkeypatch.setattr(manager, "_process_is_current_user", lambda _process: True)
+
+    def unexpected_signal(*args, **kwargs):
+        pytest.fail("An uninspectable listener must never be terminated")
+
+    monkeypatch.setattr(manager, "_signal_sdk_owner", unexpected_signal)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        manager._port = listener.getsockname()[1]
+        listener.listen()
+        if not occupied:
+            listener.close()
+        assert await manager._release_sdk_port() is (not occupied)
+        if occupied:
+            assert "occupied but its owner cannot be inspected" in manager.last_error
 
 
 @pytest.mark.asyncio
@@ -360,3 +411,52 @@ async def test_monitor_turns_bind_error_into_startup_failure() -> None:
     assert manager._startup_failed_event.is_set()
     assert "18790" in manager.last_error
     assert not manager.is_running
+
+
+def test_sdk_preserves_system_proxy_before_adding_local_bypass(monkeypatch):
+    monkeypatch.setattr(agent_sdk.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_sdk, "getproxies", lambda: {
+        "http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890",
+        "socks": "socks5://127.0.0.1:7890",
+    })
+    env = {"NO_PROXY": "example.internal"}
+    agent_sdk.AgentSDKManager._configure_network_env(env)
+    assert env["HTTP_PROXY"] == env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert env["NO_PROXY"] == env["no_proxy"]
+    assert "example.internal" in env["NO_PROXY"].split(",")
+    assert "127.0.0.1" in env["NO_PROXY"].split(",")
+    assert "ALL_PROXY" not in env
+    # httpx must actually select direct routing for the backend, proxy for RTC.
+    from httpx._utils import get_environment_proxies
+    from unittest.mock import patch
+    with patch.dict("os.environ", env, clear=True):
+        routes = get_environment_proxies()
+    assert routes["https://"] == "http://127.0.0.1:7890"
+    assert routes["all://127.0.0.1"] is None
+
+
+@pytest.mark.parametrize("env", [
+    {"HTTPS_PROXY": "http://explicit.test:8888"},
+    {"HTTP_PROXY": ""},
+    {"ALL_PROXY": "socks5://explicit.test:1080"},
+    {"https_proxy": "http://explicit.test:8888"},
+])
+def test_sdk_respects_explicit_proxy_and_opt_out(monkeypatch, env):
+    monkeypatch.setattr(agent_sdk.sys, "platform", "darwin")
+    def unexpected():
+        raise AssertionError("explicit proxy choice must not be replaced")
+    monkeypatch.setattr(agent_sdk, "getproxies", unexpected)
+    original = dict(env)
+    agent_sdk.AgentSDKManager._configure_network_env(env)
+    for key, value in original.items():
+        assert env[key] == value
+    if "https_proxy" in env:
+        assert env["HTTPS_PROXY"] == env["https_proxy"]
+
+
+def test_sdk_no_system_proxy_keeps_direct_route(monkeypatch):
+    monkeypatch.setattr(agent_sdk.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_sdk, "getproxies", lambda: {})
+    env = {}
+    agent_sdk.AgentSDKManager._configure_network_env(env)
+    assert set(env) == {"NO_PROXY", "no_proxy"}

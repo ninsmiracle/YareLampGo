@@ -396,6 +396,7 @@ class _CaughtFirstEstimator:
 
 class _FakeMotion:
     is_running = True
+    ready_for_motion = True
 
     def __init__(self) -> None:
         self.current_state = JointState(positions={"base_yaw": 0.0, "base_pitch": 0.0, "wrist_pitch": 0.0})
@@ -767,3 +768,30 @@ def test_server_marks_offline_esp32_camera_not_ready() -> None:
 
     assert status["camera_ready"] is False
     assert status["cat_teaser_camera"]["mode"] == "esp32"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails_during_capture", [False, True])
+async def test_cat_teaser_exits_when_motion_transport_becomes_unavailable(monkeypatch, fails_during_capture):
+    monkeypatch.setattr(cat_skill_mod, "CatToyTracker", _FakeTracker)
+    monkeypatch.setattr(cat_skill_mod, "CatPlayStateEstimator", _FakeEstimator)
+    motion = _FakeMotion()
+    motion.ready_for_motion = fails_during_capture
+    source = _FakeFrameSource()
+    original_read = source.read
+
+    def read():
+        motion.ready_for_motion = False
+        return original_read()
+
+    monkeypatch.setattr(source, "read", read)
+    skill = CatTeaserSkill(lambda: source)
+    result = await skill.execute(
+        _fake_context(motion), duration=0.35, camera_fps=12,
+        debug_view=False, log_events=False, save_recording=False,
+    )
+    assert result.status == "error"
+    assert result.data["stop_reason"] == "motion_unavailable"
+    assert not motion.targets
+    assert source.closed
+    assert motion.stopped

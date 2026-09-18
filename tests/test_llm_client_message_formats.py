@@ -193,6 +193,16 @@ def test_resolve_web_search_key_uses_provider_alias() -> None:
     assert _resolve_web_search_api_key(cfg) == "alias-main-key"
 
 
+def test_resolve_web_search_key_uses_mimo_fallback_for_deepseek() -> None:
+    cfg = _base_cfg(
+        provider="deepseek",
+        api_key="deepseek-key",
+        fallback_provider="mimo",
+        fallback_api_key="mimo-fallback-key",
+    )
+    assert _resolve_web_search_api_key(cfg) == "mimo-fallback-key"
+
+
 def test_web_search_sub_service_endpoint_is_hardcoded() -> None:
     """The whole point of the sub-service: endpoint + model are NOT
     user-configurable. Guard against someone accidentally making them so.

@@ -121,6 +121,8 @@ class MotionRuntime:
     def start(self) -> None:
         if self._running:
             return
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("Previous motion loop is still stopping.")
         # A previous stop can leave the SHUTDOWN sentinel in the queue if the
         # loop exited from `_running = False` before draining commands. Starting
         # with a fresh queue prevents the new control thread from immediately
@@ -132,12 +134,16 @@ class MotionRuntime:
         logger.info("motion.started", tick_hz=self._config.tick_rate_hz)
 
     def stop(self) -> None:
-        if not self._running:
-            return
-        self._running = False
-        self._command_queue.put(_Command(type=_CommandType.SHUTDOWN))
+        if self._running:
+            self._running = False
+            try:
+                self._command_queue.put_nowait(_Command(type=_CommandType.SHUTDOWN))
+            except queue.Full:
+                pass  # _running already requests exit; never block behind a full queue.
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise RuntimeError("Motion loop did not stop; recovery cannot start.")
             self._thread = None
         logger.info("motion.stopped")
 
@@ -216,10 +222,15 @@ class MotionRuntime:
         max_velocity: float,
         fps: int,
     ) -> list[dict[str, float]]:
-        if self._running:
-            raise RuntimeError("Recovery preparation requires the motion loop to be stopped.")
         if not self._hal.recovery_required:
             raise RuntimeError("Motor recovery is not required.")
+        # A P4 reconnect can require recovery while the host loop is still
+        # running. Join that loop before reading a new pose or enabling torque.
+        # This stops host commands only; it does not release motor torque.
+        if self._running:
+            self.stop()
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("Motion loop did not stop; recovery cannot start.")
         if max_velocity <= 0 or fps <= 0:
             raise RuntimeError("Recovery velocity and frame rate must be positive.")
 
@@ -252,6 +263,8 @@ class MotionRuntime:
         )
         verified_start = self._hal.prepare_recovery(frames)
         self._current_state = JointState(positions=verified_start)
+        self._current_target = None  # Never resume a pre-disconnect ordinary target.
+        self._status = MotionStatus()
         self._recovery_start = dict(verified_start)
         self._recovery_target = recovery_target
         self._recovery_max_velocity = max_velocity
@@ -270,7 +283,7 @@ class MotionRuntime:
 
     def stream_recovery_frames(self, frames: list[dict[str, float]], fps: int = 50) -> threading.Event:
         if not self._running or self._recovery_target is None:
-            raise RuntimeError("Recovery has not been prepared.")
+            raise RuntimeError(self._recovery_failure_reason or "Recovery has not been prepared.")
         done = threading.Event()
         self._command_queue.put(
             _Command(
@@ -358,6 +371,15 @@ class MotionRuntime:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def ready_for_motion(self) -> bool:
+        return (
+            self._running
+            and self._hal.is_connected
+            and self._hal.startup_state is MotorStartupState.READY
+            and not self._safety.is_estopped()
+        )
 
     @property
     def recovery_required(self) -> bool:
@@ -460,6 +482,30 @@ class MotionRuntime:
         _diag_mode: bool = os.environ.get("LAMPGO_DIAG", "0").strip() == "1"
         _diag_counter = 0
 
+        def fail_recovery(reason: str) -> None:
+            nonlocal _active_done
+            # The device has rejected/lost the recovery session. Do not keep
+            # replaying its trajectory, or signal successful completion. Leave
+            # torque policy to the device; never re-enable or release it here.
+            self.record_recovery_failure(reason)
+            self._running = False
+            self._current_target = None
+            self._recovery_target = None
+            self._recovery_start = None
+            self._recovery_max_velocity = None
+            self._status = MotionStatus(is_done=True, stalled=True)
+            if _active_done:
+                _active_done.set()
+                _active_done = None
+            while True:
+                try:
+                    pending = self._command_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if pending.done_event:
+                    pending.done_event.set()
+            logger.error("motion.recovery_failed", reason=reason)
+
         while self._running:
             t0 = time.monotonic()
 
@@ -480,6 +526,8 @@ class MotionRuntime:
                     self._current_target = None
                     _stream_frames = []
                     _current_stream_target = {}
+                    _stream_settling = False
+                    _stream_settle_timeout = 0.0
                     _stream_passthrough = False
                     _stream_enable_overlap = self._config.overlapping_action
                     _anticipation_final_target = None
@@ -493,6 +541,8 @@ class MotionRuntime:
                     self._current_target = None
                     _stream_frames = []
                     _current_stream_target = {}
+                    _stream_settling = False
+                    _stream_settle_timeout = 0.0
                     _stream_passthrough = False
                     _stream_enable_overlap = self._config.overlapping_action
                     _anticipation_final_target = None
@@ -659,8 +709,11 @@ class MotionRuntime:
             try:
                 self._current_state = self._hal.read_positions()
                 self._safety.report_bus_health(True)
-            except Exception:
+            except Exception as exc:
                 self._safety.report_bus_health(False)
+                if self._recovery_target is not None:
+                    fail_recovery(f"Recovery feedback unavailable: {exc}")
+                    break
                 self._tick_sleep(t0)
                 continue
 
@@ -798,9 +851,10 @@ class MotionRuntime:
                 hw_settle_tol = (
                     self._RECOVERY_TARGET_TOLERANCE_DEGREES if self._recovery_target is not None else 1.0
                 )
-                hw_at_target = all(
+                settle_target = self._recovery_target if self._recovery_target is not None else _current_stream_target
+                hw_at_target = bool(settle_target) and all(
                     abs(self._current_state.get(j, v) - v) <= hw_settle_tol
-                    for j, v in _current_stream_target.items()
+                    for j, v in settle_target.items()
                 )
                 is_recovery = self._recovery_target is not None
                 timed_out = not is_recovery and time.monotonic() >= _stream_settle_timeout
@@ -919,8 +973,11 @@ class MotionRuntime:
                 else:
                     tick_ms = max(1, round(self._tick_interval * 1000))
                     self._hal.write_positions(safe_frame, move_time_ms=tick_ms)
-            except Exception:
+            except Exception as exc:
                 self._safety.report_bus_health(False)
+                if self._recovery_target is not None:
+                    fail_recovery(f"Recovery write rejected: {exc}")
+                    break
                 logger.exception("motion.write_failed")
 
             # --- Diagnostics ---

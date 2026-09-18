@@ -1,8 +1,8 @@
 """Shared MiMo speech primitives.
 
 MiMo exposes ASR and TTS on its OpenAI-compatible ``/chat/completions``
-endpoint.  This module deliberately takes the existing LLM base URL and API
-key instead of creating a second voice credential surface.
+endpoint. It uses the active MiMo route: the primary LLM route when MiMo is
+selected, otherwise the separately stored MiMo fallback route.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
@@ -84,21 +84,30 @@ def build_mimo_speech_settings(
     llm: LLMConfig,
     voice: VoiceConfig,
 ) -> MiMoSpeechSettings:
-    """Build MiMo speech settings from the *existing* LLM credential.
+    """Build MiMo ASR/TTS settings without crossing provider credentials.
 
-    Reusing an arbitrary non-MiMo provider key would be surprising and unsafe,
-    so voice can start only when the configured LLM provider is MiMo.
+    MiMo remains the speech provider when the conversational model is
+    DeepSeek Flash. In that topology, ``fallback_*`` is the dedicated MiMo
+    connection configured in the LLM page and doubles as the speech route.
     """
 
     provider = str(llm.normalize_provider_alias(llm.provider or "") or "").strip().lower()
-    if provider != "mimo":
-        raise ValueError("MiMo voice requires llm.provider = 'mimo'")
-    api_key = (llm.api_key or "").strip()
+    if provider == "mimo":
+        api_base = llm.api_base
+        api_key = (llm.api_key or "").strip()
+    else:
+        fallback_provider = str(
+            llm.normalize_provider_alias(llm.fallback_provider or "") or ""
+        ).strip().lower()
+        if fallback_provider != "mimo":
+            raise ValueError("MiMo voice requires a MiMo primary or fallback route")
+        api_base = llm.fallback_api_base
+        api_key = (llm.fallback_api_key or "").strip()
     if not api_key:
-        raise ValueError("MiMo voice requires the configured LLM API key")
+        raise ValueError("MiMo voice requires a configured MiMo API key")
 
     return MiMoSpeechSettings(
-        api_base=_normalize_api_base(llm.api_base),
+        api_base=_normalize_api_base(api_base),
         api_key=api_key,
         asr_model=mimo_asr_model_or_default(voice.stt_model),
         tts_model=mimo_tts_model_or_default(voice.tts_model),

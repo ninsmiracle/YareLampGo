@@ -9,8 +9,12 @@ LampGo's configured MiMo endpoint.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
+from types import SimpleNamespace
 from typing import Any
+
+from lampgo.voice.echo_filter import clear_recent_tts, filter_recent_tts_echo, remember_tts_text
 
 from lampgo.voice.mimo import (
     MIMO_TTS_SAMPLE_RATE,
@@ -22,6 +26,13 @@ from lampgo.voice.mimo import (
 
 
 logger = logging.getLogger(__name__)
+
+# Each SDK job runs STT and TTS in the same worker process. Filter before
+# LiveKit consumes FINAL_TRANSCRIPT, so echo cannot preempt a real reply.
+_echo_state = SimpleNamespace(config=SimpleNamespace(voice=SimpleNamespace(
+    call_mode="interruptible",
+    echo_text_filter_enabled=True,
+)))
 
 
 def install_livekit_agent_sdk_mimo_patch() -> None:
@@ -43,6 +54,10 @@ def install_livekit_agent_sdk_mimo_patch() -> None:
 
 
 def create_stt(*, config, runtime) -> Any:
+    clear_recent_tts(_echo_state)
+    _echo_state.config.voice.echo_text_filter_enabled = os.environ.get(
+        "LAMPGO_VOICE_ECHO_TEXT_FILTER_ENABLED", "1",
+    ).lower() not in {"0", "false", "no", "off"}
     component = _require_component(runtime.voice_agent.stt, "stt")
     provider = config.provider_for(component, path=f"voice_agents.{runtime.voice_agent.name}.stt")
     settings = _speech_settings(provider, component.options)
@@ -119,12 +134,15 @@ class MiMoLiveKitSTT:
                 requested_language = self._language
                 if language is not NOT_GIVEN and language:
                     requested_language = str(language)
-                wav_bytes = rtc.combine_audio_frames(buffer).to_wav_bytes()
+                audio_frame = rtc.combine_audio_frames(buffer)
+                wav_bytes = audio_frame.to_wav_bytes()
                 wav_b64 = __import__("base64").b64encode(wav_bytes).decode("ascii")
                 logger.info(
-                    "voice.mimo_livekit_asr_dispatch wav_bytes=%s language=%s",
+                    "voice.mimo_livekit_asr_dispatch wav_bytes=%s language=%s audio_s=%.3f sample_rate=%s",
                     len(wav_bytes),
                     requested_language,
+                    audio_frame.duration,
+                    audio_frame.sample_rate,
                 )
                 try:
                     result = await transcribe_mimo_wav(
@@ -146,10 +164,14 @@ class MiMoLiveKitSTT:
                     result.request_id,
                     len(result.text),
                 )
+                filtered_text, echo_detail = filter_recent_tts_echo(_echo_state, result.text)
+                if filtered_text != result.text:
+                    logger.info("voice.mimo_livekit_echo_filtered reason=%s original_chars=%s kept_chars=%s",
+                                echo_detail["reason"], len(result.text), len(filtered_text))
                 return stt.SpeechEvent(
                     type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                     request_id=result.request_id,
-                    alternatives=[stt.SpeechData(text=result.text, language="zh")],
+                    alternatives=[stt.SpeechData(text=filtered_text, language="zh")],
                 )
 
         return _MiMoLiveKitSTT()
@@ -177,6 +199,7 @@ class MiMoLiveKitTTS:
                 try:
                     async for pcm in stream_mimo_tts_pcm(settings, self.input_text):
                         if audio_bytes == 0:
+                            remember_tts_text(_echo_state, self.input_text)
                             logger.info(
                                 "voice.mimo_livekit_tts_first_audio request_id=%s text_chars=%s",
                                 request_id,

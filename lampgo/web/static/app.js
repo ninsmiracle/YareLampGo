@@ -248,6 +248,7 @@
     headshake: { title: "摇头", description: "左右摇头，表达不同意。" },
     look_at: { title: "注视", description: "朝指定方向看过去。" },
     idle_sway: { title: "随机摆动", description: "轻微随机摆动，呈现呼吸般的灵动感。" },
+    conversation_gesture: { title: "对话小摆动", description: "配合回复的轻柔或俏皮小幅摆动。" },
     dance_to_music: { title: "跟音乐跳舞", description: "读取音乐节奏，按风格预设做明确律动。" },
     cat_teaser: { title: "逗猫棒互动", description: "识别逗猫棒彩色标记，根据猫咪互动状态实时摆动。" },
     move_to: { title: "移动到目标", description: "以平滑的梯形插值移动到目标关节位置。" },
@@ -2825,6 +2826,8 @@
 
     if (evt === "Esp32AudioRelayStatus") {
       if (data.state === "connecting") addCallSystemNote("正在连接 ESP32 麦克风…");
+      else if (data.state === "authenticated") addCallSystemNote("麦克风连接已建立，等待音频…");
+      else if (data.state === "recovering") addCallSystemNote("麦克风音频中断，正在重新连接…");
       else if (data.state === "connected") addCallSystemNote("ESP32 麦克风已接入，正在听你说话…");
       else if (data.state === "closed") addCallSystemNote("ESP32 麦克风通道已关闭");
       return;
@@ -6792,6 +6795,7 @@
   let esp32MediaStream = null;
   let esp32RelayActive = false;
   let esp32MicRelayStats = null;
+  let esp32InputDiagnosticsTimer = null;
   let esp32SpeakerWs = null;
   let esp32SpeakerWsOpening = null;
   let esp32SpeakerPendingFrames = [];
@@ -6800,6 +6804,8 @@
   let esp32SpeakerSource = null;
   let esp32SpeakerProcessor = null;
   let esp32SpeakerKeepaliveEl = null;
+  let esp32SpeakerTrack = null;
+  let esp32SpeakerGeneration = 0;
   let esp32SpeakerRelayStats = null;
   let remoteAudioTrack = null;
   let hangupPending = false;
@@ -6914,7 +6920,12 @@
 
   async function loadLiveKitClient() {
     if (!lkModulePromise) {
-      lkModulePromise = import("https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.esm.mjs");
+      // Ship the client with the backend: CDN availability must not gate calls.
+      lkModulePromise = import("/vendor/livekit-client/2.22.3/livekit-client.esm.mjs").catch((err) => {
+        lkModulePromise = null;
+        console.error("[call] local LiveKit client failed to load:", err);
+        throw new Error("本地通话组件加载失败，请刷新页面；若仍失败，请检查后端安装是否完整");
+      });
     }
     return lkModulePromise;
   }
@@ -6999,8 +7010,10 @@
       const timeout = window.setTimeout(() => {
         if (settled) return;
         settled = true;
-        if (esp32SpeakerWs === speakerWs) esp32SpeakerWs = null;
-        esp32SpeakerWsOpening = null;
+        if (esp32SpeakerWs === speakerWs) {
+          esp32SpeakerWs = null;
+          esp32SpeakerWsOpening = null;
+        }
         try { speakerWs.close(); } catch (_) { /* ignore */ }
         reject(new Error("ESP32 speaker WS 连接超时"));
       }, 2000);
@@ -7009,13 +7022,20 @@
         if (settled) return;
         settled = true;
         window.clearTimeout(timeout);
-        if (esp32SpeakerWs === speakerWs) esp32SpeakerWs = null;
-        esp32SpeakerWsOpening = null;
+        if (esp32SpeakerWs === speakerWs) {
+          esp32SpeakerWs = null;
+          esp32SpeakerWsOpening = null;
+        }
         reject(new Error(message));
       };
 
       speakerWs.onopen = () => {
         if (settled) return;
+        if (esp32SpeakerWs !== speakerWs) {
+          fail("ESP32 speaker WS 已被新通道替换");
+          speakerWs.close();
+          return;
+        }
         settled = true;
         window.clearTimeout(timeout);
         esp32SpeakerWsOpening = null;
@@ -7025,12 +7045,14 @@
       speakerWs.onerror = () => fail("ESP32 speaker WS 连接失败");
       speakerWs.onclose = () => {
         const wasActive = esp32SpeakerWs === speakerWs;
-        if (wasActive) esp32SpeakerWs = null;
         if (!settled) {
           fail("ESP32 speaker WS 已断开");
-        } else if (wasActive && esp32SpeakerRelayStats) {
-          console.warn("[call] ESP32 speaker relay closed after connection");
-          addCallSystemNote("ESP32 扬声器通道已断开，请检查设备音频状态");
+        } else if (wasActive) {
+          esp32SpeakerWs = null;
+          if (esp32SpeakerRelayStats) {
+            console.warn("[call] ESP32 speaker relay closed after connection");
+            addCallSystemNote("ESP32 扬声器通道已断开，请检查设备音频状态");
+          }
         }
       };
     });
@@ -7100,7 +7122,9 @@
       }
     }
     if (!esp32SpeakerWsOpening) {
+      const generation = esp32SpeakerGeneration;
       openEsp32CallSpeakerWs().catch((err) => {
+        if (generation !== esp32SpeakerGeneration) return;
         console.warn("[call] ESP32 speaker WS open failed:", err);
         esp32SpeakerPendingFrames = [];
       });
@@ -7109,7 +7133,9 @@
 
   function reopenEsp32CallSpeakerWs() {
     if (esp32SpeakerWsOpening) return;
+    const generation = esp32SpeakerGeneration;
     openEsp32CallSpeakerWs().catch((err) => {
+      if (generation !== esp32SpeakerGeneration) return;
       console.warn("[call] ESP32 speaker WS reopen failed:", err);
       esp32SpeakerPendingFrames = [];
     });
@@ -7204,6 +7230,7 @@
 
   async function startEsp32SpeakerRelay(remoteTrack) {
     cleanupEsp32SpeakerRelay();
+    const generation = esp32SpeakerGeneration;
     esp32SpeakerPendingFrames = [];
     esp32SpeakerPcmRemainder = new Int16Array(0);
     esp32SpeakerRelayStats = {
@@ -7218,6 +7245,7 @@
       console.warn("[call] ESP32 speaker relay skipped: no MediaStreamTrack on remote track");
       return false;
     }
+    esp32SpeakerTrack = remoteTrack;
 
     try {
       esp32SpeakerKeepaliveEl = remoteTrack.attach();
@@ -7231,16 +7259,20 @@
       console.warn("[call] ESP32 speaker relay keepalive attach failed:", err);
     }
 
-    esp32SpeakerCtx = new AudioContext({ sampleRate: 48000 });
-    if (esp32SpeakerCtx.state === "suspended") {
-      try { await esp32SpeakerCtx.resume(); } catch (_) { /* ignore */ }
+    const context = new AudioContext({ sampleRate: 48000 });
+    esp32SpeakerCtx = context;
+    if (context.state === "suspended") {
+      try { await context.resume(); } catch (_) { /* ignore */ }
     }
+    // A newer subscription or hangup can arrive while resume() is pending.
+    if (generation !== esp32SpeakerGeneration) return false;
     const stream = new MediaStream([mediaTrack]);
     esp32SpeakerSource = esp32SpeakerCtx.createMediaStreamSource(stream);
     esp32SpeakerProcessor = esp32SpeakerCtx.createScriptProcessor(2048, 1, 1);
     esp32SpeakerProcessor.onaudioprocess = (event) => {
+      if (generation !== esp32SpeakerGeneration) return;
       const input = event.inputBuffer.getChannelData(0);
-      sendEsp32SpeakerSamples(input, esp32SpeakerCtx.sampleRate);
+      sendEsp32SpeakerSamples(input, context.sampleRate);
     };
     esp32SpeakerSource.connect(esp32SpeakerProcessor);
     // Keep the processor alive without audible local playback.
@@ -7254,7 +7286,10 @@
     return true;
   }
 
-  function cleanupEsp32SpeakerRelay() {
+  function cleanupEsp32SpeakerRelay(expectedTrack = null) {
+    // Late unsubscription of an old track must not tear down its replacement.
+    if (expectedTrack && esp32SpeakerTrack !== expectedTrack) return;
+    esp32SpeakerGeneration += 1;
     if (esp32SpeakerProcessor) {
       try { esp32SpeakerProcessor.disconnect(); } catch (_) { /* ignore */ }
       const silentGain = esp32SpeakerProcessor._silentGain;
@@ -7275,11 +7310,12 @@
     }
     if (esp32SpeakerKeepaliveEl) {
       try {
-        if (remoteAudioTrack) remoteAudioTrack.detach(esp32SpeakerKeepaliveEl);
+        if (esp32SpeakerTrack) esp32SpeakerTrack.detach(esp32SpeakerKeepaliveEl);
       } catch (_) { /* ignore */ }
       try { esp32SpeakerKeepaliveEl.remove(); } catch (_) { /* ignore */ }
       esp32SpeakerKeepaliveEl = null;
     }
+    esp32SpeakerTrack = null;
     closeEsp32CallSpeakerWs(true);
     esp32SpeakerRelayStats = null;
   }
@@ -7338,13 +7374,14 @@
     if (esp32AudioCtx.state === "suspended") {
       try { await esp32AudioCtx.resume(); } catch (_) { /* ignore */ }
     }
-    await esp32AudioCtx.audioWorklet.addModule("/esp32-pcm-worklet.js?v=20260709");
+    await esp32AudioCtx.audioWorklet.addModule("/esp32-pcm-worklet.js?v=20260918-input-jitter");
 
     esp32WorkletNode = new AudioWorkletNode(esp32AudioCtx, "esp32-pcm-processor");
     const dest = esp32AudioCtx.createMediaStreamDestination();
     esp32WorkletNode.connect(dest);
     esp32MediaStream = dest.stream;
     esp32MicRelayStats = { frames: 0, voicedFrames: 0, lastVoiceAt: 0, echoMutedFrames: 0 };
+    startEsp32InputDiagnostics(esp32WorkletNode, esp32AudioCtx);
 
     send({ type: "start_esp32_relay" });
     esp32RelayActive = true;
@@ -7352,12 +7389,68 @@
     return esp32MediaStream.getAudioTracks()[0];
   }
 
+  function startEsp32InputDiagnostics(node, context) {
+    if (esp32InputDiagnosticsTimer) window.clearInterval(esp32InputDiagnosticsTimer);
+    let output = {}, lastOutputAt = Date.now(), statsAt = 0, rtc = {}, pending = false;
+    let processorFailed = false;
+    node.port.onmessage = ({ data }) => {
+      if (esp32WorkletNode !== node) return;
+      output = data;
+      lastOutputAt = Date.now();
+    };
+    node.onprocessorerror = () => {
+      if (esp32WorkletNode !== node) return;
+      processorFailed = true;
+      console.error("[call] ESP32 microphone AudioWorklet processor failed");
+      addCallSystemNote("麦克风音频处理失败，请挂断后重新接通；诊断信息已记录。");
+    };
+    esp32InputDiagnosticsTimer = window.setInterval(() => {
+      if (esp32WorkletNode !== node) return;
+      const track = lkLocalTrack;
+      const report = {
+        type: "voice_input_diagnostics", client_call_id: lkClientCallId,
+        ctx: context.state, track_state: track?.mediaStreamTrack?.readyState || "none",
+        track_enabled: track?.mediaStreamTrack?.enabled ? 1 : 0,
+        processor_failed: processorFailed ? 1 : 0,
+        frames: esp32MicRelayStats?.frames || 0,
+        echo_muted: esp32MicRelayStats?.echoMutedFrames || 0,
+        output_gap_ms: Date.now() - lastOutputAt,
+        stats_age_ms: statsAt ? Date.now() - statsAt : -1,
+        ...output, ...rtc,
+      };
+      console.log("[call] ESP32 input diagnostics", JSON.stringify(report));
+      send(report);
+      if (!pending && track && typeof track.getRTCStatsReport === "function") {
+        pending = true;
+        Promise.resolve().then(() => track.getRTCStatsReport()).then(stats => {
+          if (esp32WorkletNode !== node || lkLocalTrack !== track || !stats) return;
+          const next = {};
+          stats.forEach(s => {
+            if (s.type === "outbound-rtp" && (s.kind === "audio" || s.mediaType === "audio")) {
+              next.packets_sent = (next.packets_sent || 0) + (s.packetsSent || 0);
+              next.bytes_sent = (next.bytes_sent || 0) + (s.bytesSent || 0);
+            }
+          });
+          rtc = next;
+          statsAt = Date.now();
+        }).catch(() => { /* stats_age_ms exposes a missing stats response */ })
+          .finally(() => { pending = false; });
+      }
+    }, 5000);
+  }
+
   function cleanupEsp32AudioTrack() {
+    if (esp32InputDiagnosticsTimer) {
+      window.clearInterval(esp32InputDiagnosticsTimer);
+      esp32InputDiagnosticsTimer = null;
+    }
     if (esp32RelayActive) {
       send({ type: "stop_esp32_relay" });
       esp32RelayActive = false;
     }
     if (esp32WorkletNode) {
+      esp32WorkletNode.port.onmessage = null;
+      esp32WorkletNode.onprocessorerror = null;
       try { esp32WorkletNode.disconnect(); } catch (_) { /* ignore */ }
       esp32WorkletNode = null;
     }
@@ -7388,6 +7481,43 @@
     throw err;
   }
 
+  function installCallRecoveryHandlers(room, useEsp32) {
+    const isCurrent = () => (lkRoom === room || browserCallJoiningRoom === room)
+      && !browserCallStopRequested && browserCallDisconnectingRoom !== room;
+    room.on("connectionStateChanged", (state) => {
+      if (!isCurrent()) return;
+      console.info("[call] RTC connection state", JSON.stringify({
+        at: new Date().toISOString(), state,
+        micFrames: esp32MicRelayStats?.frames || 0,
+        speakerFrames: esp32SpeakerRelayStats?.frames || 0,
+        speakerVoicedFrames: esp32SpeakerRelayStats?.voicedFrames || 0,
+        micContext: esp32AudioCtx?.state || "none",
+        speakerContext: esp32SpeakerCtx?.state || "none",
+      }));
+    });
+    room.on("reconnecting", () => {
+      if (!isCurrent()) return;
+      addCallSystemNote("云端语音连接中断，正在重连；当前语音可能不完整…");
+    });
+    room.on("reconnected", () => {
+      if (!isCurrent()) return;
+      addCallSystemNote("云端连接已恢复，正在恢复音频通道");
+      if (!useEsp32) return;
+      if (esp32AudioCtx?.state === "suspended") {
+        esp32AudioCtx.resume().catch((err) => {
+          if (isCurrent()) addCallSystemNote(`麦克风恢复失败：${err.message || err}`);
+        });
+      }
+      // Rebind Web Audio to the recovered RTC track. Transport recovery alone
+      // does not rebuild the device relay, and the SDK may retain its track SID.
+      if (remoteAudioTrack) {
+        startEsp32SpeakerRelay(remoteAudioTrack).catch((err) => {
+          if (isCurrent()) addCallSystemNote(`扬声器恢复失败：${err.message || err}`);
+        });
+      }
+    });
+  }
+
   async function startBrowserLiveKitCall(options = {}) {
     const reason = options.reason || "manual";
     if (browserCallStartPromise) return browserCallStartPromise;
@@ -7408,17 +7538,16 @@
       const useEsp32 = selectedMicId === "esp32";
       const callAttemptId = browserCallPendingId || `${browserCallClientId}_${Date.now().toString(36)}`;
       browserCallPendingId = callAttemptId;
-      const modeLabel = VOICE_CALL_MODE_LABELS[voiceCallMode] || VOICE_CALL_MODE_LABELS.stable;
       let room = null;
       let issuedRoomName = "";
       try {
         console.log("[call] starting LiveKit call", {
           reason,
           mic: useEsp32 ? "esp32" : (selectedMicId || "default"),
-          callMode: voiceCallMode,
-          echoGateHangoverMs: voiceEchoGateHangoverMs,
-          echoTextFilter: voiceEchoTextFilterEnabled,
         });
+        addCallSystemNote("正在加载本地通话组件…");
+        const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
+        throwIfBrowserCallStopRequested();
         addCallSystemNote("正在获取 LiveKit 通话令牌…");
         const resp = await fetch("/api/livekit/token", {
           method: "POST",
@@ -7446,12 +7575,14 @@
         issuedRoomName = roomName || "";
         lkRoomName = issuedRoomName;
         lkClientCallId = callAttemptId;
-        throwIfBrowserCallStopRequested();
-        const { Room, Track, LocalAudioTrack, createLocalAudioTrack } = await loadLiveKitClient();
+        applyCallVoiceConfig(body.voice_config);
+        const modeLabel = VOICE_CALL_MODE_LABELS[voiceCallMode];
+        console.info(`[call] effective voice config mode=${voiceCallMode} echoGateHangoverMs=${voiceEchoGateHangoverMs} echoTextFilter=${voiceEchoTextFilterEnabled}`);
         throwIfBrowserCallStopRequested();
         room = new Room({ adaptiveStream: false, dynacast: false });
         browserCallJoiningRoom = room;
         room.on("trackSubscribed", (track) => {
+          if (lkRoom !== room && browserCallJoiningRoom !== room) return;
           if (track.kind !== Track.Kind.Audio) return;
           remoteAudioTrack = track;
           console.log("[call] remote audio track subscribed", {
@@ -7492,9 +7623,10 @@
           }
         });
         room.on("trackUnsubscribed", (track) => {
+          if (lkRoom !== room && browserCallJoiningRoom !== room) return;
           if (remoteAudioTrack === track) remoteAudioTrack = null;
           if (useEsp32) {
-            cleanupEsp32SpeakerRelay();
+            cleanupEsp32SpeakerRelay(track);
             return;
           }
           track.detach().forEach((el) => {
@@ -7502,6 +7634,7 @@
             el.remove();
           });
         });
+        installCallRecoveryHandlers(room, useEsp32);
         room.on("disconnected", () => {
           if (browserCallDisconnectingRoom === room || browserCallDisconnectPromises.has(room)) return;
           if (lkRoom !== room && browserCallJoiningRoom !== room) return;
@@ -9271,6 +9404,7 @@
     const mtEl = document.getElementById("cfg-llm-message-type");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
+    const fallbackEnabledEl = document.getElementById("cfg-llm-fallback-enabled");
 
     // Custom provider: leave everything to the user — we have no URL
     // to suggest, and overwriting a user-typed Base URL would be
@@ -9310,8 +9444,14 @@
       // below surfaces the mismatch.
     }
 
-    if (modelEl && !modelEl.value.trim() && preset.default_model) modelEl.value = preset.default_model;
-    if (fastEl && !fastEl.value.trim() && preset.default_fast_model) fastEl.value = preset.default_fast_model;
+    if (source === "provider" && provider === "deepseek") {
+      if (modelEl && preset.default_model) modelEl.value = preset.default_model;
+      if (fastEl && preset.default_fast_model) fastEl.value = preset.default_fast_model;
+      if (fallbackEnabledEl) fallbackEnabledEl.checked = true;
+    } else {
+      if (modelEl && !modelEl.value.trim() && preset.default_model) modelEl.value = preset.default_model;
+      if (fastEl && !fastEl.value.trim() && preset.default_fast_model) fastEl.value = preset.default_fast_model;
+    }
   }
 
   // Surface a soft warning in the LLM status strip when the chosen
@@ -9377,6 +9517,10 @@
     const keyEl = document.getElementById("cfg-llm-api-key");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
+    const fallbackEnabledEl = document.getElementById("cfg-llm-fallback-enabled");
+    const fallbackAfterEl = document.getElementById("cfg-llm-fallback-after");
+    const fallbackModelEl = document.getElementById("cfg-llm-fallback-model");
+    const fallbackKeyEl = document.getElementById("cfg-llm-fallback-api-key");
     const mtEl = document.getElementById("cfg-llm-message-type");
     const ctxEl = document.getElementById("cfg-llm-context-window");
     const maxTokEl = document.getElementById("cfg-llm-max-tokens");
@@ -9412,6 +9556,15 @@
       }
       if (modelEl) modelEl.value = result.model || "";
       if (fastEl) fastEl.value = result.fast_model || "";
+      if (fallbackEnabledEl) fallbackEnabledEl.checked = !!result.fallback_enabled;
+      if (fallbackAfterEl && typeof result.fallback_after_s === "number") fallbackAfterEl.value = String(result.fallback_after_s);
+      if (fallbackModelEl) fallbackModelEl.value = result.fallback_model || "mimo-v2.5";
+      if (fallbackKeyEl) {
+        fallbackKeyEl.value = "";
+        fallbackKeyEl.placeholder = result.fallback_api_key_is_set
+          ? (result.fallback_api_key_preview || "MiMo Key 已设置（留空保持不变）")
+          : "mimo-api-key-placeholder";
+      }
       if (mtEl && result.message_type) mtEl.value = result.message_type;
       if (ctxEl && typeof result.context_window === "number") {
         ctxEl.value = String(result.context_window);
@@ -9448,6 +9601,10 @@
     const keyEl = document.getElementById("cfg-llm-api-key");
     const modelEl = document.getElementById("cfg-llm-model");
     const fastEl = document.getElementById("cfg-llm-fast-model");
+    const fallbackEnabledEl = document.getElementById("cfg-llm-fallback-enabled");
+    const fallbackAfterEl = document.getElementById("cfg-llm-fallback-after");
+    const fallbackModelEl = document.getElementById("cfg-llm-fallback-model");
+    const fallbackKeyEl = document.getElementById("cfg-llm-fallback-api-key");
     const mtEl = document.getElementById("cfg-llm-message-type");
     const ctxEl = document.getElementById("cfg-llm-context-window");
     const maxTokEl = document.getElementById("cfg-llm-max-tokens");
@@ -9500,6 +9657,11 @@
           })()
         : null,
       enable_thinking: thinkingEl ? !!thinkingEl.checked : false,
+      fallback_enabled: fallbackEnabledEl ? !!fallbackEnabledEl.checked : false,
+      fallback_after_s: parseFloatOrNull(fallbackAfterEl),
+      fallback_provider: "mimo",
+      fallback_model: fallbackModelEl ? fallbackModelEl.value.trim() : "mimo-v2.5",
+      fallback_api_key: fallbackKeyEl && fallbackKeyEl.value ? fallbackKeyEl.value : "",
       share_codex_memory: shareEl ? shareEl.checked : undefined,
       web_search_enabled: useMimoWebSearch,
     };
@@ -9517,6 +9679,15 @@
         keyEl.placeholder = result.api_key_is_set ? (result.api_key_preview || "已设置（留空保持不变）") : "api-key-placeholder";
       }
       settingsApiKeyIsSet = !!result.api_key_is_set;
+      if (fallbackKeyEl) {
+        fallbackKeyEl.value = "";
+        fallbackKeyEl.placeholder = result.fallback_api_key_is_set
+          ? (result.fallback_api_key_preview || "MiMo Key 已设置（留空保持不变）")
+          : "mimo-api-key-placeholder";
+      }
+      if (fallbackEnabledEl) fallbackEnabledEl.checked = !!result.fallback_enabled;
+      if (fallbackAfterEl && typeof result.fallback_after_s === "number") fallbackAfterEl.value = String(result.fallback_after_s);
+      if (fallbackModelEl) fallbackModelEl.value = result.fallback_model || "mimo-v2.5";
       if (ctxEl && typeof result.context_window === "number") ctxEl.value = String(result.context_window);
       if (maxTokEl && typeof result.max_tokens === "number") maxTokEl.value = String(result.max_tokens);
       if (sumMaxTokEl && typeof result.summary_max_tokens === "number") sumMaxTokEl.value = String(result.summary_max_tokens);
@@ -10355,6 +10526,15 @@
       btn.classList.toggle("is-active", active);
       btn.setAttribute("aria-checked", active ? "true" : "false");
     });
+  }
+
+  function applyCallVoiceConfig(config) {
+    if (!config || !Object.hasOwn(VOICE_CALL_MODE_LABELS, config.call_mode)) {
+      throw new Error("通话配置未同步，请重启后端并刷新页面后重试");
+    }
+    for (const field of ["call_mode", "echo_gate_hangover_ms", "echo_text_filter_enabled"]) {
+      applyVoiceRuntimeField(`voice.${field}`, config[field]);
+    }
   }
 
   function applyVoiceRuntimeField(dotted, value) {

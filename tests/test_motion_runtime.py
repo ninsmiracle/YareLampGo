@@ -372,3 +372,126 @@ def test_motion_recovery_feedback_warning_does_not_release_torque():
         assert motion.recovery_error is None
     finally:
         motion.stop()
+
+
+def test_recovery_lead_clamp_never_reverses_after_feedback_retreats():
+    from lampgo.core.config import SafetyConfig
+    from lampgo.core.safety import SafetyKernel
+    from lampgo.core.types import JointState
+
+    safety = SafetyKernel(SafetyConfig(max_velocity=120.0))
+    for direction in (1, -1):
+        previous = -12.0 * direction
+        for actual in (-21.0, -20.1, -21.5, -19.0, -18.0):
+            command = safety.validate_recovery_frame(
+                JointState(positions={"base_pitch": actual * direction}),
+                {"base_pitch": 0.0}, {"base_pitch": 0.0}, 0.02,
+                max_velocity=30.0, command_reference={"base_pitch": previous}, max_command_lead=8.0,
+            )["base_pitch"]
+            assert (command - previous) * direction >= 0  # P4 directed() invariant
+            assert abs(command - previous) <= 0.6 + 1e-9
+            if abs(previous - actual * direction) > 8:
+                assert command == previous  # hold, never increase an existing lead
+            else:
+                assert abs(command - actual * direction) <= 8 + 1e-9
+            previous = command
+
+
+def test_recovery_transport_failure_finishes_waiter_and_stops_retries():
+    import threading
+    from lampgo.core.config import MotionConfig, SafetyConfig
+    from lampgo.core.motion import MotionRuntime
+    from lampgo.core.safety import SafetyKernel
+    from lampgo.core.types import JointState
+
+    for failure in ("read", "write"):
+        class Hal:
+            motor_names = ["base_pitch"]
+            recovery_required = True
+            fail = threading.Event()
+            attempts = 0
+            failures = 0
+
+            def read_recovery_start(self):
+                return {"base_pitch": -20.0}
+
+            def prepare_recovery(self, frames):
+                return self.read_recovery_start()
+
+            def read_positions(self):
+                if failure == "read" and self.fail.is_set():
+                    self.failures += 1
+                    raise RuntimeError("P4 servo telemetry is stale")
+                return JointState(positions=self.read_recovery_start())
+
+            def write_recovery_positions(self, positions):
+                self.attempts += 1
+                if failure == "write" and self.fail.is_set():
+                    self.failures += 1
+                    raise RuntimeError("P4 recovery has not been prepared: hard_fault")
+
+            def write_positions(self, *args, **kwargs):
+                raise AssertionError("must not fall back to ordinary motion")
+
+            def disable_torque(self):
+                raise AssertionError("failure must not issue torque-off")
+
+        hal = Hal()
+        motion = MotionRuntime(hal, SafetyKernel(SafetyConfig()), MotionConfig(breathing_enabled=False))
+        frames = motion.prepare_recovery({"base_pitch": 0.0}, max_velocity=30, fps=50)
+        try:
+            done = motion.stream_recovery_frames(frames, fps=50)
+            assert _wait_for(lambda: hal.attempts > 3)
+            hal.fail.set()
+            assert done.wait(1)
+            assert not motion.is_running
+            assert motion.status.stalled
+            assert "Recovery" in motion.recovery_error
+            attempts = hal.attempts
+            time.sleep(0.1)
+            assert hal.attempts == attempts
+            assert hal.failures == 1
+            assert motion._recovery_target is None
+            # An explicit new recovery performs preflight again and clears the
+            # old failure; reconnect alone never resumes the old trajectory.
+            motion.stop()
+            hal.fail.clear()
+            frames = motion.prepare_recovery({"base_pitch": 0.0}, max_velocity=30, fps=50)
+            assert motion.recovery_error is None
+        finally:
+            motion.stop()
+
+
+def test_cancel_during_recovery_settling_does_not_report_target_reached(monkeypatch):
+    import threading
+    from unittest.mock import Mock
+    from lampgo.core import motion as module
+    from lampgo.core.config import MotionConfig, SafetyConfig
+    from lampgo.core.safety import SafetyKernel
+    from lampgo.core.types import JointState
+
+    settling = threading.Event()
+    logger = Mock()
+    logger.info.side_effect = lambda event, **kw: settling.set() if event == "motion.recovery_holding_target" else None
+    monkeypatch.setattr(module, "logger", logger)
+
+    class Hal:
+        motor_names = ["base_pitch"]
+        recovery_required = True
+
+        def read_recovery_start(self): return {"base_pitch": -10.0}
+        def prepare_recovery(self, frames): return self.read_recovery_start()
+        def read_positions(self): return JointState(positions=self.read_recovery_start())
+        def write_recovery_positions(self, positions): pass
+
+    motion = module.MotionRuntime(Hal(), SafetyKernel(SafetyConfig()), MotionConfig(breathing_enabled=False))
+    frames = motion.prepare_recovery({"base_pitch": 0.0}, max_velocity=30, fps=50)
+    try:
+        done = motion.stream_recovery_frames(frames, fps=50)
+        assert settling.wait(1)
+        motion.stop_immediate()
+        assert done.wait(1)
+        time.sleep(0.08)
+        assert not any(c.args[0] == "motion.recovery_target_reached" for c in logger.info.call_args_list)
+    finally:
+        motion.stop()

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -23,6 +24,15 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 MIMO_WEB_SEARCH_MODELS = {"mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash", "mimo-v2.5"}
+_VOICE_DISPLAY_OWNER_TOOLS = {
+    "set_expression", "play_recording", "show_clock", "start_electronic_ocean", "enter_lighting_mode",
+}
+_VOICE_MOTION_OWNER_TOOLS = {
+    "play_recording", "conversation_gesture", "idle_sway", "nod", "headshake", "look_at",
+    "move_to", "return_safe", "estop", "cat_teaser", "dance", "dance_to_music",
+    "scan_and_capture", "capture_image", "enter_lighting_mode", "exit_lighting_mode",
+    "show_clock", "start_electronic_ocean", "presence_react", "face_follow",
+}
 
 # -----------------------------------------------------------------------------
 # MiMo web search sub-service — always uses MiMo OpenAI-compat wire format.
@@ -46,7 +56,8 @@ def _resolve_web_search_api_key(config: LLMConfig) -> str:
       1. ``web_search_api_key`` if the user filled it in explicitly.
       2. ``api_key`` ONLY if ``provider == "mimo"`` (same key is known to
          authenticate against ``api.xiaomimimo.com``).
-      3. Empty string → sub-service disabled (tool won't be registered).
+      3. Configured MiMo fallback key, when the primary is another provider.
+      4. Empty string → sub-service disabled (tool won't be registered).
 
     Keeping this a free function makes it easy to unit-test in isolation
     and makes the reuse semantics explicit for future readers.
@@ -57,9 +68,23 @@ def _resolve_web_search_api_key(config: LLMConfig) -> str:
     provider = LLMConfig.normalize_provider_alias(config.provider or "")
     if isinstance(provider, str) and provider.strip().lower() == "mimo":
         return (config.api_key or "").strip()
+    fallback_provider = LLMConfig.normalize_provider_alias(config.fallback_provider or "")
+    if isinstance(fallback_provider, str) and fallback_provider.strip().lower() == "mimo":
+        return (config.fallback_api_key or "").strip()
     return ""
 
 _MIMO_MIN_COMPLETION_TOKENS = 4096
+_VOICE_SEARCH_TIMEOUT_S = 20.0
+
+
+@dataclass(frozen=True)
+class _RequestTarget:
+    """One OpenAI-compatible provider attempt, without mutating live config."""
+
+    provider: str
+    api_base: str
+    api_key: str
+    model: str
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a smart desk lamp robot with a camera mounted on your lamp head — it is your eye. Solve the user's request by calling tools.
 
 Physical invariants (NON-NEGOTIABLE — override anything in the persona / memory blocks below):
@@ -88,7 +113,9 @@ Rules:
 - You may call tools multiple times.
 - After each tool call, you will receive the tool result before deciding the next step.
 - CRITICAL: Never describe an action you intend to take — ALWAYS call the tool instead. If you say "show a heart" or "light up", you MUST call set_expression BEFORE finish_response. Words without tool calls are empty promises.
-- When calling `set_expression`, use one of the exact LED mode keys from the prompt block.
+- When calling `set_expression`, prefer an exact saved preset_id from the expression catalog below:
+  a preset coordinates screen eyes and LED mouth. Use a standalone LED mode only when the user
+  specifically requests it or no suitable preset exists.
 - For look_at, yaw and pitch are ABSOLUTE angles for base_yaw and base_pitch. To adjust camera tilt, use move_to with wrist_pitch.
 - The attached image (if any) is what you currently see through your camera. Use it to understand the scene.
 - To see the latest view after moving, call capture_image. To search for something while rotating, call scan_and_capture.
@@ -131,6 +158,55 @@ Efficiency:
 - If a tool result contains "stalled":true, the target position is physically unreachable. Do NOT retry the same or a nearby target — accept the actual position and move on.
 - After scan_and_capture completes, you already have all the images. Analyze them immediately and call finish_response. Do NOT do extra move_to + capture_image cycles unless the scan clearly missed the area you need.
 - Aim to finish in as few turns as possible. Every extra turn costs real time (~5-7s each)."""
+
+
+VOICE_CALL_PROMPT = """
+
+Voice call mode:
+- Use at most ONE web_search per user turn. Include the date and specific facts needed in that query.
+  If search times out or gives incomplete/Loading results, say what could not be verified; never
+  invent weather, temperatures, wind or other missing facts. Do not retry with a reworded query.
+- Be an expressive companion, not just a speaker. Proactively choose an existing combined expression
+  that fits the meaning and emotional tone of the conversation; do not wait for the user to request a face.
+  Read preset labels and descriptions, including user-created combinations. Prefer suitable saved
+  combinations over LED-only smiley/heart modes. Never invent an asset id or create a new preset.
+- In say.expression_preset, select the best matching saved preset for a substantive spoken reply.
+  The runtime loops that combined animation alongside your speech in the SAME tool-call batch,
+  keeping it animated until another expression or display mode replaces it. For an explicit
+  one-shot request, use set_expression with playback="once" instead.
+  Use "none" when the user wants no reactions, a current mode/task must be preserved, the same face
+  should remain, or a play_recording/set_expression call already handles this turn's expression.
+  A warm greeting normally deserves a matching greeting face even without a physical gesture.
+  Put finish_response
+  LAST, after expression and any action calls. This lets speech and the face begin in the same turn
+  instead of spending a second model round on a delayed reaction. Do not narrate routine face changes.
+- Set say.response_complete=true for your final spoken answer when no further work is needed.
+  The runtime can finish that reply without another model round. Use false for an interim
+  acknowledgement before actions, searches, or observations that still need to happen.
+- Use at most one conversational expression per user turn unless the user explicitly asks for a
+  sequence. Do not change faces for every sentence or repeatedly replay the same face without a
+  change in emotion. Respect requests for stillness, no expressions, or speech only.
+- Pair ordinary spoken replies with BOTH an animated combined face and a small companion gesture.
+  Use say.motion="idle_sway" for calm gentle random sway, "playful_sway" for a small playful
+  cat-teaser-like gesture, or "auto" to alternate these styles. This is the default even for
+  factual answers. It runs alongside speech; it does not start camera tracking or cat_teaser mode.
+  Use "none" for requests to stay still/speech only, an active display/lighting mode or foreground
+  task, or when an explicit action already expresses the reply. Do not narrate these routine sways.
+  When the meaning strongly calls for a specific action, call play_recording with its exact saved
+  name and matching expression instead. Do not add the default sway on top of an explicit action.
+  Do not invent joint poses, sweep the desk, dance, or start a continuous mode to decorate speech.
+- If a chosen play_recording already includes an expression_preset, use that bound combination;
+  do not issue a competing set_expression. Briefly signal physical movement through say, then
+  execute through the existing skill tools. A rejected/unavailable motion must not be retried or
+  described as completed; continue the conversation naturally.
+- Preserve an active lighting/clock/ocean mode, busy foreground task, or recovery state. Do not
+  replace these with unsolicited faces or gestures; a user's explicit mode-change request is separate.
+- If the user clearly wants to end the call
+  (e.g. 再见、拜拜、挂断、结束通话、先这样、不聊了、退下、退下吧、下去吧、bye),
+  call end_conversation with a short goodbye message. Do not add a gesture that delays hangup.
+- Do not call end_conversation for ordinary task completion or when ending is only an example.
+- end_conversation is terminal: do not call finish_response in the same turn.
+"""
 
 
 @dataclass
@@ -300,6 +376,7 @@ def _build_agent_tools(
     has_camera: bool = False,
     *,
     call_mode: bool = False,
+    expression_preset_ids: list[str] | None = None,
 ) -> list[dict]:
     tools = _build_skill_tools_from_skills(skills)
     if has_camera:
@@ -322,14 +399,38 @@ def _build_agent_tools(
                 },
             )
         )
+    speech_properties = {
+        "text": {"type": "string", "description": "Text to speak aloud — concise, lively, and complete enough for the user to hear"},
+    }
+    speech_required = ["text"]
+    if call_mode:
+        speech_properties["motion"] = {
+            "type": "string", "enum": ["auto", "idle_sway", "playful_sway", "none"],
+            "description": "Reply companion gesture, default auto. Use none for stillness, preserved modes or explicit actions.",
+        }
+        speech_required.append("motion")
+        speech_properties["response_complete"] = {
+            "type": "boolean",
+            "description": "True only for the final answer with no remaining work; false for interim narration.",
+        }
+        speech_required.append("response_complete")
+    if call_mode and expression_preset_ids:
+        speech_properties["expression_preset"] = {
+            "type": "string",
+            "enum": ["none", *expression_preset_ids],
+            "description": (
+                "Choose the existing combined face that fits this reply using catalog labels/descriptions. "
+                "It loops with speech and stays animated. Choose none to preserve the current face/mode, respect no-reaction "
+                "requests, or let a separate expression/recorded action supply the face."
+            ),
+        }
+        speech_required.append("expression_preset")
     tools.append(
         _build_function_tool(
             "say",
             "The sole user-facing spoken output channel. Use this for every answer, fact, observation, result, apology, or action narration the user should hear. You may call this before finish_response in the same final turn.",
-            {
-                "text": {"type": "string", "description": "Text to speak aloud — concise, lively, and complete enough for the user to hear"},
-            },
-            ["text"],
+            speech_properties,
+            speech_required,
         )
     )
     tools.append(
@@ -407,12 +508,79 @@ def _build_agent_tools(
     return tools
 
 
+def _expand_voice_expression_calls(
+    calls: list[dict], preset_ids: set[str], *, expression_used: bool, turn_index: int,
+) -> list[dict]:
+    """Lower a model-selected speech face into the ordinary audited skill path."""
+    names = {call.get("function", {}).get("name") for call in calls}
+    if expression_used or names & (_VOICE_DISPLAY_OWNER_TOOLS | {"end_conversation", "escalate_to_agent"}):
+        return calls
+    for index, call in enumerate(calls):
+        function = call.get("function", {})
+        if function.get("name") != "say":
+            continue
+        try:
+            args = json.loads(function.get("arguments", "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(args, dict) or not str(args.get("text") or "").strip():
+            continue
+        preset = args.get("expression_preset", "p4_attentive" if "p4_attentive" in preset_ids else "none")
+        if not isinstance(preset, str) or preset == "none" or preset not in preset_ids:
+            continue
+        expression = {
+            "id": f"voice_expression_{turn_index}_{index}",
+            "type": "function",
+            "function": {
+                "name": "set_expression",
+                "arguments": json.dumps({"expression": preset, "playback": "loop", "preserve_activity": True}),
+            },
+        }
+        # The generated call is included in the assistant/tool exchange so
+        # actual success/failure remains visible to the model and diagnostics.
+        return [expression, *calls]
+    return calls
+
+
+def _expand_voice_gesture_calls(calls: list[dict], *, used: bool, available: bool,
+                                turn_index: int, default_style: str, user_text: str) -> list[dict]:
+    names = {call.get("function", {}).get("name") for call in calls}
+    if (used or not available or names & (_VOICE_MOTION_OWNER_TOOLS | {"end_conversation", "escalate_to_agent"})
+            or re.search(r"别动|不要动|不用动|保持不动|不要.*动作|只[要需]?说话|speech only|stay still|don.t move", user_text, re.I)):
+        return calls
+    for index, call in enumerate(calls):
+        if call.get("function", {}).get("name") != "say":
+            continue
+        try:
+            args = json.loads(call["function"].get("arguments", "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(args, dict) or not str(args.get("text") or "").strip():
+            continue
+        style = args.get("motion", "auto")
+        if style == "auto":
+            style = default_style
+        if style not in {"idle_sway", "playful_sway"}:
+            return calls
+        gesture = {"id": f"voice_gesture_{turn_index}_{index}", "type": "function", "function": {
+            "name": "conversation_gesture",
+            "arguments": json.dumps({"style": style, "duration": min(8.0, max(4.0, len(args["text"]) / 5.0))}),
+        }}
+        # Set the face first; a long motion call must not delay facial playback.
+        position = next((i for i, c in enumerate(calls) if c.get("function", {}).get("name") in {
+            "finish_response", "end_conversation", "escalate_to_agent",
+        }), len(calls))
+        return [*calls[:position], gesture, *calls[position:]]
+    return calls
+
+
 def _build_agent_system_prompt(
     joint_state: dict[str, float] | None = None,
     *,
     persona: Any = None,
     memory: Any = None,
     recording_actions_prompt: str = "",
+    call_mode: bool = False,
 ) -> str:
     if joint_state:
         parts = [f"{k}={v:.1f}" for k, v in joint_state.items()]
@@ -432,12 +600,13 @@ def _build_agent_system_prompt(
                 memory_block = rendered.rstrip() + "\n\n"
     except Exception:
         logger.exception("llm_client.persona_memory_render_failed")
-    return AGENT_SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = AGENT_SYSTEM_PROMPT_TEMPLATE.format(
         persona_block=persona_block,
         memory_block=memory_block,
         joint_state_block=joint_block,
         recording_actions_block=recording_actions_prompt,
     )
+    return prompt + (VOICE_CALL_PROMPT if call_mode else "")
 
 
 class LLMClient:
@@ -468,6 +637,7 @@ class LLMClient:
         self._is_mimo_model = config.fast_model.strip().lower() in MIMO_WEB_SEARCH_MODELS
         self._max_turns = config.max_agent_turns
         self._max_tool_calls = config.max_agent_tool_calls
+        self._voice_gesture_counter = 0
 
     async def run_agent_loop(
         self,
@@ -522,23 +692,25 @@ class LLMClient:
             persona=persona,
             memory=memory,
             recording_actions_prompt=recording_actions_prompt,
+            call_mode=call_mode,
         )
-        if call_mode:
-            system_prompt += (
-                "\n\nVoice call mode:\n"
-                "- If the user clearly wants to end the call (e.g. 再见、拜拜、挂断、结束通话、先这样、不聊了、退下、退下吧、下去吧、bye), "
-                "call end_conversation with a short goodbye message.\n"
-                "- Do not call end_conversation for ordinary task completion or when the user only mentions ending as an example.\n"
-                "- end_conversation is terminal: do not call finish_response in the same turn.\n"
-            )
-        user_content: Any = self._build_user_content(text, audio_data)
+        user_content: Any = await asyncio.to_thread(self._build_user_content, text, audio_data)
         tools = self._agent_tools
+        expression_preset_ids: list[str] = []
         if call_mode:
+            if any(skill["skill_id"] == "set_expression" for skill in self._skill_specs):
+                try:
+                    from lampgo.expression_library import list_expression_presets
+
+                    expression_preset_ids = [item["preset_id"] for item in list_expression_presets()]
+                except Exception:
+                    logger.exception("llm_client.expression_catalog_failed")
             tools = _build_agent_tools(
                 self._skill_specs,
                 self._config,
                 has_camera=self._camera.enabled,
                 call_mode=True,
+                expression_preset_ids=expression_preset_ids,
             )
 
         # Anthropic Messages API rejects ``input_audio`` parts and has no
@@ -579,6 +751,13 @@ class LLMClient:
         consecutive_errors = 0
         max_consecutive_errors = 3
         force_tool_choice: str | dict[str, Any] | None = None
+        voice_expression_used = False
+        voice_motion_used = False
+        voice_search_used = False
+        gesture_available = any(s["skill_id"] == "conversation_gesture" for s in self._skill_specs)
+        if call_mode:
+            self._voice_gesture_counter += 1
+        default_gesture = "idle_sway" if self._voice_gesture_counter % 2 else "playful_sway"
 
         for turn_index in range(1, self._max_turns + 1):
             if on_progress is not None:
@@ -693,6 +872,21 @@ class LLMClient:
             reasoning = message.get("reasoning_content") or ""
             assistant_content = message.get("content") or ""
 
+            if call_mode:
+                tool_calls = _expand_voice_expression_calls(
+                    tool_calls, set(expression_preset_ids),
+                    expression_used=voice_expression_used, turn_index=turn_index,
+                )
+                if any(call.get("function", {}).get("name") in _VOICE_DISPLAY_OWNER_TOOLS
+                       for call in tool_calls):
+                    voice_expression_used = True
+                tool_calls = _expand_voice_gesture_calls(
+                    tool_calls, used=voice_motion_used, available=gesture_available,
+                    turn_index=turn_index, default_style=default_gesture, user_text=text,
+                )
+                if any(c.get("function", {}).get("name") in _VOICE_MOTION_OWNER_TOOLS for c in tool_calls):
+                    voice_motion_used = True
+
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": assistant_content,
@@ -708,7 +902,26 @@ class LLMClient:
                 or "end_conversation" in tool_names_in_turn
                 or "escalate_to_agent" in tool_names_in_turn
             )
-            if assistant_content and not is_terminal_turn and on_progress is not None:
+            # Providers may return the same answer in both content and say.
+            # An explicit, nonempty say is the authoritative speech channel.
+            # Keep content as fallback only when no usable say exists.
+            say_narrations: list[str] = []
+            for call in tool_calls:
+                if call.get("function", {}).get("name") != "say":
+                    continue
+                try:
+                    say_args = json.loads(call.get("function", {}).get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(say_args, dict):
+                    continue
+                narration = _strip_think_tags(str(say_args.get("text") or "")).strip()
+                if narration and not any(
+                    _normalize_spoken_text(narration) == _normalize_spoken_text(previous)
+                    for previous in say_narrations
+                ):
+                    say_narrations.append(narration)
+            if assistant_content and not say_narrations and not is_terminal_turn and on_progress is not None:
                 narration = _strip_think_tags(assistant_content).strip()
                 if narration:
                     spoken_texts.append(narration)
@@ -719,15 +932,7 @@ class LLMClient:
 
             # Process say tools first so TTS starts before action tools execute.
             # Server-side TTS serialization preserves tool-call order.
-            for call in tool_calls:
-                fn_name = call.get("function", {}).get("name", "")
-                if fn_name != "say":
-                    continue
-                try:
-                    say_args = json.loads(call.get("function", {}).get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    say_args = {}
-                narration = _strip_think_tags(str(say_args.get("text", ""))).strip()
+            for narration in say_narrations:
                 if narration and on_progress is not None:
                     has_say = True
                     spoken_texts.append(narration)
@@ -735,7 +940,9 @@ class LLMClient:
                     if isinstance(tts_task, asyncio.Task):
                         pending_tts.append(tts_task)
 
-            if has_say:
+            # LiveKit owns speech playback; delaying the whole batch here makes
+            # facial reactions lag behind speech for no synchronization benefit.
+            if has_say and not call_mode:
                 await asyncio.sleep(1.5)
 
             for tool_index, call in enumerate(tool_calls, start=1):
@@ -847,7 +1054,15 @@ class LLMClient:
                             tool_name=tool_name,
                             arguments=arguments,
                         )
-                    tool_result = await self._handle_web_search(query)
+                    if call_mode and voice_search_used:
+                        tool_result = {"status": "error", "ok": False, "error": "voice_search_budget_exhausted",
+                                       "result": None}
+                    elif call_mode:
+                        voice_search_used = True
+                        tool_result = await self._handle_voice_web_search(query)
+                        tools = [t for t in tools if t.get("function", {}).get("name") != "web_search"]
+                    else:
+                        tool_result = await self._handle_web_search(query)
                     if publish_tool_event is not None:
                         await publish_tool_event(
                             "finished",
@@ -866,7 +1081,7 @@ class LLMClient:
                             tool_name=tool_name,
                             arguments=arguments,
                         )
-                    tool_result = self._handle_capture_image(messages)
+                    tool_result = await asyncio.to_thread(self._handle_capture_image, messages)
                     logger.info("llm_client.capture_image", has_image=tool_result.get("ok", False))
                     if publish_tool_event is not None:
                         await publish_tool_event(
@@ -951,6 +1166,27 @@ class LLMClient:
 
             if pending_tts:
                 await asyncio.gather(*pending_tts, return_exceptions=True)
+
+            # A completed spoken reply plus a successful facial reaction needs
+            # no additional model request just to generate finish_response.
+            # Real actions, searches, and failed tools still require follow-up.
+            round_records = [record for record in tool_records if record.turn_index == turn_index]
+            if (
+                call_mode and has_say and round_records
+                and any(record.tool_name == "say" and record.arguments.get("response_complete") is True
+                        for record in round_records)
+                and all(record.tool_name in {"say", "set_expression", "conversation_gesture"}
+                        and record.status == "ok" for record in round_records)
+            ):
+                return AgentLoopResult(
+                    intent_type="agent" if any(r.tool_name != "say" for r in tool_records) else "chat",
+                    response="",
+                    detail="语音回复及表情已完成",
+                    stop_reason="spoken_response",
+                    tool_calls=tool_records,
+                    spoken_texts=spoken_texts[:],
+                    suppress_final_tts=True,
+                )
 
         return AgentLoopResult(
             intent_type="complex",
@@ -1111,7 +1347,7 @@ class LLMClient:
                 scan_results.append({"yaw": round(yaw, 1), "error": move_result.get("error", "move_failed")})
                 continue
 
-            image_url = self._camera.capture_data_url() if self._camera.enabled else None
+            image_url = await asyncio.to_thread(self._camera.capture_data_url) if self._camera.enabled else None
             if image_url:
                 label = f"[scan step {i+1}/{steps}] yaw={yaw:.0f}°"
                 if target_desc:
@@ -1171,6 +1407,18 @@ class LLMClient:
             }
         return [tool]
 
+    async def _handle_voice_web_search(self, query: str) -> dict[str, Any]:
+        started = time.monotonic()
+        budget = min(_VOICE_SEARCH_TIMEOUT_S, self._config.timeout_s)
+        try:
+            return await asyncio.wait_for(self._handle_web_search(query), timeout=budget)
+        except TimeoutError:
+            return {"ok": False, "status": "error", "result": None,
+                    "error": "voice_search_timeout; tell the user the information could not be verified, do not retry or guess"}
+        finally:
+            logger.info("llm_client.voice_search_latency", elapsed_ms=round((time.monotonic() - started) * 1000),
+                        timeout_s=budget)
+
     async def _handle_web_search(self, query: str) -> dict[str, Any]:
         """Execute one web_search call via the dedicated MiMo sub-service.
 
@@ -1205,7 +1453,14 @@ class LLMClient:
 
         body: dict[str, Any] = {
             "model": MIMO_WEB_SEARCH_MODEL,
-            "messages": [{"role": "user", "content": query}],
+            "messages": [
+                {"role": "system", "content": (
+                    f"查询日期：{time.strftime('%Y-%m-%d %Z')}。检索用户所需的最新事实。"
+                    "只返回可核验的要点、来源链接和资料日期，最多200字。"
+                    "遇到Loading或缺失字段，明确标记未知；不要用其他日期的天气或常识补全。"
+                )},
+                {"role": "user", "content": query},
+            ],
             "tools": self._build_web_search_tools(),
             "max_completion_tokens": max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS),
             "temperature": self._config.temperature,
@@ -1264,6 +1519,49 @@ class LLMClient:
         """
         return (self._config.message_type or "openai").strip().lower() == "anthropic"
 
+    def _primary_request_target(self, model_override: str | None) -> _RequestTarget:
+        return _RequestTarget(
+            provider=str(LLMConfig.normalize_provider_alias(self._config.provider) or "").strip().lower(),
+            api_base=self._api_base.rstrip("/"),
+            api_key=self._config.api_key,
+            model=model_override or self._config.fast_model,
+        )
+
+    def _mimo_fallback_target(self, model_override: str | None) -> _RequestTarget | None:
+        """Return the configured MiMo fallback, only when it can really run."""
+        if not self._config.fallback_enabled:
+            return None
+        provider = str(LLMConfig.normalize_provider_alias(self._config.fallback_provider) or "").strip().lower()
+        api_base = str(self._config.fallback_api_base or "").strip().rstrip("/")
+        api_key = str(self._config.fallback_api_key or "").strip()
+        if provider != "mimo" or not api_base or not api_key:
+            return None
+        # Audio input is MiMo-specific. When it is selected, preserve the
+        # explicit omni model rather than silently replacing it with text-only
+        # mimo-v2.5.
+        model = (
+            model_override
+            if (model_override or "").strip().lower().startswith("mimo-")
+            else self._config.fallback_model
+        )
+        return _RequestTarget(provider=provider, api_base=api_base, api_key=api_key, model=model)
+
+    @staticmethod
+    def _is_mimo_target(target: _RequestTarget) -> bool:
+        return target.provider == "mimo" or target.model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+
+    @staticmethod
+    def _is_deepseek_target(target: _RequestTarget) -> bool:
+        return target.provider == "deepseek" or target.model.strip().lower().startswith("deepseek-")
+
+    @staticmethod
+    def _request_headers(target: _RequestTarget) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
+        if target.provider == "mimo":
+            # MiMo documents both variants across its compatible surfaces.
+            headers["api-key"] = target.api_key
+        return headers
+
     async def _chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -1283,7 +1581,8 @@ class LLMClient:
                 model_override=model_override,
             )
 
-        if not self._config.api_key:
+        request_target = self._primary_request_target(model_override)
+        if not request_target.api_key:
             return None
 
         try:
@@ -1292,30 +1591,44 @@ class LLMClient:
             logger.warning("llm_client.no_httpx", msg="Install httpx for LLM support")
             return None
 
-        model = model_override or self._config.fast_model
-        is_mimo = model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+        model = request_target.model
+        is_mimo = self._is_mimo_target(request_target)
+        is_deepseek = self._is_deepseek_target(request_target)
 
         request_messages = self._prepare_messages_for_request(messages)
         body: dict[str, Any] = {
             "model": model,
             "messages": request_messages,
             "tools": tools,
-            "tool_choice": tool_choice,
-            "temperature": self._config.temperature,
+            "tool_choice": "auto" if is_deepseek else tool_choice,
         }
         if is_mimo:
             body["max_completion_tokens"] = max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
+            body["thinking"] = {"type": "disabled"}
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        elif is_deepseek:
+            body["max_tokens"] = self._config.max_tokens
+            body["thinking"] = {"type": "disabled"}
+            body["temperature"] = self._config.temperature
         else:
             body["max_tokens"] = self._config.max_tokens
+            body["temperature"] = self._config.temperature
 
-        headers = {
-            "Authorization": f"Bearer {self._config.api_key}",
-            "Content-Type": "application/json",
-        }
-        logger.info(log_name, model=model, api_base=self._api_base, **(log_context or {}))
+        headers = self._request_headers(request_target)
+        logger.info(
+            log_name,
+            model=model,
+            provider=request_target.provider,
+            api_base=request_target.api_base,
+            **(log_context or {}),
+        )
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout_s) as client:
-                resp = await client.post(f"{self._api_base}/chat/completions", json=body, headers=headers)
+                resp = await client.post(
+                    f"{request_target.api_base}/chat/completions",
+                    json=body,
+                    headers=headers,
+                )
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as exc:
@@ -1415,6 +1728,9 @@ class LLMClient:
         enable_thinking: bool = False,
         on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+        _request_target: _RequestTarget | None = None,
+        _fallback_attempted: bool = False,
+        _fallback_reason: str | None = None,
     ) -> dict[str, Any] | None:
         """Streaming chat completion with delta callbacks.
 
@@ -1422,7 +1738,7 @@ class LLMClient:
         or *None* on failure.  ``reasoning_content`` and ``content`` token
         deltas are forwarded to the caller in real-time via the callbacks.
         """
-        if self._is_anthropic_message_type():
+        if _request_target is None and self._is_anthropic_message_type():
             return await self._stream_chat_completion_anthropic(
                 messages=messages,
                 tools=tools,
@@ -1435,7 +1751,18 @@ class LLMClient:
                 on_content_delta=on_content_delta,
             )
 
-        if not self._config.api_key:
+        primary_target = self._primary_request_target(model_override)
+        fallback_target = None if _fallback_attempted else self._mimo_fallback_target(model_override)
+        # MiMo is the only target that accepts the optional omni audio model.
+        # Do not send an ``input_audio`` request to DeepSeek just because it
+        # is the normal text-chat primary.
+        if _request_target is None and model_override and model_override.lower().startswith("mimo-"):
+            request_target = fallback_target or primary_target
+            fallback_target = None
+        else:
+            request_target = _request_target or primary_target
+
+        if not request_target.api_key:
             return None
 
         try:
@@ -1444,99 +1771,112 @@ class LLMClient:
             logger.warning("llm_client.no_httpx")
             return None
 
-        model = model_override or self._config.fast_model
-        is_mimo = model.strip().lower() in MIMO_WEB_SEARCH_MODELS
+        model = request_target.model
+        is_mimo = self._is_mimo_target(request_target)
+        is_deepseek = self._is_deepseek_target(request_target)
 
         request_messages = self._prepare_messages_for_request(messages)
         body: dict[str, Any] = {
             "model": model,
             "messages": request_messages,
             "tools": tools,
-            "tool_choice": tool_choice,
-            "temperature": self._config.temperature,
+            "tool_choice": "auto" if is_deepseek else tool_choice,
             "stream": True,
         }
         if is_mimo:
+            body["temperature"] = self._config.temperature
             body["max_completion_tokens"] = max(self._config.max_tokens, _MIMO_MIN_COMPLETION_TOKENS)
+            # Use the documented hosted-API switch, retaining the template
+            # option below for compatible/self-hosted deployments.
+            body["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
             if not enable_thinking:
                 body["chat_template_kwargs"] = {"enable_thinking": False}
+        elif is_deepseek:
+            body["max_tokens"] = self._config.max_tokens
+            # DeepSeek Flash enables thinking by default. Send its documented
+            # switch explicitly so conversational latency does not depend on
+            # provider defaults. Thinking mode ignores temperature anyway.
+            body["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
+            if enable_thinking:
+                body["reasoning_effort"] = "low"
+            else:
+                body["temperature"] = self._config.temperature
         else:
+            body["temperature"] = self._config.temperature
             body["max_tokens"] = self._config.max_tokens
 
-        headers = {
-            "Authorization": f"Bearer {self._config.api_key}",
-            "Content-Type": "application/json",
-        }
-        logger.info(log_name, model=model, stream=True, **(log_context or {}))
+        headers = self._request_headers(request_target)
+        logger.info(
+            log_name, model=model, provider=request_target.provider, api_base=request_target.api_base,
+            stream=True, fallback_reason=_fallback_reason, **(log_context or {}),
+        )
+        request_started_at = time.monotonic()
+        first_delta_ms: int | None = None
 
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
-        first_chunk_timeout_s = float(os.environ.get("LAMPGO_LLM_STREAM_FIRST_CHUNK_TIMEOUT_S", "12"))
+        saw_first_response = False
+        first_chunk_timeout_s = (
+            float(self._config.fallback_after_s) if fallback_target else
+            float(os.environ.get("LAMPGO_LLM_STREAM_FIRST_CHUNK_TIMEOUT_S", "12"))
+        )
 
-        async def _fallback_non_stream(reason: str) -> dict[str, Any] | None:
-            fallback_body = dict(body)
-            fallback_body["stream"] = False
+        async def _retry_mimo(reason: str) -> dict[str, Any] | None:
+            if fallback_target is None:
+                return None
             logger.warning(
-                "llm_client.stream_fallback_nonstream",
+                "llm_client.fallback_to_mimo",
                 reason=reason,
-                model=model,
-                timeout_s=first_chunk_timeout_s,
+                primary_provider=request_target.provider,
+                primary_model=request_target.model,
+                fallback_provider=fallback_target.provider,
+                fallback_model=fallback_target.model,
+                after_s=first_chunk_timeout_s,
             )
-            try:
-                timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(
-                        f"{self._api_base}/chat/completions",
-                        json=fallback_body,
-                        headers=headers,
-                    )
-                    resp.raise_for_status()
-                    return self._extract_message(resp.json())
-            except httpx.HTTPStatusError as exc:
-                logger.warning(
-                    "llm_client.nonstream_fallback_failed",
-                    status_code=exc.response.status_code,
-                    error_type=type(exc).__name__,
-                )
-                return None
-            except httpx.RequestError as exc:
-                logger.warning(
-                    "llm_client.nonstream_fallback_failed",
-                    error_type=type(exc).__name__,
-                    request_url=str(exc.request.url) if exc.request is not None else "",
-                )
-                return None
-            except Exception as exc:
-                logger.warning("llm_client.nonstream_fallback_failed", error_type=type(exc).__name__)
-                return None
+            return await self._stream_chat_completion(
+                messages=messages,
+                tools=tools,
+                log_name=log_name,
+                log_context=log_context,
+                tool_choice=tool_choice,
+                model_override=model_override,
+                enable_thinking=enable_thinking,
+                on_reasoning_delta=on_reasoning_delta,
+                on_content_delta=on_content_delta,
+                _request_target=fallback_target,
+                _fallback_attempted=True,
+                _fallback_reason=reason,
+            )
 
         try:
             timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
+                stream_context = client.stream(
                     "POST",
-                    f"{self._api_base}/chat/completions",
+                    f"{request_target.api_base}/chat/completions",
                     json=body,
                     headers=headers,
-                ) as resp:
+                )
+                # The provider can stall before it sends response headers, so
+                # the first-response deadline must cover connection, headers,
+                # and the first meaningful SSE delta — not only `aiter_lines`.
+                resp = await asyncio.wait_for(
+                    stream_context.__aenter__(), timeout=first_chunk_timeout_s,
+                )
+                try:
                     resp.raise_for_status()
                     line_iter = resp.aiter_lines().__aiter__()
-                    saw_first_chunk = False
                     while True:
                         try:
                             raw_line = await asyncio.wait_for(
                                 line_iter.__anext__(),
-                                timeout=first_chunk_timeout_s if not saw_first_chunk else 180.0,
+                                timeout=first_chunk_timeout_s if not saw_first_response else 180.0,
                             )
                         except StopAsyncIteration:
                             break
-                        except asyncio.TimeoutError:
-                            if not saw_first_chunk:
-                                fallback = await _fallback_non_stream("first_stream_chunk_timeout")
-                                if fallback is not None:
-                                    return fallback
+                        except TimeoutError:
                             raise
                         line = raw_line.strip()
                         if not line or not line.startswith("data:"):
@@ -1544,7 +1884,6 @@ class LLMClient:
                         payload = line[5:].strip()
                         if payload == "[DONE]":
                             break
-                        saw_first_chunk = True
                         try:
                             chunk = json.loads(payload)
                         except json.JSONDecodeError:
@@ -1557,7 +1896,15 @@ class LLMClient:
                         fr = choice_obj.get("finish_reason")
                         if fr:
                             finish_reason = fr
-                        delta = choice_obj.get("delta", {})
+                        delta = choice_obj.get("delta") or {}
+
+                        has_meaningful_delta = any(delta.get(key) for key in (
+                            "reasoning_content", "content", "tool_calls",
+                        ))
+                        if has_meaningful_delta:
+                            saw_first_response = True
+                        if first_delta_ms is None and has_meaningful_delta:
+                            first_delta_ms = round((time.monotonic() - request_started_at) * 1000)
 
                         rc = delta.get("reasoning_content")
                         if rc:
@@ -1586,22 +1933,48 @@ class LLMClient:
                                 tool_calls_map[idx]["function"]["name"] = fn["name"]
                             if "arguments" in fn:
                                 tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
+                finally:
+                    await stream_context.__aexit__(None, None, None)
 
+        except TimeoutError:
+            if not saw_first_response:
+                fallback = await _retry_mimo("first_response_timeout")
+                if fallback is not None:
+                    return fallback
+            logger.warning(
+                "llm_client.stream_failed", error_type="TimeoutError", provider=request_target.provider,
+                first_response_timeout_s=first_chunk_timeout_s,
+            )
+            return None
         except httpx.HTTPStatusError as exc:
+            if not saw_first_response and (exc.response.status_code in {408, 429} or exc.response.status_code >= 500):
+                fallback = await _retry_mimo(f"http_{exc.response.status_code}")
+                if fallback is not None:
+                    return fallback
             logger.warning(
                 "llm_client.stream_failed",
                 status_code=exc.response.status_code,
                 error_type=type(exc).__name__,
+                provider=request_target.provider,
             )
             return None
         except httpx.RequestError as exc:
+            if not saw_first_response:
+                fallback = await _retry_mimo("request_error")
+                if fallback is not None:
+                    return fallback
             logger.warning(
                 "llm_client.stream_failed",
                 error_type=type(exc).__name__,
                 request_url=str(exc.request.url) if exc.request is not None else "",
+                provider=request_target.provider,
             )
             return None
         except Exception as exc:
+            if not saw_first_response:
+                fallback = await _retry_mimo("unexpected_error")
+                if fallback is not None:
+                    return fallback
             logger.warning("llm_client.stream_failed", error_type=type(exc).__name__)
             return None
 
@@ -1610,6 +1983,20 @@ class LLMClient:
             message["reasoning_content"] = "".join(reasoning_parts)
         if tool_calls_map:
             message["tool_calls"] = [tool_calls_map[i] for i in sorted(tool_calls_map)]
+
+        if first_delta_ms is None:
+            fallback = await _retry_mimo("empty_stream")
+            if fallback is not None:
+                return fallback
+
+        logger.info(
+            "llm_client.stream_latency", model=model, provider=request_target.provider,
+            thinking_enabled=enable_thinking, fallback_reason=_fallback_reason,
+            elapsed_ms=round((time.monotonic() - request_started_at) * 1000),
+            first_delta_ms=first_delta_ms, reasoning_chars=sum(map(len, reasoning_parts)),
+            content_chars=sum(map(len, content_parts)), tool_calls=len(tool_calls_map),
+            turn_index=(log_context or {}).get("turn_index"),
+        )
 
         if finish_reason == "length":
             logger.warning(

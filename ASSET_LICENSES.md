@@ -5,6 +5,13 @@ says otherwise. The asset files listed here have their own license terms and are
 not relicensed by the software license. The `lampgo` name is kept as an internal
 package, command, configuration, and plugin identifier.
 
+## Third-party Browser Software
+
+`lampgo/web/static/vendor/livekit-client/2.22.3/` contains the official LiveKit
+browser client ESM bundle, distributed under Apache-2.0. Its original license,
+attribution notices, package source and integrity information are retained in
+that directory. This third-party code retains its own license.
+
 ## Runtime Visualization Assets
 
 | File | License | Notes |

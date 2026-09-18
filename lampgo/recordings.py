@@ -278,13 +278,14 @@ def list_recording_catalog(recordings_dir: Path) -> list[dict[str, str]]:
 def build_recording_actions_prompt(recordings_dir: Path) -> str:
     catalog = list_recording_catalog(recordings_dir)
     lines = [
-        "LED expression keys:",
-        f"- Use these exact mode names in tool calls: {', '.join(LED_EXPRESSION_KEYS)}.",
+        "Standalone LED expression keys (fallback only; prefer combined presets below):",
+        f"- LED-only mode names: {', '.join(LED_EXPRESSION_KEYS)}.",
         "Recorded action library (dynamic; loaded from CSV/TXT files):",
         "- Use `play_recording` with the exact `name` when the user's request, camera scene, emotion, "
         "or conversation context matches an action description.",
-        "- If a listed recording includes `expression_preset=...`, pass it to `play_recording` so C6 eyes "
-        "and the S3 LED panel start together. Otherwise use `expression=...` as the LED-only fallback.",
+        "- If a listed recording includes `expression_preset=...`, pass it to `play_recording` so screen eyes "
+        "and the LED mouth start together. Do not separately override its paired expression. "
+        "Otherwise use `expression=...` as the LED-only fallback.",
         "- Do not invent recording names. If no listed action fits, use another tool or speak instead.",
     ]
     if not catalog:

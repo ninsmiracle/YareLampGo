@@ -51,7 +51,7 @@ def test_recording_metadata_supports_expression_preset(tmp_path: Path) -> None:
 
     prompt = build_recording_actions_prompt(tmp_path)
     assert "expression_preset=happy | expression=heart" in prompt
-    assert "pass it to `play_recording` so C6 eyes" in prompt
+    assert "pass it to `play_recording` so screen eyes" in prompt
 
 
 class _FakeMotion:

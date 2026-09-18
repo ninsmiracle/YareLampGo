@@ -99,7 +99,7 @@ class PlayRecordingSkill(Skill):
             name="expression_preset",
             type="str",
             required=False,
-            description="Optional ExpressionPreset id looped on C6 eyes and S3 LED for the full recording playback",
+            description="Optional saved combined expression id looped on screen eyes and LED mouth during the recording",
         ),
         "playback_mode": ParameterSpec(
             name="playback_mode",

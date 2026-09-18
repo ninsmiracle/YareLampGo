@@ -57,8 +57,25 @@ def test_blank_mimo_base_url_uses_the_default_endpoint() -> None:
 
 def test_mimo_settings_reject_non_mimo_llm_key() -> None:
     llm = _llm().model_copy(update={"provider": "openai"})
-    with pytest.raises(ValueError, match="llm.provider"):
+    with pytest.raises(ValueError, match="MiMo API key"):
         mimo.build_mimo_speech_settings(llm, VoiceConfig())
+
+
+def test_mimo_speech_uses_dedicated_fallback_route_for_deepseek() -> None:
+    llm = LLMConfig(
+        provider="deepseek",
+        api_base="https://api.deepseek.com",
+        api_key="deepseek-key",
+        fallback_enabled=True,
+        fallback_provider="mimo",
+        fallback_api_base="https://api.xiaomimimo.com/v1",
+        fallback_api_key="mimo-key",
+    )
+
+    settings = mimo.build_mimo_speech_settings(llm, VoiceConfig())
+
+    assert settings.api_base == "https://api.xiaomimimo.com/v1"
+    assert settings.api_key == "mimo-key"
 
 
 def test_mimo_asr_uses_chat_completions_and_llm_auth(monkeypatch) -> None:

@@ -3,8 +3,8 @@
 Config loading priority (highest wins):
   1. CLI arguments
   2. Shell environment variables (LAMPGO_MOTOR_PORT, etc.)
-  3. .env file in project root (loaded as environment variables)
-  4. ~/.lampgo/credentials.json (LLM API keys)
+  3. ~/.lampgo/credentials.json (LLM API keys)
+  4. .env file in project root
   5. ~/.lampgo/config.toml (written by `lampgo onboard` + Web UI)
   6. Built-in defaults
 
@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv  # noqa: F401 - legacy test/plugin patch target
 from pydantic import BaseModel, Field, field_validator
 
 from lampgo.ipc import DEFAULT_SOCKET_PATH, DEFAULT_TCP_HOST, DEFAULT_TCP_PORT
@@ -240,8 +240,10 @@ class LEDConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM / AI model configuration.
 
-    Used by the intent router (M2) and complex task dispatch.
-    All API keys should be set via .env or environment variables, NOT in lampgo.toml.
+    Used by the intent router (M2) and complex task dispatch. API keys are
+    stored in ``~/.lampgo/credentials.json`` by the Web UI; project ``.env``
+    may provide a lower-priority development default and Shell variables are
+    explicit one-process overrides. Never store keys in lampgo.toml.
     """
 
     PROVIDER_ALIASES: ClassVar[dict[str, str]] = {
@@ -257,7 +259,7 @@ class LLMConfig(BaseModel):
         "mimo-anthropic": "mimo",
     }
 
-    provider: str = Field(default="openai", description="LLM provider: openai, anthropic, gemini, local")
+    provider: str = Field(default="openai", description="LLM provider: openai, deepseek, anthropic, gemini, local")
 
     @classmethod
     def normalize_provider_alias(cls, v: Any) -> Any:
@@ -327,6 +329,30 @@ class LLMConfig(BaseModel):
         default=False,
         description="默认是否允许聊天请求开启模型思考过程输出。建议仅调试推理模型时开启。",
     )
+    # A fast primary model can be unavailable or slow without making a voice
+    # conversation unusable. The fallback is deliberately a separate MiMo
+    # OpenAI-compatible target: it has its own API key and is only attempted
+    # before the primary model has emitted any visible content or tool call.
+    fallback_enabled: bool = Field(
+        default=False,
+        description="首选 LLM 在首个有效响应前超时或暂时不可用时，是否自动尝试备用 LLM。",
+    )
+    fallback_after_s: float = Field(
+        default=6.0,
+        ge=1.0,
+        le=60.0,
+        description="等待首选 LLM 首个有效响应的秒数；超时后才尝试备用模型。",
+    )
+    fallback_provider: str = Field(default="mimo", description="备用 LLM provider。默认 MiMo。")
+    fallback_model: str = Field(default="mimo-v2.5", description="备用 LLM 模型。")
+    fallback_api_base: str = Field(
+        default="https://api.xiaomimimo.com/v1",
+        description="备用 MiMo OpenAI-compatible API Base URL。",
+    )
+    fallback_api_key: str = Field(
+        default="",
+        description="备用 LLM API key；只从 .env 或 credentials.json 读取，不写入 config.toml。",
+    )
     # -------------------------------------------------------------------
     # Web search — MiMo-only, implemented as an **independent sub-service**.
     # -------------------------------------------------------------------
@@ -347,11 +373,10 @@ class LLMConfig(BaseModel):
     #   of what the primary LLM ``provider`` / ``message_type`` is set to.
     #   You can run the main loop against Anthropic / OpenAI / local Ollama
     #   and still get web search, as long as the user provides a MiMo key.
-    # * Credentials are intentionally **separate** from ``api_key``.  If
-    #   ``web_search_api_key`` is empty we fall back to reusing ``api_key``
-    #   **only when** the main ``provider`` is ``mimo`` (i.e. that same key
-    #   is already known to be a MiMo key).  For any other provider the
-    #   user must supply a dedicated MiMo key or the feature stays off.
+    # * Credentials are intentionally **separate** from ``api_key``. If
+    #   ``web_search_api_key`` is empty we reuse ``api_key`` only when the
+    #   main provider is MiMo, otherwise reuse the configured MiMo fallback
+    #   key. This never sends a non-MiMo primary key to the search service.
     # * The base URL and model are deliberately **not** user-configurable:
     #   the endpoint is fixed at ``https://api.xiaomimimo.com/v1`` and the
     #   model at ``mimo-v2.5-pro`` (see ``MIMO_WEB_SEARCH_BASE_URL`` /
@@ -368,8 +393,8 @@ class LLMConfig(BaseModel):
     web_search_api_key: str = Field(
         default="",
         description=(
-            "MiMo 联网搜索专用 API key（OpenAI-compat）。留空时，若主 LLM provider=mimo "
-            "则自动复用 LLMConfig.api_key，否则本功能被静默禁用（不会注册 web_search 工具）。"
+            "MiMo 联网搜索专用 API key（OpenAI-compat）。留空时，主 LLM 为 MiMo 则复用 "
+            "LLMConfig.api_key；其他主模型则复用已配置的 MiMo 备用 key。没有 MiMo key 时不注册 web_search 工具。"
             "与主 LLM key 一样，建议通过 credentials.json 持久化而不是写进 config 文件。"
         ),
     )
@@ -448,9 +473,15 @@ class DeviceEsp32Config(BaseModel):
 class VoiceConfig(BaseModel):
     """Voice / TTS / STT configuration."""
 
-    stt_provider: str = Field(default="mimo", description="STT provider: MiMo (reuses LLM credential)")
+    stt_provider: str = Field(
+        default="mimo",
+        description="STT provider: MiMo (uses the primary or configured MiMo fallback credential)",
+    )
     stt_model: str = Field(default="mimo-v2.5-asr", description="MiMo ASR model name")
-    tts_provider: str = Field(default="mimo", description="TTS provider: MiMo (reuses LLM credential)")
+    tts_provider: str = Field(
+        default="mimo",
+        description="TTS provider: MiMo (uses the primary or configured MiMo fallback credential)",
+    )
     tts_model: str = Field(
         default="mimo-v2.5-tts",
         description="MiMo TTS model name.",
@@ -647,7 +678,7 @@ def load_config(
     env_file: str | Path | None = None,
     cli_overrides: dict | None = None,
 ) -> LampgoConfig:
-    """Load configuration with the priority chain: CLI > env/.env > credentials > user toml > defaults.
+    """Load configuration with the priority chain: CLI > shell env > credentials > .env > user toml > defaults.
 
     Args:
         config_path: Deprecated. Accepted for backwards compatibility but ignored;
@@ -669,18 +700,24 @@ def load_config_with_provenance(
 ) -> tuple[LampgoConfig, dict[str, str]]:
     """Like :func:`load_config` but also returns a ``{dotted_path: source}`` map.
 
-    Sources are one of ``"default"``, ``"user_config"``, ``"credentials"``,
-    ``"env"``, ``"cli"`` — matching the order config layers are applied. This is
+    Sources are one of ``"default"``, ``"user_config"``, ``"env_file"``,
+    ``"credentials"``, ``"env"``, ``"cli"`` — matching the order config layers are applied. This is
     what the Web UI uses to mark fields as "overridden by .env" so we can grey
     them out and hint the user to remove the env var before editing.
     """
     project_root = _find_project_root()
 
-    # 1. Load .env file (populates os.environ for secrets)
+    # 1. Parse the project .env without merging it into process environment.
+    # Credentials are the durable, user-facing source of truth and therefore
+    # intentionally override .env. Explicit shell variables still win later.
     if env_file is None:
         env_file = project_root / ".env"
+    env_file_values: dict[str, str] = {}
     if Path(env_file).exists():
-        load_dotenv(env_file)
+        env_file_values = {
+            key: value for key, value in dotenv_values(env_file).items()
+            if value is not None
+        }
 
     # 2. Start from built-in defaults — every field begins as "default".
     config = LampgoConfig()
@@ -688,7 +725,7 @@ def load_config_with_provenance(
     for dotted in _enumerate_config_paths(config):
         provenance[dotted] = "default"
 
-    # 3. Merge user overrides from ~/.lampgo/config.toml and credentials.json.
+    # 3. Merge normal user configuration, then project .env values.
     user_overrides: dict = {}
     try:
         from lampgo.personastore import get_credentials, get_overrides_toml
@@ -700,13 +737,40 @@ def load_config_with_provenance(
             for dotted in _flatten_dict_keys(user_overrides):
                 if dotted in provenance:
                     provenance[dotted] = "user_config"
+        env_file_fields = _apply_env_overrides(config, track=True, environ=env_file_values)
+        for dotted in env_file_fields:
+            provenance[dotted] = "env_file"
+
+        # credentials.json intentionally has higher precedence than .env.
         creds = get_credentials()
         if creds:
-            llm_key = str(creds.get("llm_api_key") or creds.get("api_key") or "").strip()
-            if llm_key:
-                config.llm.api_key = llm_key
+            # ``llm_api_key`` is the legacy active-provider slot. Keep it
+            # readable for old installations, but give DeepSeek and MiMo
+            # dedicated names so a DeepSeek primary never accidentally sends
+            # a MiMo credential to api.deepseek.com.
+            credential_provider = str(creds.get("llm_primary_provider") or "").strip().lower()
+            legacy_key = str(creds.get("llm_api_key") or creds.get("api_key") or "").strip()
+            deepseek_key = str(creds.get("deepseek_api_key") or "").strip()
+            mimo_key = str(creds.get("mimo_api_key") or "").strip()
+            provider = str(LLMConfig.normalize_provider_alias(config.llm.provider) or "").strip().lower()
+            if not deepseek_key and credential_provider == "deepseek":
+                deepseek_key = legacy_key
+            if not mimo_key and credential_provider in {"", "mimo"}:
+                mimo_key = legacy_key
+
+            if provider == "deepseek":
+                primary_key = deepseek_key or config.llm.api_key
+            elif provider == "mimo":
+                primary_key = mimo_key or legacy_key
+            else:
+                primary_key = legacy_key
+            if primary_key:
+                config.llm.api_key = primary_key
                 provenance["llm.api_key"] = "credentials"
-            ws_key = str(creds.get("llm_web_search_api_key") or "").strip()
+            if mimo_key or config.llm.fallback_api_key:
+                config.llm.fallback_api_key = mimo_key or config.llm.fallback_api_key
+                provenance["llm.fallback_api_key"] = "credentials"
+            ws_key = str(creds.get("llm_web_search_api_key") or "").strip() or mimo_key
             if ws_key:
                 config.llm.web_search_api_key = ws_key
                 provenance["llm.web_search_api_key"] = "credentials"
@@ -714,7 +778,7 @@ def load_config_with_provenance(
         # Never let a bad user file block startup.
         pass
 
-    # 4. Apply environment variable overrides
+    # 4. Apply explicit shell environment variable overrides.
     env_fields = _apply_env_overrides(config, track=True)
     for dotted in env_fields:
         provenance[dotted] = "env"
@@ -757,13 +821,19 @@ def _flatten_dict_keys(data: dict, prefix: str = "") -> list[str]:
     return out
 
 
-def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[str]:
+def _apply_env_overrides(
+    config: LampgoConfig,
+    *,
+    track: bool = False,
+    environ: dict[str, str] | None = None,
+) -> list[str]:
     """Override config fields from LAMPGO_* environment variables.
 
     When ``track=True`` returns a list of dotted paths that were actually
     overridden; otherwise returns an empty list.
     """
     changed: list[str] = []
+    source_env = environ if environ is not None else os.environ
     env_map = {
         "LAMPGO_MOTOR_TRANSPORT": ("device", "motor_transport"),
         "LAMPGO_MOTOR_PORT": ("device", "motor_port"),
@@ -781,6 +851,12 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_LLM_FAST_MODEL": ("llm", "fast_model"),
         "LAMPGO_LLM_ENABLE_THINKING": ("llm", "enable_thinking"),
         "LAMPGO_LLM_TIMEOUT_S": ("llm", "timeout_s"),
+        "LAMPGO_LLM_FALLBACK_ENABLED": ("llm", "fallback_enabled"),
+        "LAMPGO_LLM_FALLBACK_AFTER_S": ("llm", "fallback_after_s"),
+        "LAMPGO_LLM_FALLBACK_PROVIDER": ("llm", "fallback_provider"),
+        "LAMPGO_LLM_FALLBACK_MODEL": ("llm", "fallback_model"),
+        "LAMPGO_LLM_FALLBACK_API_BASE": ("llm", "fallback_api_base"),
+        "LAMPGO_LLM_FALLBACK_API_KEY": ("llm", "fallback_api_key"),
         "LAMPGO_LLM_WEB_SEARCH_ENABLED": ("llm", "web_search_enabled"),
         "LAMPGO_LLM_WEB_SEARCH_API_KEY": ("llm", "web_search_api_key"),
         "LAMPGO_LLM_WEB_SEARCH_FORCE": ("llm", "web_search_force"),
@@ -820,7 +896,7 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
         "LAMPGO_WEB_PORT": ("web", "port"),
     }
     for env_key, (section, field) in env_map.items():
-        value = os.environ.get(env_key)
+        value = source_env.get(env_key)
         if value is None:
             continue
         if section is None:
@@ -835,19 +911,36 @@ def _apply_env_overrides(config: LampgoConfig, *, track: bool = False) -> list[s
             if track:
                 changed.append(f"{section}.{field}")
 
+    # Explicit provider keys are safer than overloading LAMPGO_LLM_API_KEY
+    # when both DeepSeek and MiMo are configured in one process.
+    deepseek_key = source_env.get("LAMPGO_DEEPSEEK_API_KEY")
+    if deepseek_key and str(config.llm.provider).strip().lower() == "deepseek":
+        config.llm.api_key = deepseek_key
+        if track:
+            changed.append("llm.api_key")
+    mimo_key = source_env.get("LAMPGO_MIMO_API_KEY")
+    if mimo_key:
+        config.llm.fallback_api_key = mimo_key
+        if str(config.llm.provider).strip().lower() == "mimo" and not source_env.get("LAMPGO_LLM_API_KEY"):
+            config.llm.api_key = mimo_key
+            if track:
+                changed.append("llm.api_key")
+        if track:
+            changed.append("llm.fallback_api_key")
+
     # LAMPGO_API_BASE is a convenience override for local integrations: one
     # URL determines where LampGo listens. Individual LAMPGO_WEB_* vars still
     # win when a caller needs a split host/port override.
-    api_base = os.environ.get("LAMPGO_API_BASE", "").strip()
+    api_base = source_env.get("LAMPGO_API_BASE", "").strip()
     if api_base:
         parsed = _parse_api_base(api_base)
         if parsed is not None:
             host, port = parsed
-            if "LAMPGO_WEB_HOST" not in os.environ and host:
+            if "LAMPGO_WEB_HOST" not in source_env and host:
                 config.web.host = host
                 if track:
                     changed.append("web.host")
-            if "LAMPGO_WEB_PORT" not in os.environ and port:
+            if "LAMPGO_WEB_PORT" not in source_env and port:
                 config.web.port = port
                 if track:
                     changed.append("web.port")

@@ -21,7 +21,7 @@ logger = structlog.get_logger(__name__)
 PRIORITY_SKILLS = {"estop", "return_safe"}
 
 _MOTION_SKILLS = {
-    "nod", "headshake", "look_at", "idle_sway",
+    "nod", "headshake", "look_at", "idle_sway", "conversation_gesture",
     "dance_to_music", "cat_teaser",
     "move_to", "return_safe", "estop",
     "presence_react", "face_follow",
@@ -77,6 +77,16 @@ class SkillExecutor:
             )
 
         recovery_exception = self._allow_return_safe_recovery and skill_id in {"return_safe", "estop"}
+        companion = skill_id == "conversation_gesture" or bool(params.get("preserve_activity"))
+        clock = getattr(ctx, "clock", None)
+        ocean = getattr(ctx, "electronic_ocean", None)
+        if companion and (
+            self.is_busy
+            or (clock is not None and clock.snapshot().get("enabled"))
+            or (ocean is not None and ocean.snapshot().get("enabled"))
+        ):
+            return InvokeResult(invocation_id=invocation_id, status="rejected",
+                                error_code="foreground_skill_running", error_detail="Preserving foreground activity")
         if skill_id != "estop" and skill_id in _MOTION_SKILLS and self._motion_block_reason and not recovery_exception:
             logger.warning(
                 "executor.motion_blocked_hardware_unavailable",
@@ -116,6 +126,10 @@ class SkillExecutor:
                 ctx.electronic_ocean.deactivate()
 
         async with self._lock:
+            if companion and self.is_busy:
+                return InvokeResult(invocation_id=invocation_id, status="rejected",
+                                    error_code="foreground_skill_running",
+                                    error_detail="Reply gesture must not preempt a foreground skill")
             # Normal skills keep rapid-click last-writer-wins semantics.  A
             # positive-priority safety skill, however, must finish unless the
             # replacement has strictly higher priority (estop may interrupt

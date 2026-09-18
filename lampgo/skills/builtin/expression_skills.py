@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from lampgo.core.led import LED_EXPRESSIONS, canonical_expression_name
@@ -11,14 +12,24 @@ from lampgo.skills.base import ParameterSpec, Skill, SkillContext
 
 class SetExpressionSkill(Skill):
     skill_id = "set_expression"
-    description = "Play a dynamic expression preset, eye clip, or LED effect without saving a new preset."
+    description = (
+        "Express emotion using an existing combined screen-eye and LED-mouth preset. "
+        "Prefer a matching saved preset from the expression catalog, including during conversation. "
+        "Standalone eye clips or LED effects remain available; nothing new is saved."
+    )
     parameters = {
+        "preserve_activity": ParameterSpec(
+            name="preserve_activity", type="bool", required=False, default=False,
+            description="For conversational faces: skip if a foreground task or display/lighting mode owns the device.",
+        ),
         "expression": ParameterSpec(
             name="expression",
             type="str",
             description=(
-                "Expression preset, eye clip, or LED effect id. Built-ins include: "
-                f"{', '.join(LED_EXPRESSIONS.keys())}. Dynamic ids are listed by /api/expressions."
+                "Prefer an exact preset_id from Saved combined presets in the system prompt; "
+                "labels/descriptions explain when to use each preset. "
+                "Standalone LED-only fallback keys: "
+                f"{', '.join(LED_EXPRESSIONS.keys())}."
             ),
         ),
         "brightness": ParameterSpec(
@@ -29,11 +40,18 @@ class SetExpressionSkill(Skill):
             description="Brightness request from 1 to 96; the global LED ceiling still applies.",
         ),
         "playback": ParameterSpec(
-            name="playback", type="str", required=False, default="once", description="once or loop"
+            name="playback", type="str", required=False, default="loop",
+            description="loop keeps the face animated; once plays one cycle and holds the final frame",
         ),
     }
 
     async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        # LED transport uses synchronous HTTP (including pairing challenges).
+        # Keep it off the event loop that forwards and acknowledges microphone
+        # frames; a slow expression request must not starve voice transport.
+        return await asyncio.to_thread(self._execute_sync, ctx, **params)
+
+    def _execute_sync(self, ctx: SkillContext, **params: Any) -> SkillResult:
         expression = params.get("expression") or params.get("mode") or ""
         if not expression:
             return SkillResult(status="error", message="Expression name required")
@@ -42,7 +60,7 @@ class SetExpressionSkill(Skill):
         if canonical is None:
             ok, composition = ctx.led.play_expression(
                 str(expression),
-                playback=str(params.get("playback") or "once"),
+                playback=str(params.get("playback") or "loop"),
                 led_params={"brightness": min(96, int(params.get("brightness") or 64))},
             )
             if not ok or composition is None:

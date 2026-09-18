@@ -352,6 +352,69 @@ class IdleSwaySkill(Skill):
             self._motion.stop_immediate()
 
 
+class ConversationGestureSkill(Skill):
+    """Small, bounded reply gestures around the current pose, with no camera I/O."""
+
+    skill_id = "conversation_gesture"
+    description = "Brief speech companion: idle_sway (gentle random sway) or playful_sway (small cat-teaser-like sway)."
+    parameters = {
+        "style": ParameterSpec(name="style", type="str", required=False, default="idle_sway",
+                               description="idle_sway or playful_sway; no tracking, recording or continuous mode"),
+        "duration": ParameterSpec(name="duration", type="float", required=False, default=5.0,
+                                  description="Seconds, limited to 3–8"),
+    }
+    _motion = None
+
+    async def execute(self, ctx: SkillContext, **params: Any) -> SkillResult:
+        style = params.get("style", "idle_sway")
+        if style not in {"idle_sway", "playful_sway"}:
+            return SkillResult(status="error", message="unknown conversation gesture")
+        duration = float(params.get("duration", 5.0))
+        if not math.isfinite(duration):
+            return SkillResult(status="error", message="duration must be finite")
+        duration = min(8.0, max(3.0, duration))
+        axes = {"base_yaw": 1.2, "base_pitch": 2.5} if style == "idle_sway" else {
+            "base_yaw": 3.0, "base_pitch": 1.8, "wrist_pitch": 2.0,
+        }
+        centre = {joint: ctx.state.get(joint, float("nan")) for joint in axes}
+        for joint, angle in centre.items():
+            limits = DEFAULT_JOINT_LIMITS[joint]
+            lo, hi = limits.min, limits.max
+            if not math.isfinite(angle) or not lo <= angle <= hi:
+                return SkillResult(status="error", message="current pose is outside gesture limits")
+        direction = random.choice((-1.0, 1.0))
+        count = round(duration * _FPS)
+        frames = []
+        for step in range(count + 1):
+            elapsed = step / _FPS
+            envelope = math.sin(math.pi * step / count) ** 2
+            phase = elapsed * (1.4 if style == "idle_sway" else 1.8)
+            offsets = {"base_yaw": math.sin(phase), "base_pitch": math.sin(phase * 1.9),
+                       "wrist_pitch": math.sin(phase * 1.35)}
+            frame = {}
+            for joint, amplitude in axes.items():
+                limits = DEFAULT_JOINT_LIMITS[joint]
+                lo, hi = limits.min, limits.max
+                angle = centre[joint] + direction * amplitude * offsets[joint] * envelope
+                frame[joint] = min(hi, max(lo, angle))
+            frames.append(frame)
+        frames[0] = dict(centre)
+        frames[-1] = dict(centre)
+        self._motion = ctx.motion
+        try:
+            done = ctx.motion.stream_frames(frames, fps=_FPS)
+            if not await _await_done(done, duration + 4.0):
+                ctx.motion.stop_immediate()
+                return SkillResult(status="error", message="conversation gesture timed out")
+        finally:
+            self._motion = None
+        return SkillResult(status="ok", data={"style": style, "duration": duration, "centre": centre})
+
+    async def cancel(self) -> None:
+        if self._motion is not None:
+            self._motion.stop_immediate()
+
+
 class DanceSkill(Skill):
     """Rhythmic dance using pre-computed waypoint frames across three axes.
 
